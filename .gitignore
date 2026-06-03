@@ -36,8 +36,6 @@ venv/
 *.mp4
 *.mov
 *.jsonl
-# Keep the README demo clip (an exception to the audio/video ignore above).
-!Meet-OmniVoice-Manager.mp4
 
 # ── Node / web build ──────────────────────────────────────────────────────────
 node_modules/
