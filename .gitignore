@@ -34,6 +34,8 @@ venv/
 *.flac
 *.ogg
 *.jsonl
+# Keep the README demo clip (an exception to the audio ignore above).
+!Meet-OmniVoice-Manager.mp3
 
 # ── Node / web build ──────────────────────────────────────────────────────────
 node_modules/
