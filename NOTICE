@@ -1,0 +1,52 @@
+OmniVoice Manager
+Copyright 2026 OmniVoice Manager contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It is built on, bundles, or interoperates with the following open-source work,
+whose authors are gratefully acknowledged. Each remains under its own license.
+
+-------------------------------------------------------------------------------
+OmniVoice
+  The underlying zero-shot text-to-speech model and inference package.
+  Copyright Xiaomi Corp. / k2-fsa.
+  Licensed under the Apache License, Version 2.0.
+  https://github.com/k2-fsa/OmniVoice
+
+  The `omnivoice/` package in this repository originates from the upstream
+  project and is redistributed unmodified under its original license. All new
+  work in this repository lives under `manager/` (Python backend) and `web/`
+  (web UI).
+
+-------------------------------------------------------------------------------
+Mel-Band-RoFormer (vocal isolation + de-reverberation)
+  Architecture and reference implementation by Phil Wang (lucidrains).
+    https://github.com/lucidrains/BS-RoFormer
+  Vocal model and checkpoints by Kimberley Jensen.
+    https://github.com/KimberleyJensen/Mel-Band-Roformer-Vocal-Model
+  ComfyUI port referenced for the tested configuration by kijai.
+    https://github.com/kijai/ComfyUI-MelBandRoFormer
+  The model implementation in `manager/vocal_isolation/` is a port adapted for
+  the OmniVoice Manager.
+
+-------------------------------------------------------------------------------
+DeepFilterNet (optional neural denoise + mild de-reverb)
+  Copyright Hendrik Schröter (Rikorose).
+  Licensed under the MIT / Apache-2.0 dual license.
+  https://github.com/Rikorose/DeepFilterNet
+
+-------------------------------------------------------------------------------
+pyloudnorm (ITU-R BS.1770 / EBU R128 loudness measurement)
+  Copyright Christian Steinmetz.
+  Licensed under the MIT License.
+  https://github.com/csteinmetz1/pyloudnorm
+
+-------------------------------------------------------------------------------
+Whisper (automatic transcription of reference clips)
+  Copyright OpenAI.
+  Licensed under the MIT License.
+  https://github.com/openai/whisper
+
+-------------------------------------------------------------------------------
+Other notable dependencies: FastAPI, Uvicorn, PyTorch, torchaudio, librosa,
+soundfile, React, and Vite — each under its own permissive license.

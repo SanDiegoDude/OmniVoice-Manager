@@ -1,0 +1,57 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Secrets / config ──────────────────────────────────────────────────────────
+# Keep the template, never the real keys.
+.env
+.env.*
+!.env_sample
+
+# ── Model weights & caches (downloaded on first run) ──────────────────────────
+/models/
+/.cache*
+/download
+/local/
+
+# ── Runtime data & user content ───────────────────────────────────────────────
+/output/
+/data/
+/custom_voices/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.jsonl
+
+# ── Node / web build ──────────────────────────────────────────────────────────
+node_modules/
+web/dist/
+*.log
+
+# ── Editor / OS ───────────────────────────────────────────────────────────────
+.DS_Store
+.vscode/
+.idea/
+.claude/
+
+# ── Upstream OmniVoice scratch dirs ───────────────────────────────────────────
+/exp*/
+/.tmp/
+/results/
+results/
+example.py
+examples/data*
+examples/download*
+examples/exp*
