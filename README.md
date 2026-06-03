@@ -2,6 +2,9 @@
 
 A modern, browser-based studio and JSON API for [OmniVoice](https://github.com/k2-fsa/OmniVoice) zero-shot text-to-speech — built to make multi-speaker, production-quality voice generation fast and pleasant, without Gradio.
 
+<img width="2547" height="1255" alt="image" src="https://github.com/user-attachments/assets/f55f579f-5c9f-4dfd-b56c-5a3b2745330d" />
+
+
 OmniVoice generates a single utterance per call. The Manager wraps it with everything needed to turn that primitive into finished audio: multi-speaker dialogue stitching, reference-audio cleanup, perceptual loudness matching, an AI scriptwriter, a rich audio editor, and a clean API for automation.
 
 ---
