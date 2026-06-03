@@ -4,8 +4,11 @@ A modern, browser-based studio and JSON API for [OmniVoice](https://github.com/k
 
 <img width="2547" height="1255" alt="image" src="https://github.com/user-attachments/assets/f55f579f-5c9f-4dfd-b56c-5a3b2745330d" />
 
-> **Hear it:** [`Meet-OmniVoice-Manager.mp3`](Meet-OmniVoice-Manager.mp3) — a short multi-speaker demo produced entirely with the Manager.
-> *(Encoded to MP3 to keep the repository lightweight.)*
+**Hear it** — a short multi-speaker demo produced entirely with the Manager:
+
+<video src="https://github.com/SanDiegoDude/OmniVoice-Manager/raw/main/Meet-OmniVoice-Manager.mp4" controls muted width="100%"></video>
+
+*(Packaged as a small MP4 — the audio over a still frame — to keep the repository lightweight while letting it play inline. [Direct link.](https://github.com/SanDiegoDude/OmniVoice-Manager/raw/main/Meet-OmniVoice-Manager.mp4))*
 
 OmniVoice generates a single utterance per call. The Manager wraps it with everything needed to turn that primitive into finished audio: multi-speaker dialogue stitching, reference-audio cleanup, perceptual loudness matching, an AI scriptwriter, a rich audio editor, and a clean API for automation.
 
