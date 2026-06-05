@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
-import type { GenerateBody, HistoryEntry, Job, OutputFile, Provider, SpeakerConfig, SystemInfo, Voice, VoiceNode } from './api'
+import type { GenerateBody, HistoryEntry, Job, MultitrackSession, OutputFile, Provider, SpeakerConfig, SystemInfo, Voice, VoiceNode } from './api'
 import { SidePanel } from './components/SidePanel'
 import { Studio, type Injected } from './components/Studio'
 import { TopBar } from './components/TopBar'
@@ -18,6 +18,9 @@ export default function App() {
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [outputs, setOutputs] = useState<OutputFile[]>([])
   const [job, setJob] = useState<Job | null>(null)
+  const [session, setSession] = useState<MultitrackSession | null>(null)
+  const [regenIndex, setRegenIndex] = useState<number | null>(null)
+  const [finalizing, setFinalizing] = useState(false)
   const [scriptBusy, setScriptBusy] = useState(false)
   const [injected, setInjected] = useState<Injected>({ nonce: 0, script: '' })
   const [providers, setProviders] = useState<Provider[]>([])
@@ -118,12 +121,19 @@ export default function App() {
         const j = await api.job(job.id)
         setJob(j)
         if (j.status === 'done') {
-          notify('Generation complete', 'success')
+          if (j.result?.session) {
+            setSession(j.result.session)
+            setRegenIndex(null)
+            notify(j.result.regenerated_index !== undefined ? 'Segment regenerated' : 'Scene ready — edit in multitrack', 'success')
+          } else {
+            notify('Generation complete', 'success')
+          }
           refreshHistory()
           refreshOutputs()
           refreshInfo()
         } else if (j.status === 'error') {
           notify('Generation failed', 'error')
+          setRegenIndex(null)
         }
       } catch {
         /* ignore */
@@ -207,12 +217,40 @@ export default function App() {
   }
 
   // ---- generation ----
-  const startGenerate = async (body: GenerateBody, _title: string) => {
+  const startGenerate = async (body: GenerateBody, _title: string, multitrack = false) => {
     try {
-      const { job_id } = await api.generate(body)
-      setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: {} })
+      setSession(null)
+      const { job_id } = multitrack ? await api.multitrackGenerate(body) : await api.generate(body)
+      setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: { multitrack } })
     } catch (e) {
       notify(String(e), 'error')
+    }
+  }
+
+  const regenSegment = async (index: number) => {
+    if (!session) return
+    try {
+      setRegenIndex(index)
+      const { job_id } = await api.regenSegment(session.id, index)
+      setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: { multitrack: true, regen: index } })
+    } catch (e) {
+      notify(String(e), 'error')
+      setRegenIndex(null)
+    }
+  }
+
+  const finalizeSession = async () => {
+    if (!session) return
+    setFinalizing(true)
+    try {
+      const r = await api.finalizeSession(session.id)
+      notify(`Finalized “${r.title || session.title}” → saved to history`, 'success')
+      refreshHistory()
+      refreshOutputs()
+    } catch (e) {
+      notify(String(e), 'error')
+    } finally {
+      setFinalizing(false)
     }
   }
 
@@ -296,11 +334,16 @@ export default function App() {
           injected={injected}
           providers={providers}
           activeProvider={activeProvider}
+          session={session}
+          regenIndex={regenIndex}
+          finalizing={finalizing}
           onSelectProvider={selectProvider}
           onReloadProviders={reloadProviders}
           onGenerate={startGenerate}
           onGenerateScript={generateScript}
           onLucky={startGenerate}
+          onRegenSegment={regenSegment}
+          onFinalize={finalizeSession}
           notify={notify}
         />
 

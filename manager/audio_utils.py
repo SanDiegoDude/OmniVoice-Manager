@@ -25,6 +25,50 @@ def save_wav(path: str | Path, audio: np.ndarray, sr: int = TARGET_SR) -> None:
     sf.write(str(path), audio, sr)
 
 
+_MEDIA_TYPES = {
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".flac": "audio/flac",
+}
+
+
+def media_type_for(path: str | Path) -> str:
+    return _MEDIA_TYPES.get(Path(path).suffix.lower(), "application/octet-stream")
+
+
+def encode_audio(
+    path: str | Path,
+    audio: np.ndarray,
+    sr: int = TARGET_SR,
+    fmt: str = "mp3",
+    bitrate: str = "192k",
+) -> Path:
+    """Write mono audio to ``path`` in ``fmt`` (wav lossless, or a compressed
+    codec via ffmpeg/pydub). Falls back to WAV if the encoder is unavailable so
+    a job never loses its output."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
+    fmt = (fmt or "mp3").lower().lstrip(".")
+    if fmt == "wav":
+        sf.write(str(path), audio, sr)
+        return path
+    try:
+        from pydub import AudioSegment
+
+        pcm = (audio * 32767.0).astype("<i2").tobytes()
+        seg = AudioSegment(data=pcm, sample_width=2, frame_rate=sr, channels=1)
+        seg.export(str(path), format=fmt, bitrate=bitrate)
+        return path
+    except Exception:  # noqa: BLE001 — ffmpeg/pydub missing or codec error
+        fallback = path.with_suffix(".wav")
+        sf.write(str(fallback), audio, sr)
+        return fallback
+
+
 def rms(audio: np.ndarray) -> float:
     if audio.size == 0:
         return 0.0

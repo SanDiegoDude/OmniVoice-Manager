@@ -46,6 +46,10 @@ class Settings:
     # model (isolation / dereverb) before the TTS model loads, minimizing the
     # peak VRAM at the cost of some speed. Great for smaller consumer GPUs.
     low_vram: bool = False
+    # Output encoding for finished renders + history. MP3 keeps files small and
+    # universally shareable (socials/messaging) without audible loss for speech.
+    output_format: str = "mp3"  # mp3 | wav | m4a | ogg
+    output_bitrate: str = "192k"
     # Pre-load the model at startup (only relevant when not in LOD mode).
     eager_load: bool = False
     host: str = "0.0.0.0"

@@ -19,11 +19,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import history, scripts_ai, service, voices
+from . import history, scripts_ai, service, sessions, voices
 from .audio_utils import (
     apply_gain_db,
     duration_seconds,
     load_audio,
+    media_type_for,
     normalize_rms,
     peak_normalize,
     save_wav,
@@ -320,6 +321,46 @@ def get_job(job_id: str):
     return job
 
 
+@app.post("/api/multitrack/generate")
+def multitrack_generate(req: GenerateRequest):
+    """Generate a scene as individual, regenerable segments (multitrack editor)."""
+    title = req.title or "Untitled Scene"
+    try:
+        job_fn = service.make_multitrack_job(model_manager, req, title)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(400, str(e))
+    job_id = job_manager.submit(job_fn, meta={"title": title, "multitrack": True})
+    return {"job_id": job_id}
+
+
+@app.get("/api/multitrack/{sid}")
+def multitrack_get(sid: str):
+    session = sessions.get(sid)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    return session
+
+
+@app.post("/api/multitrack/{sid}/segment/{index}/regenerate")
+def multitrack_regen(sid: str, index: int):
+    try:
+        job_fn = service.make_regen_job(model_manager, sid, index)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(404, str(e))
+    job_id = job_manager.submit(job_fn, meta={"multitrack": True, "regen": index})
+    return {"job_id": job_id}
+
+
+@app.post("/api/multitrack/{sid}/finalize")
+def multitrack_finalize(sid: str):
+    try:
+        return service.finalize_session(sid)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/generate/script-and-speak")
 def script_and_speak(req: ScriptAndSpeakRequest):
     """One-shot: smart-script -> multi-speaker audio. Blocks until done.
@@ -427,7 +468,16 @@ def audio_output(filename: str):
     path = (OUTPUT_DIR / filename).resolve()
     if OUTPUT_DIR.resolve() not in path.parents or not path.exists():
         raise HTTPException(404, "Not found")
-    return FileResponse(path, media_type="audio/wav")
+    return FileResponse(path, media_type=media_type_for(path))
+
+
+@app.get("/api/audio/session/{sid}/{name}")
+def audio_session(sid: str, name: str):
+    try:
+        path = sessions.resolve_file(sid, name)
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(404, "Not found")
+    return FileResponse(path, media_type=media_type_for(path))
 
 
 @app.get("/api/audio/temp/{filename}")

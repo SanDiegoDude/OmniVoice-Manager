@@ -127,6 +127,7 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
         lines: List[Dict[str, Any]] = payload["lines"]
         params: Dict[str, Any] = payload.get("params", {})
         low_vram = bool(payload.get("low_vram", False))
+        multitrack = bool(payload.get("multitrack", False))
 
         from manager.audio_utils import match_loudness, normalize_rms, peak_limit
 
@@ -179,6 +180,7 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
             )
 
         speech: List[np.ndarray] = []
+        segments_out: List[Dict[str, Any]] = []
         total = len(lines)
         for idx, line in enumerate(lines):
             sid = str(line["speaker_id"])
@@ -206,9 +208,20 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
             )
             audio = model.generate(**kw)[0].astype(np.float32)
             speech.append(audio)
+            segments_out.append(
+                {"index": int(line.get("index", idx)), "speaker_id": sid, "text": text, "waveform": audio}
+            )
 
         if not speech:
             raise ValueError("No non-empty lines to generate.")
+
+        # Multitrack: hand back RAW per-segment audio (plus the cleaned reference
+        # for each clone speaker so single-segment regen is fast + consistent).
+        # The server owns stitching/loudness so a regenerated take re-levels
+        # against the whole conversation.
+        if multitrack:
+            refs_out = {sid: wav for sid, (wav, _spk_sr, _rt) in cleaned.items()}
+            return {"segments": segments_out, "refs": refs_out, "sample_rate": sr}
 
         # Perceptual loudness leveling (LUFS): match every utterance to a common
         # target so quiet/loud speakers sit at the same perceived volume. This is

@@ -9,8 +9,8 @@ from typing import Any, Callable, Dict, List
 
 import numpy as np
 
-from . import history, voices
-from .audio_utils import duration_seconds, save_wav
+from . import history, sessions, voices
+from .audio_utils import duration_seconds, encode_audio
 from .config import OUTPUT_DIR, settings
 from .generation import parse_script
 from .schemas import GenerateRequest, GenParams, SpeakerConfig
@@ -70,12 +70,16 @@ def build_generation_payload(req: GenerateRequest) -> Dict[str, Any]:
     }
 
 
+_OUTPUT_EXTS = (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".opus")
+
+
 def save_output(audio: np.ndarray, sr: int, title: str, num_speakers: int = 1) -> Dict[str, Any]:
     date = time.strftime("%Y%m%d-%H%M%S")
     slug = slugify(title)
-    filename = f"{date}_{num_speakers}spk_{slug}.wav"
-    path = OUTPUT_DIR / filename
-    save_wav(path, audio, sr)
+    fmt = settings.output_format
+    filename = f"{date}_{num_speakers}spk_{slug}.{fmt}"
+    path = encode_audio(OUTPUT_DIR / filename, audio, sr, fmt=fmt, bitrate=settings.output_bitrate)
+    filename = path.name  # encode_audio may fall back to .wav
     return {
         "filename": filename,
         "audio_url": f"/api/audio/output/{filename}",
@@ -87,7 +91,7 @@ def list_outputs(limit: int = 100) -> List[Dict[str, Any]]:
     if not OUTPUT_DIR.exists():
         return []
     files = sorted(
-        [p for p in OUTPUT_DIR.glob("*.wav") if not p.name.startswith("_")],
+        [p for p in OUTPUT_DIR.glob("*") if p.is_file() and p.suffix.lower() in _OUTPUT_EXTS and not p.name.startswith("_")],
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -102,6 +106,67 @@ def list_outputs(limit: int = 100) -> List[Dict[str, Any]]:
             }
         )
     return out
+
+
+def make_multitrack_job(
+    model_manager, req: GenerateRequest, title: str
+) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
+    """Generate a multi-speaker scene as individual, regenerable segments."""
+    payload = build_generation_payload(req)
+    for i, ln in enumerate(payload["lines"]):
+        ln["index"] = i
+    payload["multitrack"] = True
+    speakers_cfg = {k: v.model_dump() for k, v in req.speakers.items()}
+
+    def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+        result = model_manager.generate(payload, progress_cb=progress_cb)
+        session = sessions.create(
+            title=title,
+            speakers_cfg=speakers_cfg,
+            params=req.params.model_dump(),
+            gap_ms=req.params.gap_ms,
+            worker_result=result,
+            prompt=req.prompt or "",
+            script=req.script or req.text or "",
+        )
+        return {"session": session, "session_id": session["id"]}
+
+    return job
+
+
+def make_regen_job(
+    model_manager, sid: str, index: int
+) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
+    """Regenerate a single segment of a session and re-stitch the mix."""
+    payload = sessions.regen_payload(sid, index)
+
+    def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+        result = model_manager.generate(payload, progress_cb=progress_cb)
+        session = sessions.apply_regen(sid, index, result)
+        return {"session": session, "session_id": sid, "regenerated_index": index}
+
+    return job
+
+
+def finalize_session(sid: str) -> Dict[str, Any]:
+    """Bake a session's current mix into a normal output + history entry."""
+    info = sessions.finalize_info(sid)
+    saved = save_output(info["audio"], info["sample_rate"], info["title"], info["num_speakers"])
+    history.add_entry(
+        {
+            "type": "generation",
+            "title": info["title"],
+            "prompt": info["prompt"],
+            "script": info["script"],
+            "multi_speaker": info["num_speakers"] > 1,
+            "num_speakers": info["num_speakers"],
+            "speakers": info["speakers"],
+            "filename": saved["filename"],
+            "audio_url": saved["audio_url"],
+            "params": info["params"],
+        }
+    )
+    return {"title": info["title"], **saved}
 
 
 def make_generation_job(model_manager, req: GenerateRequest, title: str) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import type { GenParams, GenerateBody, Job, Provider, SpeakerConfig, Voice } from '../api'
+import type { GenParams, GenerateBody, Job, MultitrackSession, Provider, SpeakerConfig, Voice } from '../api'
 import { AudioPlayer } from './AudioPlayer'
+import { MultitrackEditor } from './MultitrackEditor'
 import { SpeakerCard } from './SpeakerCard'
 import { Slider, Toggle } from './ui'
 
@@ -49,11 +50,16 @@ export function Studio({
   injected,
   providers,
   activeProvider,
+  session,
+  regenIndex,
+  finalizing,
   onSelectProvider,
   onReloadProviders,
   onGenerate,
   onGenerateScript,
   onLucky,
+  onRegenSegment,
+  onFinalize,
   notify,
 }: {
   voices: Voice[]
@@ -62,11 +68,16 @@ export function Studio({
   injected: Injected
   providers: Provider[]
   activeProvider: string | null
+  session: MultitrackSession | null
+  regenIndex: number | null
+  finalizing: boolean
   onSelectProvider: (id: string) => void
   onReloadProviders: () => void
-  onGenerate: (body: GenerateBody, title: string) => void
+  onGenerate: (body: GenerateBody, title: string, multitrack?: boolean) => void
   onGenerateScript: (prompt: string, numSpeakers: number, speakers: SpeakerConfig[], existing: string) => Promise<{ title: string; script: string } | null>
-  onLucky: (body: GenerateBody, title: string) => void
+  onLucky: (body: GenerateBody, title: string, multitrack?: boolean) => void
+  onRegenSegment: (index: number) => void
+  onFinalize: () => void
   notify: (m: string, k?: 'info' | 'error' | 'success') => void
 }) {
   const [mode, setMode] = useState<'single' | 'multi'>('single')
@@ -76,6 +87,7 @@ export function Studio({
   const [aiPrompt, setAiPrompt] = useState('')
   const [params, setParams] = useState<GenParams>(defaultParams)
   const [showSettings, setShowSettings] = useState(false)
+  const [multitrack, setMultitrack] = useState(true)
 
   useEffect(() => {
     if (injected.nonce > 0) {
@@ -156,7 +168,7 @@ export function Studio({
       body.script = res.script
       body.text = mode === 'single' ? res.script : null
       body.title = res.title
-      onLucky(body, res.title)
+      onLucky(body, res.title, multitrack)
     }
   }
 
@@ -277,13 +289,20 @@ export function Studio({
         />
 
         <div className="flex-between" style={{ marginTop: 10 }}>
-          <button className="btn ghost sm" onClick={() => setShowSettings(!showSettings)}>
-            {showSettings ? '▾' : '▸'} Generation settings
-          </button>
+          <div className="row" style={{ gap: 14, alignItems: 'center' }}>
+            <button className="btn ghost sm" onClick={() => setShowSettings(!showSettings)}>
+              {showSettings ? '▾' : '▸'} Generation settings
+            </button>
+            <Toggle
+              checked={multitrack}
+              onChange={setMultitrack}
+              label="Multitrack editor"
+            />
+          </div>
           <button
             className="btn primary"
             disabled={running || !script.trim()}
-            onClick={() => onGenerate(buildBody(), title || 'Untitled Scene')}
+            onClick={() => onGenerate(buildBody(), title || 'Untitled Scene', multitrack)}
           >
             {running ? <span className="spinner" /> : '🎙'} Generate audio
           </button>
@@ -331,7 +350,7 @@ export function Studio({
       </div>
 
       {/* Progress / output */}
-      {running && (
+      {running && !session && (
         <div className="progress-box">
           <div className="row">
             <span className="spinner" />
@@ -369,7 +388,18 @@ export function Studio({
         </div>
       )}
 
-      {audioUrl && (
+      {session && (
+        <MultitrackEditor
+          session={session}
+          onRegen={onRegenSegment}
+          regenIndex={regenIndex}
+          busy={running}
+          onFinalize={onFinalize}
+          finalizing={finalizing}
+        />
+      )}
+
+      {!session && audioUrl && (
         <AudioPlayer
           key={audioUrl}
           url={audioUrl}

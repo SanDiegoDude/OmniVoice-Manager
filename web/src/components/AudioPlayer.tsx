@@ -49,6 +49,7 @@ export function AudioPlayer({
   autoPlay = true,
   showDownload = true,
   onTrimChange,
+  onTime,
 }: {
   url: string
   title?: string
@@ -56,6 +57,7 @@ export function AudioPlayer({
   autoPlay?: boolean
   showDownload?: boolean
   onTrimChange?: (start: number, end: number, duration: number) => void
+  onTime?: (cur: number, duration: number, playing: boolean) => void
 }) {
   const audioElRef = useRef<HTMLAudioElement | null>(null)
   const ctxRef = useRef<AudioContext | null>(null)
@@ -166,6 +168,11 @@ export function AudioPlayer({
   useEffect(() => {
     onTrimChange?.(start, end, duration)
   }, [start, end, duration, onTrimChange])
+
+  // Report playback position (drives the multitrack playhead).
+  useEffect(() => {
+    onTime?.(cur, duration, playing)
+  }, [cur, duration, playing, onTime])
 
   const ensureGraph = useCallback(() => {
     if (!audioElRef.current) return

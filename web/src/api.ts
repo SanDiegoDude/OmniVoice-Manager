@@ -68,9 +68,47 @@ export interface Job {
   id: string
   status: 'queued' | 'running' | 'done' | 'error'
   progress: { stage?: string; line?: number; total?: number; text?: string; message?: string; speaker?: string }
-  result: { title?: string; audio_url?: string; filename?: string; duration_s?: number } | null
+  result:
+    | {
+        title?: string
+        audio_url?: string
+        filename?: string
+        duration_s?: number
+        session?: MultitrackSession
+        session_id?: string
+        regenerated_index?: number
+      }
+    | null
   error: string | null
-  meta: { title?: string }
+  meta: { title?: string; multitrack?: boolean; regen?: number }
+}
+
+export interface MultitrackSegment {
+  index: number
+  speaker_id: string
+  text: string
+  start_s: number
+  duration_s: number
+  url: string
+}
+
+export interface MultitrackTrack {
+  speaker_id: string
+  name: string
+  mode: string
+  segments: MultitrackSegment[]
+}
+
+export interface MultitrackSession {
+  id: string
+  title: string
+  created?: string
+  sample_rate: number
+  gap_ms: number
+  total_duration_s: number
+  mix_url: string
+  tracks: MultitrackTrack[]
+  segment_count: number
 }
 
 export interface HistoryEntry {
@@ -171,6 +209,17 @@ export const api = {
   generate: (body: GenerateBody) =>
     jfetch<{ job_id: string }>('/api/generate', { method: 'POST', body: JSON.stringify(body) }),
   job: (id: string) => jfetch<Job>(`/api/jobs/${id}`),
+
+  multitrackGenerate: (body: GenerateBody) =>
+    jfetch<{ job_id: string }>('/api/multitrack/generate', { method: 'POST', body: JSON.stringify(body) }),
+  multitrackGet: (sid: string) => jfetch<MultitrackSession>(`/api/multitrack/${sid}`),
+  regenSegment: (sid: string, index: number) =>
+    jfetch<{ job_id: string }>(`/api/multitrack/${sid}/segment/${index}/regenerate`, { method: 'POST' }),
+  finalizeSession: (sid: string) =>
+    jfetch<{ title?: string; filename: string; audio_url: string; duration_s: number }>(
+      `/api/multitrack/${sid}/finalize`,
+      { method: 'POST' },
+    ),
 
   history: (kind?: string) =>
     jfetch<{ entries: HistoryEntry[] }>(`/api/history${kind ? `?kind=${kind}` : ''}`),
