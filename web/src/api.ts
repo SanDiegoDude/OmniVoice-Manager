@@ -213,8 +213,11 @@ export const api = {
   multitrackGenerate: (body: GenerateBody) =>
     jfetch<{ job_id: string }>('/api/multitrack/generate', { method: 'POST', body: JSON.stringify(body) }),
   multitrackGet: (sid: string) => jfetch<MultitrackSession>(`/api/multitrack/${sid}`),
-  regenSegment: (sid: string, index: number) =>
-    jfetch<{ job_id: string }>(`/api/multitrack/${sid}/segment/${index}/regenerate`, { method: 'POST' }),
+  regenSegment: (sid: string, index: number, text?: string) =>
+    jfetch<{ job_id: string }>(`/api/multitrack/${sid}/segment/${index}/regenerate`, {
+      method: 'POST',
+      body: JSON.stringify({ text: text ?? null }),
+    }),
   finalizeSession: (sid: string) =>
     jfetch<{ title?: string; filename: string; audio_url: string; duration_s: number }>(
       `/api/multitrack/${sid}/finalize`,

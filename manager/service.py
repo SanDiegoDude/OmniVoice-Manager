@@ -135,10 +135,10 @@ def make_multitrack_job(
 
 
 def make_regen_job(
-    model_manager, sid: str, index: int
+    model_manager, sid: str, index: int, text: str | None = None
 ) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
     """Regenerate a single segment of a session and re-stitch the mix."""
-    payload = sessions.regen_payload(sid, index)
+    payload = sessions.regen_payload(sid, index, text=text)
 
     def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
         result = model_manager.generate(payload, progress_cb=progress_cb)

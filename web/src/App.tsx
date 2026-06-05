@@ -227,11 +227,11 @@ export default function App() {
     }
   }
 
-  const regenSegment = async (index: number) => {
+  const regenSegment = async (index: number, text?: string) => {
     if (!session) return
     try {
       setRegenIndex(index)
-      const { job_id } = await api.regenSegment(session.id, index)
+      const { job_id } = await api.regenSegment(session.id, index, text)
       setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: { multitrack: true, regen: index } })
     } catch (e) {
       notify(String(e), 'error')

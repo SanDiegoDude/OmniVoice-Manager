@@ -47,6 +47,12 @@ class GenerateRequest(BaseModel):
     save: bool = True
 
 
+class RegenSegmentRequest(BaseModel):
+    # Optional edited dialogue for the segment; if set, it replaces the stored
+    # line before regenerating (and is persisted to the session).
+    text: Optional[str] = None
+
+
 class ScriptRequest(BaseModel):
     prompt: str
     num_speakers: int = 2

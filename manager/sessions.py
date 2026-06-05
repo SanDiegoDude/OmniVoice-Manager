@@ -254,15 +254,20 @@ def apply_regen(sid: str, index: int, worker_result: Dict[str, Any]) -> Dict[str
         return public(session)
 
 
-def regen_payload(sid: str, index: int) -> Dict[str, Any]:
+def regen_payload(sid: str, index: int, text: Optional[str] = None) -> Dict[str, Any]:
     """Build a single-segment worker payload (reuses the cleaned reference so we
-    don't re-isolate/clean on every regen)."""
-    session = _read(sid)
-    if not session:
-        raise FileNotFoundError("Session not found")
-    seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
-    if seg is None:
-        raise FileNotFoundError(f"Segment {index} not found")
+    don't re-isolate/clean on every regen). If ``text`` is given, the segment's
+    dialogue is edited + persisted before regenerating."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
+        if seg is None:
+            raise FileNotFoundError(f"Segment {index} not found")
+        if text is not None and text.strip():
+            seg["text"] = text.strip()
+            _write(session)
     spk_id = seg["speaker_id"]
     cfg = dict(session.get("speakers", {}).get(spk_id, {}))
     sr = int(session["sample_rate"])

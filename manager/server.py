@@ -48,6 +48,7 @@ from .schemas import (
     GenerateRequest,
     LoadModelRequest,
     ProcessVoiceRequest,
+    RegenSegmentRequest,
     ScriptAndSpeakRequest,
     ScriptRequest,
 )
@@ -342,9 +343,9 @@ def multitrack_get(sid: str):
 
 
 @app.post("/api/multitrack/{sid}/segment/{index}/regenerate")
-def multitrack_regen(sid: str, index: int):
+def multitrack_regen(sid: str, index: int, req: Optional[RegenSegmentRequest] = None):
     try:
-        job_fn = service.make_regen_job(model_manager, sid, index)
+        job_fn = service.make_regen_job(model_manager, sid, index, text=req.text if req else None)
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(404, str(e))
     job_id = job_manager.submit(job_fn, meta={"multitrack": True, "regen": index})

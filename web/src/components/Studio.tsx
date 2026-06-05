@@ -76,7 +76,7 @@ export function Studio({
   onGenerate: (body: GenerateBody, title: string, multitrack?: boolean) => void
   onGenerateScript: (prompt: string, numSpeakers: number, speakers: SpeakerConfig[], existing: string) => Promise<{ title: string; script: string } | null>
   onLucky: (body: GenerateBody, title: string, multitrack?: boolean) => void
-  onRegenSegment: (index: number) => void
+  onRegenSegment: (index: number, text?: string) => void
   onFinalize: () => void
   notify: (m: string, k?: 'info' | 'error' | 'success') => void
 }) {
@@ -125,6 +125,18 @@ export function Studio({
     const next = [...speakers]
     next[i] = c
     setSpeakers(next)
+  }
+
+  // Regenerate a segment; if the dialogue was edited, keep the script in sync.
+  const handleRegen = (index: number, text?: string) => {
+    if (text !== undefined && session) {
+      const flat = session.tracks.flatMap((t) => t.segments).slice().sort((a, b) => a.index - b.index)
+      const newScript = flat
+        .map((s) => `Speaker ${s.speaker_id}: ${s.index === index ? text : s.text}`)
+        .join('\n')
+      setScript(newScript)
+    }
+    onRegenSegment(index, text)
   }
 
   const addSpeaker = () => setSpeakers((prev) => [...prev, defaultSpeaker()])
@@ -391,7 +403,7 @@ export function Studio({
       {session && (
         <MultitrackEditor
           session={session}
-          onRegen={onRegenSegment}
+          onRegen={handleRegen}
           regenIndex={regenIndex}
           busy={running}
           onFinalize={onFinalize}

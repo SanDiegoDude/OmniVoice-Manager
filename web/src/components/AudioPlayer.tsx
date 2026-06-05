@@ -1,4 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
+
+export interface AudioPlayerHandle {
+  seek: (t: number) => void
+  seekAndPlay: (t: number) => void
+}
 
 function fmt(t: number) {
   if (!isFinite(t) || t < 0) t = 0
@@ -42,15 +47,7 @@ function encodeWav(buffer: AudioBuffer): Blob {
   return new Blob([data], { type: 'audio/wav' })
 }
 
-export function AudioPlayer({
-  url,
-  title,
-  filename,
-  autoPlay = true,
-  showDownload = true,
-  onTrimChange,
-  onTime,
-}: {
+export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   url: string
   title?: string
   filename?: string
@@ -58,7 +55,15 @@ export function AudioPlayer({
   showDownload?: boolean
   onTrimChange?: (start: number, end: number, duration: number) => void
   onTime?: (cur: number, duration: number, playing: boolean) => void
-}) {
+}>(function AudioPlayer({
+  url,
+  title,
+  filename,
+  autoPlay = true,
+  showDownload = true,
+  onTrimChange,
+  onTime,
+}, ref) {
   const audioElRef = useRef<HTMLAudioElement | null>(null)
   const ctxRef = useRef<AudioContext | null>(null)
   const gainNodeRef = useRef<GainNode | null>(null)
@@ -68,6 +73,7 @@ export function AudioPlayer({
   const rafRef = useRef<number | null>(null)
   const peaksRef = useRef<number[]>([])
   const pendingAutoplayRef = useRef(false)
+  const pendingSeekRef = useRef<{ t: number; play: boolean } | null>(null)
 
   const [duration, setDuration] = useState(0)
   const [start, setStart] = useState(0)
@@ -225,6 +231,49 @@ export function AudioPlayer({
     setPlaying(false)
   }, [])
 
+  // Imperative seek (used by the multitrack timeline). Queues until the media
+  // element knows its duration so it works right after a remount.
+  const applySeek = useCallback(() => {
+    const el = audioElRef.current
+    const p = pendingSeekRef.current
+    if (!el || !p) return
+    const go = () => {
+      const dur = el.duration || duration || 0
+      const t = Math.max(0, dur ? Math.min(p.t, dur) : p.t)
+      ensureGraph()
+      el.currentTime = t
+      setCur(t)
+      pendingSeekRef.current = null
+      if (p.play) {
+        if (ctxRef.current?.state === 'suspended') ctxRef.current.resume()
+        el.play()
+          .then(() => {
+            setPlaying(true)
+            if (rafRef.current) cancelAnimationFrame(rafRef.current)
+            rafRef.current = requestAnimationFrame(tick)
+          })
+          .catch(() => {})
+      }
+    }
+    if (el.readyState >= 1 && el.duration) go()
+    else el.addEventListener('loadedmetadata', go, { once: true })
+  }, [duration, ensureGraph, tick])
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      seek: (t: number) => {
+        pendingSeekRef.current = { t, play: false }
+        applySeek()
+      },
+      seekAndPlay: (t: number) => {
+        pendingSeekRef.current = { t, play: true }
+        applySeek()
+      },
+    }),
+    [applySeek],
+  )
+
   // Auto-play once the buffer is decoded (so start/end are set first). Runs after
   // a user-initiated generation, so the page already has audio permission.
   useEffect(() => {
@@ -381,4 +430,4 @@ export function AudioPlayer({
       </div>
     </div>
   )
-}
+})
