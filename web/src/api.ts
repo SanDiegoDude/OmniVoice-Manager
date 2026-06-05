@@ -190,6 +190,9 @@ export interface ProcessVoiceBody {
   dereverb?: boolean
   dereverb_method?: 'roformer' | 'deepfilternet'
   gain_db: number
+  trim_start?: number
+  trim_end?: number
+  overwrite?: boolean
   save_as: string
 }
 

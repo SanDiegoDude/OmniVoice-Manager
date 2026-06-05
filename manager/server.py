@@ -189,6 +189,17 @@ def _load_process_source(source: str, is_upload: bool) -> np.ndarray:
         raise HTTPException(404, "Voice not found")
 
 
+def _manual_trim(audio: np.ndarray, trim_start: float, trim_end: float, sr: int = 24000) -> np.ndarray:
+    """Clip the audio to the [trim_start, trim_end] window (seconds)."""
+    n = len(audio)
+    s = max(0, int(round(trim_start * sr)))
+    e = int(round(trim_end * sr)) if trim_end and trim_end > 0 else n
+    e = min(n, e)
+    if e > s and (s > 0 or e < n):
+        return audio[s:e]
+    return audio
+
+
 def _process_audio(
     audio: np.ndarray,
     isolate: bool,
@@ -197,8 +208,11 @@ def _process_audio(
     gain_db: float,
     dereverb: bool = False,
     dereverb_method: str = "roformer",
+    trim_start: float = 0.0,
+    trim_end: float = 0.0,
     progress_cb=None,
 ) -> np.ndarray:
+    audio = _manual_trim(audio, trim_start, trim_end)
     if isolate:
         res = model_manager.isolate({"waveform": audio, "sample_rate": 24000}, progress_cb=progress_cb)
         audio = np.asarray(res["waveform"], dtype=np.float32)
@@ -220,7 +234,8 @@ def _process_audio(
 def preview_voice(req: ProcessVoiceRequest):
     audio = _load_process_source(req.source, req.is_upload)
     processed = _process_audio(
-        audio, req.isolate, req.trim, req.normalize, req.gain_db, req.dereverb, req.dereverb_method
+        audio, req.isolate, req.trim, req.normalize, req.gain_db, req.dereverb, req.dereverb_method,
+        req.trim_start, req.trim_end,
     )
     name = f"_preview_{uuid.uuid4().hex}.wav"
     save_wav(TMP_DIR / name, processed)
@@ -231,8 +246,24 @@ def preview_voice(req: ProcessVoiceRequest):
 def process_voice(req: ProcessVoiceRequest):
     audio = _load_process_source(req.source, req.is_upload)
     processed = _process_audio(
-        audio, req.isolate, req.trim, req.normalize, req.gain_db, req.dereverb, req.dereverb_method
+        audio, req.isolate, req.trim, req.normalize, req.gain_db, req.dereverb, req.dereverb_method,
+        req.trim_start, req.trim_end,
     )
+
+    # Overwrite-in-place: save back to the selected library voice. Strip the
+    # extension so save_voice writes <stem>.wav, and remove the original if it
+    # was a non-wav file so we truly replace it instead of leaving a duplicate.
+    if req.overwrite and not req.is_upload:
+        original = req.source
+        stem = original[: -len(Path(original).suffix)] if Path(original).suffix else original
+        descriptor = voices.save_voice(stem, processed)
+        if not original.lower().endswith(".wav") and str(descriptor["id"]) != original:
+            try:
+                voices.delete_voice(original)
+            except Exception:  # noqa: BLE001
+                pass
+        return descriptor
+
     descriptor = voices.save_voice(req.save_as, processed)
     return descriptor
 

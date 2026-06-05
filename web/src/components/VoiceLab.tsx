@@ -1,6 +1,7 @@
-import { useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { api } from '../api'
 import type { Voice } from '../api'
+import { AudioPlayer } from './AudioPlayer'
 import { Modal, Slider, Toggle } from './ui'
 
 export function VoiceLab({
@@ -15,6 +16,7 @@ export function VoiceLab({
   notify: (m: string, k?: 'info' | 'error' | 'success') => void
 }) {
   const [source, setSource] = useState<{ id: string; isUpload: boolean; label: string } | null>(null)
+  const [sourceUrl, setSourceUrl] = useState<string | null>(null)
   const [isolate, setIsolate] = useState(true)
   const [trim, setTrim] = useState(true)
   const [normalize, setNormalize] = useState(true)
@@ -22,9 +24,23 @@ export function VoiceLab({
   const [dereverbMethod, setDereverbMethod] = useState<'roformer' | 'deepfilternet'>('roformer')
   const [gain, setGain] = useState(0)
   const [saveAs, setSaveAs] = useState('')
+  const [overwrite, setOverwrite] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  // Manual trim window (seconds), reported by the source AudioPlayer.
+  const [trimStart, setTrimStart] = useState(0)
+  const [trimEnd, setTrimEnd] = useState(0)
+  const [clipDur, setClipDur] = useState(0)
+  const onTrimChange = useCallback((s: number, e: number, d: number) => {
+    setTrimStart(s)
+    setTrimEnd(e)
+    setClipDur(d)
+  }, [])
+
+  const isLibrary = !!source && !source.isUpload
+  const hasTrim = trimStart > 0.02 || (clipDur > 0 && trimEnd < clipDur - 0.02)
 
   const body = () => ({
     source: source!.id,
@@ -35,16 +51,26 @@ export function VoiceLab({
     dereverb,
     dereverb_method: dereverbMethod,
     gain_db: gain,
-    save_as: saveAs || source!.label,
+    trim_start: trimStart > 0.02 ? trimStart : 0,
+    trim_end: clipDur > 0 && trimEnd < clipDur - 0.02 ? trimEnd : 0,
+    overwrite: overwrite && isLibrary,
+    save_as: overwrite && isLibrary ? source!.label : saveAs || source!.label,
   })
+
+  function pickSource(s: { id: string; isUpload: boolean; label: string }, url: string) {
+    setSource(s)
+    setSourceUrl(url)
+    setPreviewUrl(null)
+    setOverwrite(false)
+  }
 
   async function handleUpload(file: File) {
     setBusy(true)
     try {
       const res = await api.uploadVoice(file)
-      setSource({ id: res.upload_id, isUpload: true, label: file.name.replace(/\.[^.]+$/, '') })
-      if (!saveAs) setSaveAs(file.name.replace(/\.[^.]+$/, ''))
-      setPreviewUrl(res.audio_url)
+      const label = file.name.replace(/\.[^.]+$/, '')
+      pickSource({ id: res.upload_id, isUpload: true, label }, res.audio_url)
+      if (!saveAs) setSaveAs(label)
       notify(`Uploaded (${res.duration_s}s)`, 'success')
     } catch (e) {
       notify(String(e), 'error')
@@ -69,11 +95,11 @@ export function VoiceLab({
 
   async function doSave() {
     if (!source) return notify('Pick or upload a sample first', 'error')
-    if (!saveAs.trim()) return notify('Enter a name to save as', 'error')
+    if (!(overwrite && isLibrary) && !saveAs.trim()) return notify('Enter a name to save as', 'error')
     setBusy(true)
     try {
       const res = await api.processVoice(body())
-      notify(`Saved “${res.name}” (${res.duration_s}s)`, 'success')
+      notify(`${overwrite && isLibrary ? 'Overwrote' : 'Saved'} “${res.name}” (${res.duration_s}s)`, 'success')
       onSaved()
       onClose()
     } catch (e) {
@@ -86,8 +112,8 @@ export function VoiceLab({
   return (
     <Modal title="⚗ Voice Lab" onClose={onClose}>
       <p className="hint" style={{ marginTop: 0 }}>
-        Isolate vocals (remove music/noise via Mel-Band-Roformer), trim silence, and boost/level loudness, then save a
-        clean reference into your library.
+        Trim a sample, isolate vocals (remove music/noise), de-reverb, and level loudness, then save a clean reference
+        into your library.
       </p>
 
       <div className="section-title">1 · Source sample</div>
@@ -110,9 +136,8 @@ export function VoiceLab({
           onChange={(e) => {
             const v = voices.find((x) => x.id === e.target.value)
             if (v) {
-              setSource({ id: v.id, isUpload: false, label: v.name })
+              pickSource({ id: v.id, isUpload: false, label: v.name }, `/api/audio/voice/${v.id}`)
               setSaveAs(v.name + '_clean')
-              setPreviewUrl(`/api/audio/voice/${v.id}`)
             }
           }}
         >
@@ -126,8 +151,27 @@ export function VoiceLab({
       </div>
       {source && <div className="hint">Selected: {source.label}</div>}
 
+      {sourceUrl && (
+        <>
+          <div className="divider" />
+          <div className="section-title">2 · Trim</div>
+          <p className="hint" style={{ marginTop: 0 }}>
+            Drag the start/end handles to cut off bad heads/tails (e.g. a clipped final word that causes artifacts).
+            The selected window is what gets processed and saved.
+          </p>
+          <AudioPlayer
+            key={sourceUrl}
+            url={sourceUrl}
+            title={source?.label}
+            autoPlay={false}
+            showDownload={false}
+            onTrimChange={onTrimChange}
+          />
+        </>
+      )}
+
       <div className="divider" />
-      <div className="section-title">2 · Processing</div>
+      <div className="section-title">3 · Processing</div>
       <div className="row wrap" style={{ gap: 16, marginBottom: 10, alignItems: 'center' }}>
         <Toggle checked={isolate} onChange={setIsolate} label="Isolate vocals" />
         <Toggle checked={trim} onChange={setTrim} label="Trim silence" />
@@ -149,19 +193,46 @@ export function VoiceLab({
       <Slider label="Gain" min={-12} max={12} step={0.5} value={gain} onChange={setGain} format={(v) => `${v > 0 ? '+' : ''}${v} dB`} />
 
       <div className="divider" />
-      <div className="section-title">3 · Preview & save</div>
+      <div className="section-title">4 · Preview & save</div>
       {previewUrl && <audio controls src={previewUrl} style={{ width: '100%', marginBottom: 10 }} />}
+
+      {isLibrary && (
+        <label className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 8, cursor: 'pointer' }}>
+          <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} />
+          <span>Overwrite the existing voice in place</span>
+        </label>
+      )}
+      {overwrite && isLibrary && (
+        <div className="warn-banner">
+          ⚠ This will overwrite <strong>{source!.label}</strong> — the original file is replaced and cannot be undone.
+          Test on a copy first!
+        </div>
+      )}
+
       <label className="field">
         <span>Save as (path inside library, e.g. personal/my-voice)</span>
-        <input className="input" value={saveAs} onChange={(e) => setSaveAs(e.target.value)} placeholder="folder/name" />
+        <input
+          className="input"
+          value={overwrite && isLibrary ? source!.label : saveAs}
+          onChange={(e) => setSaveAs(e.target.value)}
+          placeholder="folder/name"
+          disabled={overwrite && isLibrary}
+        />
       </label>
-      <div className="row" style={{ justifyContent: 'flex-end' }}>
-        <button className="btn" onClick={doPreview} disabled={busy || !source}>
-          {busy ? <span className="spinner" /> : '🔊'} Preview
-        </button>
-        <button className="btn primary" onClick={doSave} disabled={busy || !source}>
-          💾 Save to library
-        </button>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+        <span className="hint">{hasTrim ? `Trim: ${trimStart.toFixed(1)}s – ${trimEnd.toFixed(1)}s` : 'No trim applied'}</span>
+        <div className="row">
+          <button className="btn" onClick={doPreview} disabled={busy || !source}>
+            {busy ? <span className="spinner" /> : '🔊'} Preview
+          </button>
+          <button
+            className={`btn ${overwrite && isLibrary ? 'danger-solid' : 'primary'}`}
+            onClick={doSave}
+            disabled={busy || !source}
+          >
+            {overwrite && isLibrary ? '⟳ Overwrite voice' : '💾 Save to library'}
+          </button>
+        </div>
       </div>
     </Modal>
   )

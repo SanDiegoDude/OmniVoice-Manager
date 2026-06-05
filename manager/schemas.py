@@ -80,6 +80,11 @@ class ProcessVoiceRequest(BaseModel):
     dereverb: bool = False
     dereverb_method: str = "roformer"  # roformer | deepfilternet
     gain_db: float = 0.0
+    # Manual trim window (seconds) applied to the source before processing. A
+    # trim_end of 0 (or <= trim_start) means "keep to the end".
+    trim_start: float = 0.0
+    trim_end: float = 0.0
+    overwrite: bool = False  # overwrite the selected library voice in place
     save_as: str  # destination relative path in custom_voices/
 
 

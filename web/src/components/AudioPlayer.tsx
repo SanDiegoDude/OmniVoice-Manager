@@ -47,11 +47,15 @@ export function AudioPlayer({
   title,
   filename,
   autoPlay = true,
+  showDownload = true,
+  onTrimChange,
 }: {
   url: string
   title?: string
   filename?: string
   autoPlay?: boolean
+  showDownload?: boolean
+  onTrimChange?: (start: number, end: number, duration: number) => void
 }) {
   const audioElRef = useRef<HTMLAudioElement | null>(null)
   const ctxRef = useRef<AudioContext | null>(null)
@@ -156,6 +160,12 @@ export function AudioPlayer({
   useEffect(() => {
     draw(cur)
   }, [draw, cur])
+
+  // Report the trim window to a parent (Voice Lab uses this to send the cut to
+  // the backend). Fires whenever the region or loaded duration changes.
+  useEffect(() => {
+    onTrimChange?.(start, end, duration)
+  }, [start, end, duration, onTrimChange])
 
   const ensureGraph = useCallback(() => {
     if (!audioElRef.current) return
@@ -300,9 +310,11 @@ export function AudioPlayer({
           <button className="btn sm ghost" onClick={reset} title="Reset trim & gain">
             ↺ Reset
           </button>
-          <button className="btn sm" onClick={download} disabled={downloading}>
-            {downloading ? '…' : '⬇ Download'}
-          </button>
+          {showDownload && (
+            <button className="btn sm" onClick={download} disabled={downloading}>
+              {downloading ? '…' : '⬇ Download'}
+            </button>
+          )}
         </div>
       </div>
 

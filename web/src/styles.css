@@ -122,6 +122,9 @@ input, textarea, select { font-family: inherit; }
 .btn.ghost:hover { background: var(--bg-elev); color: var(--text); }
 .btn.danger { color: var(--bad); border-color: transparent; background: transparent; }
 .btn.danger:hover { background: rgba(255,107,125,.12); }
+.btn.danger-solid { background: var(--bad); border-color: transparent; color: white; font-weight: 600; box-shadow: 0 4px 16px rgba(255,107,125,.30); }
+.btn.danger-solid:hover { filter: brightness(1.08); }
+.warn-banner { background: rgba(255,107,125,.12); border: 1px solid var(--bad); color: #ffb3bd; border-radius: var(--radius-sm); padding: 9px 12px; font-size: 12.5px; line-height: 1.5; margin-bottom: 10px; }
 .btn.sm { padding: 5px 9px; font-size: 12px; }
 .btn.block { width: 100%; }
 .btn.lucky { background: linear-gradient(120deg, #ffb454, #ff7d6b); border: none; color: #2a1606; font-weight: 700; }
