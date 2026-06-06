@@ -563,13 +563,40 @@ def _prep_clone_audio(audio: np.ndarray, sr: int, target_s: float = 15.0, max_s:
 
 @app.post("/api/multitrack/{sid}/segment/{index}/inpaint")
 def multitrack_inpaint(sid: str, index: int, req: InpaintRequest):
-    """Lock/unlock a segment's own audio as a per-segment ADR clone (Vocal Inpaint)."""
+    """Lock/unlock a segment's own audio as a per-segment ADR clone (Vocal Inpaint).
+
+    On lock we isolate the clip once: the clean vocal becomes the clone source
+    (so regen skips re-isolating) and the residual is kept as a non-vocal bed for
+    the optional "Preserve non-vocal" mix. If isolation is unavailable we fall
+    back to the raw source (clone cold-builds its own isolation; no bed)."""
     try:
         if not req.enabled:
             return sessions.set_inpaint(sid, index, False)
         audio, sr = sessions.clone_source(sid, index)
-        prepped = _prep_clone_audio(audio, sr)
-        return sessions.set_inpaint(sid, index, True, prepped, sr)
+        bed = None
+        pre_cleaned = False
+        voice = audio
+        try:
+            iso = model_manager.isolate({"waveform": audio, "sample_rate": sr})
+            vocals = np.asarray(iso["waveform"], dtype=np.float32)
+            n = min(len(vocals), len(audio))
+            if n > 0:
+                bed = (np.asarray(audio, dtype=np.float32)[:n] - vocals[:n]).astype(np.float32)
+                voice = vocals
+                pre_cleaned = True
+        except Exception:
+            pass  # isolation unavailable — fall back to raw source, no bed
+        prepped = _prep_clone_audio(voice, sr)
+        return sessions.set_inpaint(sid, index, True, prepped, sr, bed=bed, pre_cleaned=pre_cleaned)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/multitrack/{sid}/segment/{index}/inpaint-preserve")
+def multitrack_inpaint_preserve(sid: str, index: int, req: InpaintRequest):
+    """Toggle re-adding the captured non-vocal bed when an inpainted clip regens."""
+    try:
+        return sessions.set_preserve_nonvocal(sid, index, req.enabled)
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(400, str(e))
 

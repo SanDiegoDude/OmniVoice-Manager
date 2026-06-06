@@ -79,6 +79,7 @@ export function Studio({
   onUploadChannel,
   onAutoSlice,
   onSetInpaint,
+  onSetPreserveNonvocal,
   onPromoteChannel,
   onUndo,
   onFinalize,
@@ -118,6 +119,7 @@ export function Studio({
   onUploadChannel: (file: File, name: string) => void
   onAutoSlice: (index: number) => Promise<void>
   onSetInpaint: (index: number, enabled: boolean) => Promise<void>
+  onSetPreserveNonvocal: (index: number, enabled: boolean) => Promise<void>
   onPromoteChannel: (pos: string, name: string) => Promise<MultitrackSession | null>
   onUndo: () => void
   onFinalize: () => void
@@ -553,6 +555,7 @@ export function Studio({
             onUploadChannel={onUploadChannel}
             onAutoSlice={onAutoSlice}
             onSetInpaint={onSetInpaint}
+            onSetPreserveNonvocal={onSetPreserveNonvocal}
             onPromoteChannel={handlePromote}
             onUndo={onUndo}
             regenIndex={regenIndex}

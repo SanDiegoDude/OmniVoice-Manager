@@ -60,6 +60,7 @@ export function MultitrackEditor({
   onUploadChannel,
   onAutoSlice,
   onSetInpaint,
+  onSetPreserveNonvocal,
   onPromoteChannel,
   onUndo,
   regenIndex,
@@ -84,6 +85,7 @@ export function MultitrackEditor({
   onUploadChannel: (file: File, name: string) => void
   onAutoSlice: (index: number) => Promise<void>
   onSetInpaint: (index: number, enabled: boolean) => Promise<void>
+  onSetPreserveNonvocal: (index: number, enabled: boolean) => Promise<void>
   onPromoteChannel: (pos: string, name: string) => Promise<MultitrackSession | null>
   onUndo: () => void
   regenIndex: number | null
@@ -904,6 +906,18 @@ export function MultitrackEditor({
                   >
                     {inpainting === seg.index ? '… ' : seg.inpaint ? '☑ ' : '☐ '}Vocal Inpaint{seg.inpaint ? ' (locked)' : ''}
                   </button>
+                  {seg.inpaint && (
+                    <button
+                      className={`btn sm${seg.preserve_nonvocal ? ' on' : ''}`}
+                      disabled={inpainting != null || !seg.has_bed}
+                      title={seg.has_bed
+                        ? "Preserve non-vocal: mix this clip's original background (music/noise/room) back under the regenerated voice, trimmed to the new voice length."
+                        : 'No non-vocal bed was captured (isolation unavailable for this clip).'}
+                      onClick={async () => { const i = seg.index; const en = !seg.preserve_nonvocal; setSegMenu(null); setInpainting(i); try { await onSetPreserveNonvocal(i, en) } finally { setInpainting(null) } }}
+                    >
+                      {seg.preserve_nonvocal ? '☑ ' : '☐ '}Preserve non-vocal
+                    </button>
+                  )}
                 </>
               )}
               <div className="mtk-menu-sep" />

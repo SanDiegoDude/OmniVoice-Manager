@@ -337,6 +337,15 @@ export default function App() {
       notify(String(e), 'error')
     }
   }
+  const setPreserveNonvocal = async (index: number, enabled: boolean) => {
+    if (!session) return
+    try {
+      setSession(await api.setPreserveNonvocal(session.id, index, enabled))
+      notify(enabled ? 'Non-vocal bed will be mixed back on regen' : 'Non-vocal bed off', 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
   const promoteChannel = async (pos: string, name: string) => {
     if (!session) return null
     try {
@@ -587,6 +596,7 @@ export default function App() {
           onSplitSegment={splitSegment}
           onAutoSlice={autoSlice}
           onSetInpaint={setInpaint}
+          onSetPreserveNonvocal={setPreserveNonvocal}
           onPromoteChannel={promoteChannel}
           onUndo={undoSession}
           onDeleteSpace={deleteSpace}

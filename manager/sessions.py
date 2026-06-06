@@ -277,6 +277,8 @@ def public(session: Dict[str, Any]) -> Dict[str, Any]:
                 "speed": float(s.get("speed", 1.0) or 1.0),
                 "gain_db": float(s.get("gain_db", 0.0) or 0.0),
                 "inpaint": bool(s.get("inpaint", False)),
+                "has_bed": bool(s.get("inpaint_bed")),
+                "preserve_nonvocal": bool(s.get("preserve_nonvocal", False)),
                 "url": seg_url(s["file"]),
                 "clip_url": f"/api/multitrack/{sid}/segment/{s['index']}/clip?t={bust}",
             }
@@ -472,6 +474,35 @@ def _controls_endpoint(session: Dict[str, Any], target: Dict[str, Any], start: f
     return True
 
 
+def _ripple_endpoint(session: Dict[str, Any], index: int, end_old: float, delta: float, controls: bool) -> None:
+    """When a regenerated clip controls its endpoint, shift everything downstream
+    by the length delta so the gap after it is preserved."""
+    if not controls or abs(delta) <= 1e-3:
+        return
+    for o in session["segments"]:
+        if int(o["index"]) == int(index):
+            continue
+        if float(o.get("start_s", 0.0) or 0.0) >= end_old - 1e-3:
+            o["start_s"] = round(max(0.0, float(o["start_s"]) + delta), 3)
+
+
+def _apply_bed(sid: str, seg: Dict[str, Any], vocal: np.ndarray, sr: int) -> np.ndarray:
+    """Vocal Inpaint "Preserve non-vocal": sum the captured background bed under a
+    freshly-generated voice take. The bed is trimmed to the voice length (the clip
+    tracks the voice) — if the voice is longer, the bed simply runs out."""
+    if not (seg.get("inpaint") and seg.get("preserve_nonvocal") and seg.get("inpaint_bed")):
+        return vocal
+    bed_path = _dir(sid) / seg["inpaint_bed"]
+    if not bed_path.exists():
+        return vocal
+    bed = load_audio(bed_path, sr=sr)
+    out = np.asarray(vocal, dtype=np.float32).copy()
+    n = min(len(out), len(bed))
+    if n > 0:
+        out[:n] = out[:n] + bed[:n]
+    return peak_limit(out)
+
+
 def apply_regen(sid: str, index: int, worker_result: Dict[str, Any]) -> Dict[str, Any]:
     """Replace one segment with a fresh take. Resets trim + speed, keeps position.
 
@@ -497,6 +528,7 @@ def apply_regen(sid: str, index: int, worker_result: Dict[str, Any]) -> Dict[str
         end_old = start + old_eff
         controls = _controls_endpoint(session, target, start, end_old)
 
+        wav = _apply_bed(sid, target, wav, sr)  # Vocal Inpaint: re-add non-vocal bed
         save_wav(_dir(sid) / target["file"], wav, sr)
         dur = duration_seconds(wav, sr)
         target["raw_duration_s"] = dur
@@ -505,13 +537,7 @@ def apply_regen(sid: str, index: int, worker_result: Dict[str, Any]) -> Dict[str
         target["speed"] = 1.0
         new_eff = _eff_duration(target)  # speed reset to 1 → == dur
 
-        delta = new_eff - old_eff
-        if controls and abs(delta) > 1e-3:
-            for o in session["segments"]:
-                if int(o["index"]) == int(index):
-                    continue
-                if float(o.get("start_s", 0.0) or 0.0) >= end_old - 1e-3:
-                    o["start_s"] = round(max(0.0, float(o["start_s"]) + delta), 3)
+        _ripple_endpoint(session, int(index), end_old, new_eff - old_eff, controls)
 
         _store_refs(session, worker_result, sr)
         _stitch(session)
@@ -802,18 +828,26 @@ def apply_channel_regen(sid: str, pos: str, worker_result: Dict[str, Any]) -> Di
             raise FileNotFoundError("Session not found")
         sr = int(session["sample_rate"])
         by_index = {int(s["index"]): s for s in session["segments"]}
-        for out in worker_result.get("segments") or []:
-            idx = int(out["index"])
+        outs = {int(o["index"]): o for o in (worker_result.get("segments") or [])}
+        # Apply each regenerated clip in timeline order, rippling the timeline by
+        # the same smart endpoint-align rules as a single regen so lines that grow
+        # or shrink keep the scene's spacing intact.
+        for idx in sorted(outs, key=lambda i: float(by_index.get(i, {}).get("start_s", 0.0) or 0.0)):
             target = by_index.get(idx)
             if target is None:
                 continue
-            wav = np.asarray(out["waveform"], dtype=np.float32)
+            start = float(target.get("start_s", 0.0) or 0.0)
+            old_eff = _eff_duration(target)
+            end_old = start + old_eff
+            controls = _controls_endpoint(session, target, start, end_old)
+            wav = np.asarray(outs[idx]["waveform"], dtype=np.float32)
             save_wav(_dir(sid) / target["file"], wav, sr)
             dur = duration_seconds(wav, sr)
             target["raw_duration_s"] = dur
             target["trim_start_s"] = 0.0
             target["trim_end_s"] = dur
             target["speed"] = 1.0
+            _ripple_endpoint(session, idx, end_old, _eff_duration(target) - old_eff, controls)
         _store_refs(session, worker_result, sr)
         _stitch(session)
         _write(session)
@@ -1100,11 +1134,21 @@ def clone_source(sid: str, index: int) -> tuple:
         return (clip.astype(np.float32) if clip.size else raw.astype(np.float32)), sr
 
 
-def set_inpaint(sid: str, index: int, enabled: bool, prepped: Optional[np.ndarray] = None, prepped_sr: Optional[int] = None) -> Dict[str, Any]:
+def set_inpaint(
+    sid: str,
+    index: int,
+    enabled: bool,
+    prepped: Optional[np.ndarray] = None,
+    prepped_sr: Optional[int] = None,
+    bed: Optional[np.ndarray] = None,
+    pre_cleaned: bool = False,
+) -> Dict[str, Any]:
     """Toggle Vocal Inpaint on a segment. When enabling, `prepped` is the cleaned,
-    length-bounded clone source (caller does the Whisper word-boundary trim); it's
-    stored as the segment's locked voice and any cached cleaned ref is dropped so
-    the next regen cold-builds. Disabling keeps the file (lazy) and just unlocks."""
+    length-bounded clone source; it's stored as the segment's locked voice. If the
+    caller pre-isolated the voice (`pre_cleaned`), it's also registered as the
+    cleaned ref so regen skips a second isolation. `bed` (non-vocal residual, full
+    length) is stored so "Preserve non-vocal" can mix it back. Disabling keeps the
+    files on disk (lazy) and just unlocks."""
     with _lock:
         session = _read(sid)
         if not session:
@@ -1112,6 +1156,7 @@ def set_inpaint(sid: str, index: int, enabled: bool, prepped: Optional[np.ndarra
         seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
         if seg is None:
             raise FileNotFoundError(f"Segment {index} not found")
+        ipkey = f"ip{int(index)}"
         if enabled:
             if prepped is None or prepped.size == 0:
                 raise ValueError("No usable audio to lock as the inpaint source.")
@@ -1121,12 +1166,40 @@ def set_inpaint(sid: str, index: int, enabled: bool, prepped: Optional[np.ndarra
             seg["inpaint"] = True
             seg["inpaint_ref"] = fn
             # Re-locking re-captures the voice: drop the cached cleaned inpaint ref.
-            ipkey = f"ip{int(index)}"
-            old = session.get("refs", {}).pop(ipkey, None)
-            if old:
+            old = session.setdefault("refs", {}).pop(ipkey, None)
+            if old and old != fn:
                 (_dir(sid) / old).unlink(missing_ok=True)
+            # Pre-isolated source → reuse it directly as the cleaned ref.
+            if pre_cleaned:
+                session["refs"][ipkey] = fn
+            # Capture / refresh the non-vocal bed (or clear a stale one).
+            bed_fn = f"inpaint_bed_{int(index):03d}.wav"
+            if bed is not None and bed.size:
+                save_wav(_dir(sid) / bed_fn, np.asarray(bed, dtype=np.float32), sr)
+                seg["inpaint_bed"] = bed_fn
+            else:
+                (_dir(sid) / bed_fn).unlink(missing_ok=True)
+                seg.pop("inpaint_bed", None)
+                seg["preserve_nonvocal"] = False
         else:
             seg["inpaint"] = False  # leave inpaint_ref + cleaned ref on disk (lazy)
+        _write(session)
+        return public(session)
+
+
+def set_preserve_nonvocal(sid: str, index: int, enabled: bool) -> Dict[str, Any]:
+    """Toggle whether an inpainted clip re-adds its captured non-vocal bed on
+    regen. The bed is captured at lock time; enabling without one is rejected."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
+        if seg is None:
+            raise FileNotFoundError(f"Segment {index} not found")
+        if enabled and not (seg.get("inpaint_bed") and (_dir(sid) / seg["inpaint_bed"]).exists()):
+            raise ValueError("No non-vocal bed was captured for this clip (isolation unavailable).")
+        seg["preserve_nonvocal"] = bool(enabled)
         _write(session)
         return public(session)
 

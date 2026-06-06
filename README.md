@@ -23,12 +23,12 @@ OmniVoice synthesizes one voice at a time. The Manager parses `Speaker N:` scrip
 ### Multitrack timeline editor — a mini-DAW for dialogue
 This is the heart of the Manager. Instead of one baked render, every scene is kept as **individual, regenerable clips on a real timeline**, so a single bad take never costs you the whole 99%-good performance.
 
-- **Per-segment & per-channel regenerate** — re-roll one line (or re-cast an entire speaker's voice and regenerate all their lines) without touching anything else. Regeneration auto-aligns the new clip's endpoint and ripples downstream — unless the clip is layered under a longer one, which it leaves untouched.
+- **Per-segment & per-channel regenerate** — re-roll one line (or re-cast an entire speaker's voice and regenerate all their lines) without touching anything else. Regeneration auto-aligns each new clip's endpoint and ripples downstream — for both single and regenerate-all — unless the clip is layered under a longer one, which it leaves untouched.
 - **True additive mixing** — overlapping clips are summed, not concatenated, so speakers can talk over each other, argue in unison, and react — real, messy, human conversation.
 - **Move / trim / speed / gain per clip** — drag clips anywhere, trim with a waveform, pitch-preserving time-stretch (no "bathroom" echo), and per-clip dB. Plus split, duplicate (ripple or not), delete, and insert/delete empty time.
 - **Compose from scratch** — the moment you pick Multi-speaker you get a blank timeline. Build a whole scene by hand one clip at a time, or generate from a script and refine.
 - **Auto-slice by sentence & Whisper align** — split a monologue into one clip per sentence using word-level timestamps, or align a clip's displayed text to its actual audio — no regenerate.
-- **Vocal Inpaint (per-segment ADR)** — lock a clip's own audio as a temporary, timeline-local voice clone, then rewrite the line in that exact voice. Per-segment automated dialogue replacement.
+- **Vocal Inpaint (per-segment ADR)** — lock a clip's own audio as a temporary, timeline-local voice clone, then rewrite the line in that exact voice. Per-segment automated dialogue replacement. Optional **Preserve non-vocal** keeps the clip's original background (music / room / noise) isolated at lock time and mixes it back under each regenerated take, trimmed to follow the new voice's length.
 - **Uploaded audio channels** — drop in a soundtrack / SFX / recording as its own non-generative layer with independent gain, then **promote** it into a full clone voice channel (auto-transcribed, with a matching speaker added) when you want to put words in its mouth.
 - **Tag library** — hot-clickable OmniVoice non-verbal cues (`[laughter]`, `[whisper]`, …) injected at the cursor in any dialogue field.
 - **Zoom, pan, follow-playhead, spacebar transport, single-step undo**, and a vertical resize to grow the rows + waveform — it feels like an editor, not a form.
@@ -193,7 +193,7 @@ All endpoints are JSON over HTTP. Selected routes:
 | `POST /api/multitrack/generate` · `POST /api/multitrack/empty` | Generate a scene as clips, or start a blank timeline |
 | `POST /api/multitrack/{sid}/speaker` · `POST·DELETE …/speaker/{pos}` | Add / update / remove a speaker track |
 | `POST …/segment/{i}/regenerate` · `…/edit` · `…/text` | Regenerate, move/trim/speed/gain, or align a clip's text |
-| `POST …/segment/{i}/split` · `…/duplicate` · `…/delete` · `…/auto-slice` · `…/inpaint` | Clip operations + Vocal Inpaint |
+| `POST …/segment/{i}/split` · `…/duplicate` · `…/delete` · `…/auto-slice` · `…/inpaint` · `…/inpaint-preserve` | Clip operations + Vocal Inpaint (and non-vocal bed) |
 | `POST …/delete-space` · `…/add-space` · `…/reflow` · `…/insert` | Timeline structure + global speed/gap |
 | `POST …/upload-channel` · `…/speaker/{pos}/promote` · `…/speaker/{pos}/regenerate` | Audio channels, promote-to-voice, re-cast a channel |
 | `POST …/segment/{i}/transcribe` · `…/{sid}/undo` · `…/{sid}/finalize` | Whisper a clip, single-step undo, commit to history |

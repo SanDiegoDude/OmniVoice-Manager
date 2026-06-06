@@ -97,6 +97,8 @@ export interface MultitrackSegment {
   speed: number
   gain_db: number
   inpaint?: boolean
+  has_bed?: boolean
+  preserve_nonvocal?: boolean
   url: string
   clip_url: string
 }
@@ -272,6 +274,8 @@ export const api = {
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/auto-slice`, { method: 'POST' }),
   setInpaint: (sid: string, index: number, enabled: boolean) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/inpaint`, { method: 'POST', body: JSON.stringify({ enabled }) }),
+  setPreserveNonvocal: (sid: string, index: number, enabled: boolean) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/inpaint-preserve`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   promoteChannel: (sid: string, pos: string, name: string) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/speaker/${pos}/promote`, { method: 'POST', body: JSON.stringify({ name }) }),
   undo: (sid: string) => jfetch<MultitrackSession>(`/api/multitrack/${sid}/undo`, { method: 'POST' }),
