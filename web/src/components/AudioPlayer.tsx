@@ -3,6 +3,9 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 export interface AudioPlayerHandle {
   seek: (t: number) => void
   seekAndPlay: (t: number) => void
+  play: () => void
+  pause: () => void
+  toggle: () => void
 }
 
 function fmt(t: number) {
@@ -53,7 +56,13 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   filename?: string
   autoPlay?: boolean
   showDownload?: boolean
+  initialStart?: number
+  initialEnd?: number
+  initialGain?: number
+  playbackRate?: number
+  waveHeight?: number
   onTrimChange?: (start: number, end: number, duration: number) => void
+  onGainChange?: (gainDb: number) => void
   onTime?: (cur: number, duration: number, playing: boolean) => void
 }>(function AudioPlayer({
   url,
@@ -61,7 +70,13 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   filename,
   autoPlay = true,
   showDownload = true,
+  initialStart,
+  initialEnd,
+  initialGain,
+  playbackRate = 1,
+  waveHeight = 70,
   onTrimChange,
+  onGainChange,
   onTime,
 }, ref) {
   const audioElRef = useRef<HTMLAudioElement | null>(null)
@@ -74,6 +89,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   const peaksRef = useRef<number[]>([])
   const pendingAutoplayRef = useRef(false)
   const pendingSeekRef = useRef<{ t: number; play: boolean } | null>(null)
+  const playingRef = useRef(false)
 
   const [duration, setDuration] = useState(0)
   const [start, setStart] = useState(0)
@@ -88,7 +104,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
     let cancelled = false
     setPlaying(false)
     setCur(0)
-    setGainDb(0)
+    setGainDb(initialGain ?? 0)
     pendingAutoplayRef.current = autoPlay
     ;(async () => {
       try {
@@ -100,8 +116,8 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
         if (cancelled) return
         bufferRef.current = buf
         setDuration(buf.duration)
-        setStart(0)
-        setEnd(buf.duration)
+        setStart(initialStart != null ? Math.max(0, Math.min(initialStart, buf.duration)) : 0)
+        setEnd(initialEnd != null ? Math.max(0, Math.min(initialEnd, buf.duration)) : buf.duration)
         // Precompute waveform peaks.
         const ch = buf.getChannelData(0)
         const bars = 320
@@ -167,13 +183,18 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
 
   useEffect(() => {
     draw(cur)
-  }, [draw, cur])
+  }, [draw, cur, waveHeight])
 
   // Report the trim window to a parent (Voice Lab uses this to send the cut to
   // the backend). Fires whenever the region or loaded duration changes.
   useEffect(() => {
     onTrimChange?.(start, end, duration)
   }, [start, end, duration, onTrimChange])
+
+  // Report manual gain so the multitrack trim panel can persist per-segment dB.
+  useEffect(() => {
+    onGainChange?.(gainDb)
+  }, [gainDb, onGainChange])
 
   // Report playback position (drives the multitrack playhead).
   useEffect(() => {
@@ -199,6 +220,15 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
     if (gainNodeRef.current) gainNodeRef.current.gain.value = Math.pow(10, gainDb / 20)
   }, [gainDb])
 
+  // Pitch-preserving speed preview (browser time-stretch, no echo).
+  useEffect(() => {
+    const el = audioElRef.current as (HTMLAudioElement & { preservesPitch?: boolean }) | null
+    if (el) {
+      el.preservesPitch = true
+      el.playbackRate = playbackRate || 1
+    }
+  }, [playbackRate])
+
   const tick = useCallback(() => {
     const el = audioElRef.current
     if (!el) return
@@ -217,12 +247,14 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
     const el = audioElRef.current
     if (!el) return
     ensureGraph()
+    ;(el as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = true
+    el.playbackRate = playbackRate || 1
     if (ctxRef.current?.state === 'suspended') await ctxRef.current.resume()
     if (el.currentTime < start || el.currentTime >= end) el.currentTime = start
     await el.play().catch(() => {})
     setPlaying(true)
     rafRef.current = requestAnimationFrame(tick)
-  }, [start, end, ensureGraph, tick])
+  }, [start, end, ensureGraph, tick, playbackRate])
 
   const stop = useCallback(() => {
     const el = audioElRef.current
@@ -259,6 +291,10 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
     else el.addEventListener('loadedmetadata', go, { once: true })
   }, [duration, ensureGraph, tick])
 
+  useEffect(() => {
+    playingRef.current = playing
+  }, [playing])
+
   useImperativeHandle(
     ref,
     () => ({
@@ -270,8 +306,11 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
         pendingSeekRef.current = { t, play: true }
         applySeek()
       },
+      play: () => play(),
+      pause: () => stop(),
+      toggle: () => (playingRef.current ? stop() : play()),
     }),
-    [applySeek],
+    [applySeek, play, stop],
   )
 
   // Auto-play once the buffer is decoded (so start/end are set first). Runs after
@@ -378,7 +417,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
         ref={canvasRef}
         className="waveform"
         onClick={seek}
-        style={{ width: '100%', height: 70, marginTop: 10, cursor: 'pointer', borderRadius: 6 }}
+        style={{ width: '100%', height: waveHeight, marginTop: 10, cursor: 'pointer', borderRadius: 6 }}
       />
 
       <audio ref={audioElRef} src={url} preload="auto" crossOrigin="anonymous" style={{ display: 'none' }} />

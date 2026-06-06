@@ -77,10 +77,12 @@ export interface Job {
         session?: MultitrackSession
         session_id?: string
         regenerated_index?: number
+        inserted_index?: number
+        channel_regen?: string
       }
     | null
   error: string | null
-  meta: { title?: string; multitrack?: boolean; regen?: number }
+  meta: { title?: string; multitrack?: boolean; regen?: number; channel_regen?: string }
 }
 
 export interface MultitrackSegment {
@@ -89,12 +91,23 @@ export interface MultitrackSegment {
   text: string
   start_s: number
   duration_s: number
+  raw_duration_s: number
+  trim_start_s: number
+  trim_end_s: number
+  speed: number
+  gain_db: number
+  inpaint?: boolean
   url: string
+  clip_url: string
 }
 
 export interface MultitrackTrack {
   speaker_id: string
   name: string
+  voice_name?: string
+  custom_name?: string | null
+  gain_db?: number
+  kind?: string
   mode: string
   segments: MultitrackSegment[]
 }
@@ -109,6 +122,7 @@ export interface MultitrackSession {
   mix_url: string
   tracks: MultitrackTrack[]
   segment_count: number
+  can_undo?: boolean
 }
 
 export interface HistoryEntry {
@@ -218,6 +232,61 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ text: text ?? null }),
     }),
+  editSegment: (
+    sid: string,
+    index: number,
+    fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number },
+  ) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/edit`, {
+      method: 'POST',
+      body: JSON.stringify(fields),
+    }),
+  reflowSession: (sid: string, fields: { gap_ms?: number; speed?: number }) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/reflow`, { method: 'POST', body: JSON.stringify(fields) }),
+  insertSegment: (sid: string, body: { speaker_id: string; text: string; start_s: number; ripple: boolean }) =>
+    jfetch<{ job_id: string }>(`/api/multitrack/${sid}/insert`, { method: 'POST', body: JSON.stringify(body) }),
+  multitrackEmpty: (body: { title?: string; speakers: Record<string, SpeakerConfig>; params: GenParams }) =>
+    jfetch<MultitrackSession>('/api/multitrack/empty', { method: 'POST', body: JSON.stringify(body) }),
+  discardSession: (sid: string) => jfetch<{ ok: boolean }>(`/api/multitrack/${sid}`, { method: 'DELETE' }),
+  addSpeaker: (sid: string, cfg: SpeakerConfig) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/speaker`, { method: 'POST', body: JSON.stringify(cfg) }),
+  updateSpeaker: (sid: string, pos: string, cfg: SpeakerConfig) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/speaker/${pos}`, { method: 'POST', body: JSON.stringify(cfg) }),
+  removeSpeaker: (sid: string, pos: string) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/speaker/${pos}`, { method: 'DELETE' }),
+  deleteSegment: (sid: string, index: number, ripple: boolean) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/delete`, { method: 'POST', body: JSON.stringify({ ripple }) }),
+  splitSegment: (sid: string, index: number, at_s: number) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/split`, { method: 'POST', body: JSON.stringify({ at_s }) }),
+  deleteSpace: (sid: string, start_s: number, amount: number) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/delete-space`, { method: 'POST', body: JSON.stringify({ start_s, amount }) }),
+  addSpace: (sid: string, start_s: number, amount: number) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/add-space`, { method: 'POST', body: JSON.stringify({ start_s, amount }) }),
+  duplicateSegment: (sid: string, index: number, start_s: number, ripple: boolean) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/duplicate`, { method: 'POST', body: JSON.stringify({ start_s, ripple }) }),
+  transcribeSegment: (sid: string, index: number, draft?: { trim_start_s?: number; trim_end_s?: number; speed?: number }) =>
+    jfetch<{ text: string }>(`/api/multitrack/${sid}/segment/${index}/transcribe`, { method: 'POST', body: JSON.stringify(draft || {}) }),
+  setSegmentText: (sid: string, index: number, text: string) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/text`, { method: 'POST', body: JSON.stringify({ text }) }),
+  autoSlice: (sid: string, index: number) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/auto-slice`, { method: 'POST' }),
+  setInpaint: (sid: string, index: number, enabled: boolean) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/inpaint`, { method: 'POST', body: JSON.stringify({ enabled }) }),
+  promoteChannel: (sid: string, pos: string, name: string) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/speaker/${pos}/promote`, { method: 'POST', body: JSON.stringify({ name }) }),
+  undo: (sid: string) => jfetch<MultitrackSession>(`/api/multitrack/${sid}/undo`, { method: 'POST' }),
+  setChannel: (sid: string, pos: string, fields: { name?: string | null; gain_db?: number }) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/speaker/${pos}/channel`, { method: 'POST', body: JSON.stringify(fields) }),
+  regenChannel: (sid: string, pos: string) =>
+    jfetch<{ job_id: string }>(`/api/multitrack/${sid}/speaker/${pos}/regenerate`, { method: 'POST' }),
+  async uploadChannel(sid: string, file: File, name: string): Promise<MultitrackSession> {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('name', name)
+    const res = await fetch(`/api/multitrack/${sid}/upload-channel`, { method: 'POST', body: fd })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Upload failed')
+    return res.json()
+  },
   finalizeSession: (sid: string) =>
     jfetch<{ title?: string; filename: string; audio_url: string; duration_s: number }>(
       `/api/multitrack/${sid}/finalize`,

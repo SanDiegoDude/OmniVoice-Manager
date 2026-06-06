@@ -8,13 +8,14 @@ script pipeline, not just raw TTS.
 from __future__ import annotations
 
 import argparse
+import re
 import time
 import uuid
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -45,12 +46,27 @@ from .config import (
 from .jobs import JobManager
 from .model_manager import ModelManager, query_gpu_memory
 from .schemas import (
+    AddSpaceRequest,
+    DeleteSegmentRequest,
+    DeleteSpaceRequest,
+    DuplicateSegmentRequest,
+    EditSegmentRequest,
+    EmptySessionRequest,
     GenerateRequest,
+    InpaintRequest,
+    InsertSegmentRequest,
     LoadModelRequest,
+    PromoteChannelRequest,
     ProcessVoiceRequest,
+    ReflowRequest,
     RegenSegmentRequest,
     ScriptAndSpeakRequest,
     ScriptRequest,
+    SetChannelRequest,
+    SetSegmentTextRequest,
+    SpeakerConfig,
+    SplitSegmentRequest,
+    TranscribeSegmentRequest,
 )
 
 TMP_DIR = DATA_DIR / "tmp"
@@ -66,6 +82,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Single-step undo: snapshot a session's state right before any mutating request
+# touches it. Done in one place (the middleware) so every editor action — even
+# multi-call ones like promote — collapses to exactly one undo step. New-session
+# and non-mutating routes are skipped.
+_UNDO_SKIP_SUFFIX = ("/undo", "/finalize", "/transcribe")
+
+
+@app.middleware("http")
+async def _undo_checkpoint(request, call_next):
+    try:
+        if request.method in ("POST", "DELETE"):
+            parts = request.url.path.strip("/").split("/")
+            if (
+                len(parts) >= 4
+                and parts[0] == "api"
+                and parts[1] == "multitrack"
+                and parts[2] not in ("generate", "empty")
+                and not any(request.url.path.endswith(s) for s in _UNDO_SKIP_SUFFIX)
+            ):
+                sessions.checkpoint(parts[2])
+    except Exception:
+        pass  # never let snapshotting break the actual request
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -334,12 +374,264 @@ def multitrack_generate(req: GenerateRequest):
     return {"job_id": job_id}
 
 
+@app.post("/api/multitrack/empty")
+def multitrack_empty(req: EmptySessionRequest):
+    """Create a blank timeline to compose by hand."""
+    speakers_cfg = {k: v.model_dump() for k, v in req.speakers.items()}
+    return sessions.create_empty(
+        title=req.title or "Untitled Scene",
+        speakers_cfg=speakers_cfg,
+        params=req.params.model_dump(),
+        gap_ms=req.params.gap_ms,
+    )
+
+
 @app.get("/api/multitrack/{sid}")
 def multitrack_get(sid: str):
     session = sessions.get(sid)
     if not session:
         raise HTTPException(404, "Session not found")
     return session
+
+
+@app.delete("/api/multitrack/{sid}")
+def multitrack_discard(sid: str):
+    sessions.discard(sid)
+    return {"ok": True}
+
+
+@app.post("/api/multitrack/{sid}/undo")
+def multitrack_undo(sid: str):
+    """Restore the single last checkpoint (one step back)."""
+    try:
+        return sessions.undo(sid)
+    except FileNotFoundError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/multitrack/{sid}/speaker")
+def multitrack_add_speaker(sid: str, cfg: SpeakerConfig):
+    try:
+        return sessions.add_speaker(sid, cfg.model_dump())
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/speaker/{pos}")
+def multitrack_update_speaker(sid: str, pos: str, cfg: SpeakerConfig):
+    try:
+        return sessions.update_speaker(sid, pos, cfg.model_dump())
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.delete("/api/multitrack/{sid}/speaker/{pos}")
+def multitrack_remove_speaker(sid: str, pos: str):
+    try:
+        return sessions.remove_speaker(sid, pos)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/segment/{index}/delete")
+def multitrack_delete_segment(sid: str, index: int, req: Optional[DeleteSegmentRequest] = None):
+    try:
+        return sessions.delete_segment(sid, index, ripple=bool(req and req.ripple))
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/segment/{index}/split")
+def multitrack_split_segment(sid: str, index: int, req: SplitSegmentRequest):
+    try:
+        return sessions.split_segment(sid, index, req.at_s)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/delete-space")
+def multitrack_delete_space(sid: str, req: DeleteSpaceRequest):
+    try:
+        return sessions.delete_space(sid, req.start_s, req.amount)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/add-space")
+def multitrack_add_space(sid: str, req: AddSpaceRequest):
+    try:
+        return sessions.add_space(sid, req.start_s, req.amount)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/segment/{index}/duplicate")
+def multitrack_duplicate_segment(sid: str, index: int, req: DuplicateSegmentRequest):
+    try:
+        return sessions.duplicate_segment(sid, index, req.start_s, req.ripple)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/segment/{index}/transcribe")
+def multitrack_transcribe_segment(sid: str, index: int, req: TranscribeSegmentRequest | None = None):
+    """Whisper-transcribe a segment's audio (optionally an unsaved trim draft)."""
+    overrides = None
+    if req is not None:
+        overrides = {
+            "trim_start_s": req.trim_start_s,
+            "trim_end_s": req.trim_end_s,
+            "speed": req.speed,
+        }
+        overrides = {k: v for k, v in overrides.items() if v is not None} or None
+    try:
+        audio, sr, _name, _start = sessions.render_segment(sid, index, overrides)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    res = model_manager.transcribe({"waveform": audio, "sample_rate": sr})
+    return {"text": (res.get("text") or "").strip()}
+
+
+def _group_sentences(chunks: list, total_s: float) -> list:
+    """Merge Whisper timestamped chunks into sentences by terminal punctuation.
+    Each result has {text, start, end} in the same (audible) time domain."""
+    sentences: list = []
+    cur_text = ""
+    cur_start = None
+    cur_end = 0.0
+    term = re.compile(r"[.!?…。！？]['\"”’\)\]]*\s*$")
+    for c in chunks:
+        t = c.get("text", "") or ""
+        st = c.get("start")
+        en = c.get("end")
+        if cur_start is None:
+            cur_start = float(st) if st is not None else cur_end
+        cur_text += t
+        if en is not None:
+            cur_end = float(en)
+        if term.search(t):
+            sentences.append({"text": cur_text.strip(), "start": cur_start, "end": cur_end})
+            cur_text = ""
+            cur_start = None
+    if cur_text.strip():
+        sentences.append({"text": cur_text.strip(), "start": cur_start if cur_start is not None else cur_end, "end": total_s})
+    return [s for s in sentences if s["text"]]
+
+
+@app.post("/api/multitrack/{sid}/segment/{index}/auto-slice")
+def multitrack_auto_slice(sid: str, index: int):
+    """Auto-split a segment into one clip per sentence using Whisper timestamps."""
+    try:
+        audio, sr, _name, _start = sessions.render_segment(sid, index)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    total_s = len(audio) / float(max(sr, 1))
+    res = model_manager.transcribe({"waveform": audio, "sample_rate": sr, "chunks": True})
+    chunks = res.get("chunks") or []
+    sentences = _group_sentences(chunks, total_s)
+    if len(sentences) < 2:
+        raise HTTPException(400, "Couldn't detect multiple sentences in this segment.")
+    try:
+        return sessions.auto_slice(sid, index, sentences)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(400, str(e))
+
+
+def _prep_clone_audio(audio: np.ndarray, sr: int, target_s: float = 15.0, max_s: float = 16.5) -> np.ndarray:
+    """Bound a clone source to a clean ~15s window, cutting on word boundaries so
+    we never end mid-word (which makes the model hallucinate). Short clips pass
+    through untouched (the worker still isolates/normalizes them on cold build)."""
+    total = len(audio) / float(max(sr, 1))
+    if total <= max_s:
+        return np.asarray(audio, dtype=np.float32)
+    res = model_manager.transcribe({"waveform": audio, "sample_rate": sr, "chunks": True})
+    words = [w for w in (res.get("chunks") or []) if w.get("start") is not None and w.get("end") is not None]
+    if not words:
+        n = max(1, int(min(total, target_s) * sr))
+        return np.asarray(audio[:n], dtype=np.float32)
+    s0 = max(0.0, float(words[0]["start"]))
+    end = float(words[0]["end"])
+    for w in words:
+        we = float(w["end"])
+        if we - s0 <= max_s:
+            end = we
+        else:
+            break
+    clip = audio[int(s0 * sr) : int(end * sr)]
+    return np.asarray(clip if clip.size else audio, dtype=np.float32)
+
+
+@app.post("/api/multitrack/{sid}/segment/{index}/inpaint")
+def multitrack_inpaint(sid: str, index: int, req: InpaintRequest):
+    """Lock/unlock a segment's own audio as a per-segment ADR clone (Vocal Inpaint)."""
+    try:
+        if not req.enabled:
+            return sessions.set_inpaint(sid, index, False)
+        audio, sr = sessions.clone_source(sid, index)
+        prepped = _prep_clone_audio(audio, sr)
+        return sessions.set_inpaint(sid, index, True, prepped, sr)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/multitrack/{sid}/speaker/{pos}/promote")
+def multitrack_promote(sid: str, pos: str, req: PromoteChannelRequest | None = None):
+    """Promote an uploaded AUDIO channel into a new generative clone speaker:
+    re-casts its clips onto a fresh speaker slot, transcribes the dialogue, and
+    removes the old external channel."""
+    try:
+        info = sessions.channel_info(sid, pos)
+        if info["kind"] != "audio":
+            raise HTTPException(400, "Only uploaded audio channels can be promoted")
+        if info["clone_index"] is None:
+            raise HTTPException(400, "This channel has no audio to promote")
+        audio, sr = sessions.clone_source(sid, info["clone_index"])
+        prepped = _prep_clone_audio(audio, sr)
+        # Transcribe each clip so the promoted speaker's dialogue lands in the script.
+        transcripts: dict[int, str] = {}
+        for idx in info["indices"]:
+            try:
+                a, s = sessions.clone_source(sid, idx)
+                res = model_manager.transcribe({"waveform": a, "sample_rate": s})
+                t = (res.get("text") or "").strip()
+                if t:
+                    transcripts[idx] = t
+            except Exception:
+                pass  # best-effort per clip
+        label = (req.name if req and req.name else "") or info["name"]
+        return sessions.promote_channel(sid, pos, prepped, sr, label, transcripts)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/multitrack/{sid}/segment/{index}/text")
+def multitrack_set_segment_text(sid: str, index: int, req: SetSegmentTextRequest):
+    """Align a segment's displayed dialogue to its audio (no regeneration flag)."""
+    try:
+        return sessions.set_segment_text(sid, index, req.text)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.get("/api/multitrack/{sid}/segment/{index}/clip")
+def multitrack_segment_clip(sid: str, index: int, dl: int = 0):
+    """Render a segment exactly as it sits in the mix (trim+speed+level). Used for
+    accurate solo preview and shareable per-slice download."""
+    from .audio_utils import encode_audio
+
+    try:
+        audio, sr, name, start_s = sessions.render_segment(sid, index)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    safe = service.slugify(f"{name}-{start_s:.1f}s", default=f"seg{index}")
+    if dl:
+        fmt = settings.output_format
+        path = TMP_DIR / f"clip_{sid}_{index}.{fmt}"
+        out = encode_audio(path, audio, sr, fmt=fmt, bitrate=settings.output_bitrate)
+        return FileResponse(str(out), media_type=media_type_for(out), filename=f"{safe}{out.suffix}")
+    path = TMP_DIR / f"clip_{sid}_{index}.wav"
+    save_wav(path, audio, sr)
+    return FileResponse(str(path), media_type="audio/wav", filename=f"{safe}.wav")
 
 
 @app.post("/api/multitrack/{sid}/segment/{index}/regenerate")
@@ -349,6 +641,79 @@ def multitrack_regen(sid: str, index: int, req: Optional[RegenSegmentRequest] = 
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(404, str(e))
     job_id = job_manager.submit(job_fn, meta={"multitrack": True, "regen": index})
+    return {"job_id": job_id}
+
+
+@app.post("/api/multitrack/{sid}/segment/{index}/edit")
+def multitrack_edit(sid: str, index: int, req: EditSegmentRequest):
+    try:
+        return sessions.set_segment(
+            sid, index,
+            start_s=req.start_s, trim_start_s=req.trim_start_s,
+            trim_end_s=req.trim_end_s, speed=req.speed, gain_db=req.gain_db,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/speaker/{pos}/channel")
+def multitrack_set_channel(sid: str, pos: str, req: SetChannelRequest):
+    """Set a channel's custom name and/or output gain."""
+    try:
+        return sessions.set_channel(sid, pos, name=req.name, gain_db=req.gain_db)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/speaker/{pos}/regenerate")
+def multitrack_channel_regen(sid: str, pos: str):
+    """Regenerate every spoken segment on a channel (re-cast a voice)."""
+    try:
+        job_fn = service.make_channel_regen_job(model_manager, sid, pos)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(400, str(e))
+    job_id = job_manager.submit(job_fn, meta={"multitrack": True, "channel_regen": pos})
+    return {"job_id": job_id}
+
+
+@app.post("/api/multitrack/{sid}/upload-channel")
+async def multitrack_upload_channel(sid: str, file: UploadFile = File(...), name: str = Form("")):
+    """Add an uploaded audio file as a new layered channel (soundtrack / SFX)."""
+    import librosa
+
+    data = await file.read()
+    tmp = TMP_DIR / f"upload_{uuid.uuid4().hex}_{file.filename or 'audio'}"
+    tmp.write_bytes(data)
+    try:
+        audio, in_sr = librosa.load(str(tmp), sr=None, mono=True)
+    except Exception as e:  # noqa: BLE001
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, f"Could not read audio: {e}")
+    tmp.unlink(missing_ok=True)
+    label = (name or "").strip() or Path(file.filename or "Audio").stem
+    try:
+        return sessions.add_audio_channel(sid, label, audio, int(in_sr))
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/reflow")
+def multitrack_reflow(sid: str, req: ReflowRequest):
+    try:
+        return sessions.reflow(sid, gap_ms=req.gap_ms, speed=req.speed)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/insert")
+def multitrack_insert(sid: str, req: InsertSegmentRequest):
+    if not req.text.strip():
+        raise HTTPException(400, "Empty dialogue")
+    try:
+        job_fn = service.make_insert_job(model_manager, sid, req.speaker_id, req.text.strip(), req.start_s, req.ripple)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(404, str(e))
+    job_id = job_manager.submit(job_fn, meta={"multitrack": True, "insert": True})
     return {"job_id": job_id}
 
 

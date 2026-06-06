@@ -1,22 +1,67 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { MultitrackSession } from '../api'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { MultitrackSegment, MultitrackSession, MultitrackTrack } from '../api'
 import { AudioPlayer, type AudioPlayerHandle } from './AudioPlayer'
 import { Toggle } from './ui'
+import { blurTag, focusTag } from '../tagInject'
 
-const ROW_H = 60
+const ROW_H = 74
 const RULER_H = 22
-const LABEL_W = 132
-const MIN_SEG_PX = 124
+const LABEL_W = 184
+const MIN_SEG_PX = 22
+const GHOST_W = 130
+const MIN_PPS = 12
+const MAX_PPS = 320
+const clampPps = (v: number) => Math.max(MIN_PPS, Math.min(MAX_PPS, v))
 
 function hueFor(id: string): number {
   let h = 0
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360
   return (h * 47) % 360
 }
+const snap = (t: number) => Math.max(0, Math.round(t * 10) / 10)
+
+type Drag = { index: number; cur: number } | null
+type Sel = { a: number; b: number; mode: 'del' | 'add' } | null
+type SegMenu = { index: number; x: number; y: number } | null
+type Pending =
+  | { kind: 'seg'; index: number; origStart: number; startX: number }
+  | { kind: 'ghost'; origStart: number; startX: number }
+  | { kind: 'select'; origStart: number; startX: number }
+  | { kind: 'sel-move' | 'sel-l' | 'sel-r'; origA: number; origB: number; startX: number }
+  | { kind: 'pan'; origScroll: number; startX: number }
+type Insert = {
+  kind: 'new' | 'dup'
+  srcIndex?: number
+  speakerId: string
+  start_s: number
+  ripple: boolean
+  phase: 'menu' | 'place' | 'type'
+  text: string
+  menuX: number
+  menuY: number
+} | null
+type TrimDraft = { trimStart: number; trimEnd: number; speed: number; gain: number }
 
 export function MultitrackEditor({
   session,
   onRegen,
+  onEditSegment,
+  onReflow,
+  onInsertSegment,
+  onDeleteSegment,
+  onSplitSegment,
+  onDeleteSpace,
+  onAddSpace,
+  onDuplicateSegment,
+  onSetText,
+  onTranscribe,
+  onSetChannel,
+  onRegenChannel,
+  onUploadChannel,
+  onAutoSlice,
+  onSetInpaint,
+  onPromoteChannel,
+  onUndo,
   regenIndex,
   busy,
   onFinalize,
@@ -24,38 +69,146 @@ export function MultitrackEditor({
 }: {
   session: MultitrackSession
   onRegen: (index: number, text?: string) => void
+  onEditSegment: (index: number, fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number; gain_db?: number }) => void
+  onReflow: (fields: { gap_ms?: number; speed?: number }) => void
+  onInsertSegment: (speakerId: string, text: string, startS: number, ripple: boolean) => void
+  onDeleteSegment: (index: number, ripple: boolean) => void
+  onSplitSegment: (index: number, atS: number) => void
+  onDeleteSpace: (startS: number, amount: number) => void
+  onAddSpace: (startS: number, amount: number) => void
+  onDuplicateSegment: (index: number, startS: number, ripple: boolean) => void
+  onSetText: (index: number, text: string) => void
+  onTranscribe: (index: number, draft?: { trim_start_s?: number; trim_end_s?: number; speed?: number }) => Promise<string | null | undefined>
+  onSetChannel: (pos: string, fields: { name?: string | null; gain_db?: number }) => void
+  onRegenChannel: (pos: string) => void
+  onUploadChannel: (file: File, name: string) => void
+  onAutoSlice: (index: number) => Promise<void>
+  onSetInpaint: (index: number, enabled: boolean) => Promise<void>
+  onPromoteChannel: (pos: string, name: string) => Promise<MultitrackSession | null>
+  onUndo: () => void
   regenIndex: number | null
   busy: boolean
   onFinalize: () => void
   finalizing: boolean
 }) {
   const [pxPerSec, setPxPerSec] = useState(90)
+  const [vScale, setVScale] = useState(1)
+  const rowH = Math.round(ROW_H * vScale)
+  const vDragRef = useRef<{ y: number; scale: number } | null>(null)
   const [playingSeg, setPlayingSeg] = useState<number | null>(null)
   const [head, setHead] = useState({ cur: 0, playing: false })
   const [follow, setFollow] = useState(true)
   const [edits, setEdits] = useState<Record<number, string>>({})
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
   const [editText, setEditText] = useState('')
+  const [drag, setDrag] = useState<Drag>(null)
+  const [trimIndex, setTrimIndex] = useState<number | null>(null)
+  const [trimDraft, setTrimDraft] = useState<TrimDraft>({ trimStart: 0, trimEnd: 0, speed: 1, gain: 0 })
+  const [trimText, setTrimText] = useState('')
+  const [transcribing, setTranscribing] = useState<number | 'trim' | null>(null)
+  const [slicing, setSlicing] = useState<number | null>(null)
+  const [inpainting, setInpainting] = useState<number | null>(null)
+  const [promoting, setPromoting] = useState<string | null>(null)
+  const [previewSpeed, setPreviewSpeed] = useState(1)
+  const [insert, setInsert] = useState<Insert>(null)
+  const segMenuRef = useRef<HTMLDivElement>(null)
+  const insertMenuRef = useRef<HTMLDivElement>(null)
+  // Keep popup menus fully on-screen: cap height (scroll if needed) and nudge them
+  // back inside the viewport after they render at the click point.
+  const clampToViewport = (el: HTMLDivElement | null) => {
+    if (!el) return
+    const pad = 8
+    el.style.maxHeight = `${window.innerHeight - pad * 2}px`
+    el.style.overflowY = 'auto'
+    const r = el.getBoundingClientRect()
+    let left = r.left
+    let top = r.top
+    if (r.right > window.innerWidth - pad) left = window.innerWidth - pad - r.width
+    if (r.bottom > window.innerHeight - pad) top = window.innerHeight - pad - r.height
+    el.style.left = `${Math.max(pad, left)}px`
+    el.style.top = `${Math.max(pad, top)}px`
+  }
+
+  // Vertical resize: drag the handle under the grid to grow track rows + the mix
+  // waveform together (they scale by the same factor so the view stays balanced).
+  const onVMove = useCallback((e: MouseEvent) => {
+    const s = vDragRef.current
+    if (!s) return
+    const per = ROW_H * Math.max(1, session.tracks.length)
+    const next = s.scale + (e.clientY - s.y) / per
+    setVScale(Math.max(0.6, Math.min(3, Math.round(next * 100) / 100)))
+  }, [session.tracks.length])
+  const onVUp = useCallback(() => {
+    vDragRef.current = null
+    window.removeEventListener('mousemove', onVMove)
+    window.removeEventListener('mouseup', onVUp)
+  }, [onVMove])
+  const startVResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    vDragRef.current = { y: e.clientY, scale: vScale }
+    window.addEventListener('mousemove', onVMove)
+    window.addEventListener('mouseup', onVUp)
+  }, [vScale, onVMove, onVUp])
+  const [gapVal, setGapVal] = useState(session.gap_ms)
+  const [speedVal, setSpeedVal] = useState(1)
+  const [sel, setSel] = useState<Sel>(null)
+  const [selEditing, setSelEditing] = useState(false)
+  const [segMenu, setSegMenu] = useState<SegMenu>(null)
+  useLayoutEffect(() => { clampToViewport(segMenuRef.current) }, [segMenu])
+  useLayoutEffect(() => { clampToViewport(insertMenuRef.current) }, [insert])
 
   const segAudioRef = useRef<HTMLAudioElement | null>(null)
   const playerRef = useRef<AudioPlayerHandle>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
-  const prevRegen = useRef<number | null>(null)
+  const contentRef = useRef<HTMLDivElement | null>(null)
+  const headPosRef = useRef(0)
+  const mixRef = useRef(session.mix_url)
+  const uploadInputRef = useRef<HTMLInputElement>(null)
+  const pendingRef = useRef<Pending | null>(null)
+  const dragRef = useRef<{ index: number; cur: number } | null>(null)
+  const selRef = useRef<Sel>(null)
+  const activeRef = useRef(false)
+  const suppressClickRef = useRef(false)
+
+  const updateSel = useCallback((s: Sel) => {
+    selRef.current = s
+    setSel(s)
+    if (!s) setSelEditing(false)
+  }, [])
 
   const total = Math.max(session.total_duration_s, 0.1)
-  const laneWidth = Math.ceil(total * pxPerSec) + 48
-
+  const laneWidth = Math.ceil(total * pxPerSec) + 240
   const flatSegs = useMemo(() => session.tracks.flatMap((t) => t.segments), [session])
+  const starts = useMemo(
+    () => Array.from(new Set(flatSegs.map((s) => Math.round(s.start_s * 1000) / 1000))).sort((a, b) => a - b),
+    [flatSegs],
+  )
+  const trimSeg = trimIndex != null ? flatSegs.find((s) => s.index === trimIndex) : undefined
 
-  // Stop any solo segment when the session reloads (e.g. after a regen).
+  const timeFromClientX = useCallback(
+    (clientX: number) => {
+      const rect = contentRef.current?.getBoundingClientRect()
+      if (!rect) return 0
+      return Math.max(0, Math.min(total, (clientX - rect.left) / pxPerSec))
+    },
+    [pxPerSec, total],
+  )
+
+  // Reset transient UI when the session is replaced.
   useEffect(() => {
-    if (segAudioRef.current) segAudioRef.current.pause()
+    segAudioRef.current?.pause()
     setPlayingSeg(null)
     setEditingIndex(null)
+    setInsert(null)
+    setTrimIndex(null)
+    setSegMenu(null)
+    updateSel(null)
+    setGapVal(session.gap_ms)
+    setSpeedVal(1)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id])
 
-  // Drop pending edits that the server has now committed (post-regen).
+  // Drop pending text edits the server has committed.
   useEffect(() => {
     setEdits((prev) => {
       const next = { ...prev }
@@ -71,38 +224,99 @@ export function MultitrackEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.mix_url])
 
-  // After a regen finishes, jump the full-mix player to that segment and play.
+  // Whenever the mix reloads (regen / move / add / trim / etc.) the player
+  // remounts (key=mix_url) and resets to 0. Restore the playhead to where it was.
+  // The seek is queued until the (possibly slow) audio finishes loading, and the
+  // player honors the LATEST pending target — so a click during load wins.
   useEffect(() => {
-    if (prevRegen.current != null && regenIndex == null) {
-      const seg = flatSegs.find((s) => s.index === prevRegen.current)
-      if (seg) {
-        setHead({ cur: seg.start_s, playing: true })
-        playerRef.current?.seekAndPlay(seg.start_s)
+    if (session.mix_url === mixRef.current) return
+    mixRef.current = session.mix_url
+    const t = headPosRef.current
+    if (t > 0.01) playerRef.current?.seek(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.mix_url])
+
+  // Global drag listeners: segment move, insert-ghost move, delete-space select,
+  // and red-bar move/resize.
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const p = pendingRef.current
+      if (!p) return
+      const dx = e.clientX - p.startX
+      if (!activeRef.current && Math.abs(dx) < 4) return
+      activeRef.current = true
+      const dt = dx / pxPerSec
+      if (p.kind === 'seg') {
+        const cur = snap(p.origStart + dt)
+        dragRef.current = { index: p.index, cur }
+        setDrag({ index: p.index, cur })
+      } else if (p.kind === 'ghost') {
+        setInsert((i) => (i ? { ...i, start_s: snap(p.origStart + dt) } : i))
+      } else if (p.kind === 'select') {
+        updateSel({ a: p.origStart, b: Math.max(0, p.origStart + dt), mode: 'del' })
+      } else if (p.kind === 'sel-move') {
+        const mode = selRef.current?.mode ?? 'del'
+        let na = p.origA + dt
+        let nb = p.origB + dt
+        if (na < 0) { nb -= na; na = 0 }
+        updateSel({ a: na, b: nb, mode })
+      } else if (p.kind === 'sel-l') {
+        updateSel({ a: Math.max(0, p.origA + dt), b: p.origB, mode: selRef.current?.mode ?? 'del' })
+      } else if (p.kind === 'sel-r') {
+        updateSel({ a: p.origA, b: Math.max(0, p.origB + dt), mode: selRef.current?.mode ?? 'del' })
+      } else if (p.kind === 'pan') {
+        if (scrollRef.current) scrollRef.current.scrollLeft = p.origScroll - dx
       }
     }
-    prevRegen.current = regenIndex
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [regenIndex, session.mix_url])
-
-  const playSeg = useCallback(
-    (index: number, url: string) => {
-      if (!segAudioRef.current) segAudioRef.current = new Audio()
-      const a = segAudioRef.current
-      if (playingSeg === index) {
-        a.pause()
-        setPlayingSeg(null)
-        return
+    const onUp = () => {
+      const p = pendingRef.current
+      if (activeRef.current) {
+        if (p?.kind === 'seg' && dragRef.current) {
+          onEditSegment(dragRef.current.index, { start_s: dragRef.current.cur })
+        } else if (p?.kind === 'select') {
+          const s = selRef.current
+          if (!s || Math.abs(s.b - s.a) < 0.05) updateSel(null)
+        }
+        suppressClickRef.current = true
+        setTimeout(() => (suppressClickRef.current = false), 60)
       }
-      a.onended = () => setPlayingSeg(null)
-      a.src = url
-      a.currentTime = 0
-      a.play().then(() => setPlayingSeg(index)).catch(() => setPlayingSeg(null))
-    },
-    [playingSeg],
-  )
+      pendingRef.current = null
+      dragRef.current = null
+      activeRef.current = false
+      setDrag(null)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [pxPerSec, onEditSegment, updateSel])
+
+  // Spacebar = play/pause (unless typing).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable))
+        return
+      if (e.code === 'Space') {
+        e.preventDefault()
+        playerRef.current?.toggle()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   const onTime = useCallback(
-    (cur: number, _dur: number, playing: boolean) => {
+    (cur: number, dur: number, playing: boolean) => {
+      // Ignore the (0,0) report a freshly-remounted player emits before its audio
+      // has loaded — otherwise it wipes the position we want to restore to.
+      if (dur <= 0) {
+        setHead((h) => ({ ...h, playing }))
+        return
+      }
+      headPosRef.current = cur
       setHead({ cur, playing })
       if (follow && playing && scrollRef.current) {
         const el = scrollRef.current
@@ -117,16 +331,130 @@ export function MultitrackEditor({
     [follow, pxPerSec],
   )
 
-  // Click anywhere on the timeline to move the full-mix playhead there.
+  // Solo preview plays the backend-rendered clip (trim + speed + level already
+  // baked in) so it matches the mix exactly — no client-side trim math.
+  const playSeg = useCallback(
+    (seg: MultitrackSegment) => {
+      if (!segAudioRef.current) segAudioRef.current = new Audio()
+      const a = segAudioRef.current
+      if (playingSeg === seg.index) {
+        a.pause()
+        setPlayingSeg(null)
+        return
+      }
+      a.onended = () => setPlayingSeg(null)
+      a.src = seg.clip_url
+      a.currentTime = 0
+      a.play().then(() => setPlayingSeg(seg.index)).catch(() => setPlayingSeg(null))
+    },
+    [playingSeg],
+  )
+
+  const downloadSeg = (seg: MultitrackSegment) => {
+    const aTag = document.createElement('a')
+    aTag.href = `${seg.clip_url}&dl=1`
+    aTag.click()
+  }
+
+  // Transport
+  const seekTo = (t: number) => {
+    headPosRef.current = t
+    playerRef.current?.seek(t)
+    setHead((h) => ({ ...h, cur: t }))
+  }
+  const prevSeg = () => {
+    const t = [...starts].reverse().find((s) => s < head.cur - 0.05)
+    seekTo(t ?? 0)
+  }
+  const nextSeg = () => {
+    const t = starts.find((s) => s > head.cur + 0.05)
+    if (t != null) seekTo(t)
+  }
+
   const seekFromClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
-      const content = e.currentTarget.getBoundingClientRect()
-      const t = Math.max(0, Math.min(total, (e.clientX - content.left) / pxPerSec))
-      playerRef.current?.seek(t)
-      setHead((h) => ({ ...h, cur: t }))
+      if (suppressClickRef.current || insert) return
+      if (selRef.current) {
+        updateSel(null)
+        return
+      }
+      seekTo(timeFromClientX(e.clientX))
     },
-    [pxPerSec, total],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [insert, timeFromClientX, updateSel],
   )
+
+  const startSegDrag = (e: React.MouseEvent, seg: MultitrackSegment) => {
+    if (e.button !== 0) return // middle-click falls through to pan
+    const tgt = e.target as HTMLElement
+    if (tgt.closest('.mtk-seg-bar, .mtk-seg-text, .mtk-seg-edit')) return
+    pendingRef.current = { kind: 'seg', index: seg.index, origStart: seg.start_s, startX: e.clientX }
+  }
+
+  // Middle-button = pan the timeline like a canvas; left-drag on empty = select.
+  const startContentDrag = (e: React.MouseEvent) => {
+    if (e.button === 1) {
+      e.preventDefault()
+      pendingRef.current = { kind: 'pan', origScroll: scrollRef.current?.scrollLeft ?? 0, startX: e.clientX }
+      return
+    }
+    if (e.button !== 0) return
+    const tgt = e.target as HTMLElement
+    if (tgt.closest('.mtk-seg, .mtk-ghost, .mtk-sel, button, input, textarea')) return
+    if (insert) return
+    pendingRef.current = { kind: 'select', origStart: Math.max(0, timeFromClientX(e.clientX)), startX: e.clientX }
+  }
+
+  // Shift + mouse wheel zooms, keeping the time under the cursor fixed.
+  const onWheelZoom = (e: React.WheelEvent) => {
+    if (!e.shiftKey) return
+    e.preventDefault()
+    const scrollEl = scrollRef.current
+    if (!scrollEl) return
+    const viewportX = e.clientX - scrollEl.getBoundingClientRect().left
+    const timeAtCursor = (scrollEl.scrollLeft + viewportX) / pxPerSec
+    const next = clampPps(pxPerSec * (e.deltaY < 0 ? 1.18 : 1 / 1.18))
+    if (next === pxPerSec) return
+    setPxPerSec(next)
+    requestAnimationFrame(() => {
+      if (scrollRef.current) scrollRef.current.scrollLeft = Math.max(0, timeAtCursor * next - viewportX)
+    })
+  }
+
+  const openTrim = (seg: MultitrackSegment) => {
+    setTrimIndex(seg.index)
+    setTrimDraft({ trimStart: seg.trim_start_s, trimEnd: seg.trim_end_s, speed: seg.speed, gain: seg.gain_db || 0 })
+    setTrimText(seg.text)
+    setPreviewSpeed(seg.speed || 1)
+  }
+  const saveTrim = () => {
+    if (trimIndex == null) return
+    onEditSegment(trimIndex, {
+      trim_start_s: trimDraft.trimStart,
+      trim_end_s: trimDraft.trimEnd,
+      speed: trimDraft.speed,
+      gain_db: trimDraft.gain,
+    })
+    // Text changes in the trim panel are alignment (no regen flag).
+    const orig = flatSegs.find((s) => s.index === trimIndex)?.text ?? ''
+    if (trimText.trim() !== orig.trim()) onSetText(trimIndex, trimText.trim())
+    setTrimIndex(null)
+  }
+  const whisperTrim = async () => {
+    if (trimIndex == null) return
+    setTranscribing('trim')
+    const t = await onTranscribe(trimIndex, { trim_start_s: trimDraft.trimStart, trim_end_s: trimDraft.trimEnd, speed: trimDraft.speed })
+    setTranscribing(null)
+    if (t != null) setTrimText(t)
+  }
+  const whisperAlign = async (index: number) => {
+    setTranscribing(index)
+    const t = await onTranscribe(index)
+    setTranscribing(null)
+    if (t != null) onSetText(index, t)
+  }
+
+  const laneIndexOf = (sid: string) => session.tracks.findIndex((t) => t.speaker_id === sid)
 
   const startEdit = (index: number, current: string) => {
     setEditingIndex(index)
@@ -145,7 +473,7 @@ export function MultitrackEditor({
   }, [total, pxPerSec])
 
   return (
-    <div className="mtk card">
+    <div className="mtk">
       <div className="flex-between" style={{ marginBottom: 10 }}>
         <div>
           <div className="section-title" style={{ margin: 0 }}>
@@ -156,25 +484,68 @@ export function MultitrackEditor({
           </div>
         </div>
         <div className="row" style={{ gap: 12, alignItems: 'center' }}>
-          <Toggle checked={follow} onChange={setFollow} label="Follow playhead" />
+          <Toggle checked={follow} onChange={setFollow} label="Follow" />
           <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             Zoom
-            <input
-              type="range"
-              min={30}
-              max={200}
-              step={10}
-              value={pxPerSec}
-              onChange={(e) => setPxPerSec(parseInt(e.target.value, 10))}
-            />
+            <input type="range" min={MIN_PPS} max={MAX_PPS} step={2} value={pxPerSec} onChange={(e) => setPxPerSec(clampPps(parseInt(e.target.value, 10)))} title="Shift + scroll over the timeline to zoom" />
           </label>
+          <button className="btn sm ghost" onClick={onUndo} disabled={busy || !session.can_undo} title="Undo the last action (single step back — regenerate, move, trim, add, delete, etc.)">
+            ↶ Undo
+          </button>
+          <button className="btn sm ghost" onClick={() => uploadInputRef.current?.click()} disabled={busy} title="Upload an audio file as a new layered channel (soundtrack / SFX)">
+            ＋🎵 Audio channel
+          </button>
+          <input
+            ref={uploadInputRef}
+            type="file"
+            accept="audio/*"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              if (f) onUploadChannel(f, f.name.replace(/\.[^.]+$/, ''))
+              e.target.value = ''
+            }}
+          />
           <button className="btn primary" onClick={onFinalize} disabled={busy || finalizing}>
             {finalizing ? <span className="spinner" /> : '✓'} Finalize audio
           </button>
         </div>
       </div>
 
-      {/* Full stitched mix — scrub the whole conversation while you edit. */}
+      {/* Transport + global controls */}
+      <div className="mtk-transport">
+        <div className="row" style={{ gap: 4 }}>
+          <button className="btn sm ghost" onClick={() => seekTo(0)} title="Start">⏮</button>
+          <button className="btn sm ghost" onClick={prevSeg} title="Previous segment">◀</button>
+          <button className="btn sm" onClick={() => playerRef.current?.toggle()} title="Play / pause (space)">
+            {head.playing ? '⏸' : '▶'}
+          </button>
+          <button className="btn sm ghost" onClick={nextSeg} title="Next segment">▶</button>
+          <button className="btn sm ghost" onClick={() => seekTo(total)} title="End">⏭</button>
+        </div>
+        <div className="row" style={{ gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+          <label className="hint mtk-glob" title="Global speed (re-flows the timeline; resets per-segment speeds)">
+            Speed {speedVal.toFixed(2)}×
+            <input
+              type="range" min={0.5} max={1.5} step={0.05} value={speedVal} disabled={busy}
+              onChange={(e) => setSpeedVal(parseFloat(e.target.value))}
+              onMouseUp={() => onReflow({ speed: speedVal })}
+              onTouchEnd={() => onReflow({ speed: speedVal })}
+            />
+          </label>
+          <label className="hint mtk-glob" title="Gap between turns (re-flows the timeline sequentially)">
+            Gap {gapVal}ms
+            <input
+              type="range" min={0} max={800} step={25} value={gapVal} disabled={busy}
+              onChange={(e) => setGapVal(parseInt(e.target.value, 10))}
+              onMouseUp={() => onReflow({ gap_ms: gapVal })}
+              onTouchEnd={() => onReflow({ gap_ms: gapVal })}
+            />
+          </label>
+        </div>
+      </div>
+
+      {/* Full stitched mix */}
       <AudioPlayer
         ref={playerRef}
         key={session.mix_url}
@@ -182,118 +553,117 @@ export function MultitrackEditor({
         title="Full mix (auto-stitched)"
         filename={`${session.title || 'scene'}.wav`}
         autoPlay={false}
+        waveHeight={Math.round(70 * vScale)}
         onTime={onTime}
       />
 
       <div className="mtk-grid" style={{ marginTop: 12 }}>
-        {/* Fixed speaker-label column (anchored left). */}
         <div className="mtk-labels" style={{ width: LABEL_W }}>
           <div className="mtk-corner" style={{ height: RULER_H }} />
           {session.tracks.map((t) => (
-            <div
+            <ChannelLabel
               key={t.speaker_id}
-              className="mtk-label"
-              style={{ height: ROW_H, borderLeft: `3px solid hsl(${hueFor(t.speaker_id)} 70% 60%)` }}
-              title={t.name}
-            >
-              <span className="mtk-label-name">{t.name}</span>
-              <span className="mtk-label-sub">{t.segments.length} seg</span>
-            </div>
+              track={t}
+              rowH={rowH}
+              busy={!!busy || regenIndex != null}
+              promoting={promoting === t.speaker_id}
+              onSetChannel={onSetChannel}
+              onRegenChannel={onRegenChannel}
+              onPromote={async (pos, name) => { setPromoting(pos); try { await onPromoteChannel(pos, name) } finally { setPromoting(null) } }}
+            />
           ))}
         </div>
 
-        {/* Scrollable timeline. */}
-        <div className="mtk-scroll" ref={scrollRef}>
-          <div className="mtk-content" style={{ width: laneWidth }} onClick={seekFromClick}>
+        <div className="mtk-scroll" ref={scrollRef} onWheel={onWheelZoom}>
+          <div className="mtk-content" ref={contentRef} style={{ width: laneWidth }} onClick={seekFromClick} onMouseDown={startContentDrag}>
             <div className="mtk-ruler" style={{ height: RULER_H }}>
               {ruler.map((t) => (
-                <span key={t} className="mtk-tick" style={{ left: t * pxPerSec }}>
-                  {t}s
-                </span>
+                <span key={t} className="mtk-tick" style={{ left: t * pxPerSec }}>{t}s</span>
               ))}
             </div>
 
             {session.tracks.map((t) => {
               const hue = hueFor(t.speaker_id)
+              const laneAudio = t.kind === 'audio'
               return (
                 <div
                   key={t.speaker_id}
-                  className="mtk-lane"
-                  style={{
-                    height: ROW_H,
-                    backgroundImage: `repeating-linear-gradient(90deg, rgba(255,255,255,.045) 0 1px, transparent 1px ${pxPerSec}px)`,
+                  className={`mtk-lane${laneAudio ? ' audio' : ''}`}
+                  style={{ height: rowH, backgroundImage: `repeating-linear-gradient(90deg, rgba(255,255,255,.045) 0 1px, transparent 1px ${pxPerSec}px)` }}
+                  onDoubleClick={(e) => {
+                    if ((e.target as HTMLElement).closest('.mtk-seg')) return
+                    setInsert({ kind: 'new', speakerId: t.speaker_id, start_s: snap(timeFromClientX(e.clientX)), ripple: false, phase: 'menu', text: '', menuX: e.clientX, menuY: e.clientY })
                   }}
+                  title="Double-click an empty spot to add a segment"
                 >
                   {t.segments.map((seg) => {
-                    const left = seg.start_s * pxPerSec
+                    const live = drag && drag.index === seg.index ? drag.cur : seg.start_s
+                    const left = live * pxPerSec
                     const width = Math.max(MIN_SEG_PX, seg.duration_s * pxPerSec)
+                    // Collapse inline controls into the ⋯ menu as the clip shrinks.
+                    const tier = width >= 232 ? 4 : width >= 172 ? 3 : width >= 120 ? 2 : width >= 70 ? 1 : 0
                     const isPlaying = playingSeg === seg.index
                     const isRegen = regenIndex === seg.index
                     const isEditing = editingIndex === seg.index
+                    const isTrimming = trimIndex === seg.index
                     const text = edits[seg.index] ?? seg.text
                     const dirty = edits[seg.index] !== undefined && edits[seg.index] !== seg.text
                     return (
                       <div
                         key={seg.index}
-                        className={`mtk-seg${isRegen ? ' regen' : ''}${dirty ? ' dirty' : ''}`}
-                        style={{
-                          left,
-                          width,
-                          background: `hsl(${hue} 45% 22%)`,
-                          borderColor: dirty ? 'var(--warn)' : `hsl(${hue} 60% 45%)`,
-                        }}
-                        title={text}
+                        className={`mtk-seg${isRegen ? ' regen' : ''}${dirty ? ' dirty' : ''}${isTrimming ? ' trimming' : ''}${seg.inpaint ? ' inpaint' : ''}${drag && drag.index === seg.index ? ' dragging' : ''}`}
+                        style={{ left, width, background: `hsl(${hue} 45% 22%)`, borderColor: dirty ? 'var(--warn)' : `hsl(${hue} 60% 45%)` }}
+                        title={`${text}\n(drag to move)`}
+                        onMouseDown={(e) => startSegDrag(e, seg)}
                       >
-                        <div className="mtk-seg-bar" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            className={`mtk-ic${isPlaying ? ' on' : ''}`}
-                            onClick={() => playSeg(seg.index, seg.url)}
-                            title={isPlaying ? 'Stop' : 'Play segment'}
-                          >
-                            {isPlaying ? '■' : '▶'}
-                          </button>
-                          <button
-                            className={`mtk-ic${dirty ? ' warn' : ''}`}
-                            onClick={() => onRegen(seg.index, dirty ? edits[seg.index].trim() : undefined)}
-                            disabled={busy}
-                            title={dirty ? 'Regenerate with edited line' : 'Regenerate this segment'}
-                          >
-                            {isRegen ? <span className="spinner sm" /> : '↻'}
-                          </button>
+                        <div className="mtk-seg-bar" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+                          {tier >= 1 && (
+                            <button className={`mtk-ic${isPlaying ? ' on' : ''}`} onClick={() => playSeg(seg)} title={isPlaying ? 'Stop' : 'Play'}>
+                              {isPlaying ? '■' : '▶'}
+                            </button>
+                          )}
+                          {tier >= 2 && (
+                            <button className={`mtk-ic${dirty ? ' warn' : ''}`} onClick={() => onRegen(seg.index, dirty ? edits[seg.index].trim() : undefined)} disabled={busy} title={dirty ? 'Regenerate with edited line' : 'Regenerate'}>
+                              {isRegen ? <span className="spinner sm" /> : '↻'}
+                            </button>
+                          )}
+                          {tier >= 4 && <button className="mtk-ic" onClick={() => startEdit(seg.index, text)} title="Edit dialogue">✎</button>}
+                          {tier >= 4 && <button className="mtk-ic" onClick={() => downloadSeg(seg)} title="Download this slice">⬇</button>}
+                          {tier >= 3 && (
+                            <button className={`mtk-ic${isTrimming ? ' on' : ''}`} onClick={() => (isTrimming ? saveTrim() : openTrim(seg))} title={isTrimming ? 'Save trim' : 'Trim / speed'}>
+                              {isTrimming ? '💾' : '✂'}
+                            </button>
+                          )}
                           <button
                             className="mtk-ic"
-                            onClick={() => startEdit(seg.index, text)}
-                            title="Edit dialogue"
+                            title="More actions"
+                            onClick={(e) => setSegMenu({ index: seg.index, x: e.clientX, y: e.clientY })}
                           >
-                            ✎
+                            ⋯
                           </button>
-                          <span className="mtk-seg-dur">{seg.duration_s.toFixed(1)}s</span>
+                          {tier >= 2 && seg.speed !== 1 && <span className="mtk-badge">{seg.speed.toFixed(2)}×</span>}
+                          {tier >= 3 && <span className="mtk-seg-dur">{seg.duration_s.toFixed(1)}s</span>}
                         </div>
                         {isEditing ? (
                           <textarea
                             className="mtk-seg-edit"
                             autoFocus
                             value={editText}
+                            onMouseDown={(e) => e.stopPropagation()}
                             onClick={(e) => e.stopPropagation()}
                             onChange={(e) => setEditText(e.target.value)}
-                            onBlur={() => commitEdit(seg.index)}
+                            onFocus={(e) => focusTag(e.currentTarget, setEditText)}
+                            onBlur={() => { blurTag(); commitEdit(seg.index) }}
                             onKeyDown={(e) => {
                               e.stopPropagation()
                               if (e.key === 'Enter' && !e.shiftKey) {
                                 e.preventDefault()
                                 commitEdit(seg.index)
-                              } else if (e.key === 'Escape') {
-                                setEditingIndex(null)
-                              }
+                              } else if (e.key === 'Escape') setEditingIndex(null)
                             }}
                           />
                         ) : (
-                          <div
-                            className="mtk-seg-text"
-                            onClick={(e) => e.stopPropagation()}
-                            onDoubleClick={() => startEdit(seg.index, text)}
-                            title="Double-click to edit"
-                          >
+                          <div className="mtk-seg-text" onClick={(e) => e.stopPropagation()} onDoubleClick={() => startEdit(seg.index, text)} title="Double-click to edit">
                             {dirty ? '✎ ' : ''}
                             {text}
                           </div>
@@ -305,21 +675,415 @@ export function MultitrackEditor({
               )
             })}
 
-            {/* Playhead synced to the full-mix player. */}
-            {head.cur > 0 && (
+            {/* Insert ghost */}
+            {insert && insert.phase !== 'menu' && (
               <div
-                className="mtk-head"
-                style={{ left: head.cur * pxPerSec, height: RULER_H + session.tracks.length * ROW_H }}
-              />
+                className="mtk-ghost"
+                style={{ left: insert.start_s * pxPerSec, width: GHOST_W, top: RULER_H + laneIndexOf(insert.speakerId) * rowH + 6, height: rowH - 12 }}
+                onClick={(e) => e.stopPropagation()}
+                onMouseDown={(e) => {
+                  if ((e.target as HTMLElement).closest('button, input')) return
+                  pendingRef.current = { kind: 'ghost', origStart: insert.start_s, startX: e.clientX }
+                }}
+              >
+                {insert.phase === 'place' ? (
+                  <div className="mtk-ghost-place">
+                    <span className="mtk-ghost-time">{insert.kind === 'dup' ? 'copy ' : ''}@{insert.start_s.toFixed(1)}s {insert.ripple ? '· ripple' : ''}</span>
+                    <div className="row" style={{ gap: 4 }}>
+                      {insert.kind === 'dup' ? (
+                        <button
+                          className="mtk-ic on"
+                          title="Drop copy here"
+                          onClick={() => {
+                            if (insert.srcIndex != null) onDuplicateSegment(insert.srcIndex, insert.start_s, insert.ripple)
+                            setInsert(null)
+                          }}
+                        >✓</button>
+                      ) : (
+                        <button className="mtk-ic on" title="Insert here, then type" onClick={() => setInsert((i) => (i ? { ...i, phase: 'type' } : i))}>✓</button>
+                      )}
+                      <button className="mtk-ic" title="Cancel" onClick={() => setInsert(null)}>✕</button>
+                    </div>
+                  </div>
+                ) : (
+                  <input
+                    className="mtk-ghost-input"
+                    autoFocus
+                    placeholder="Type dialogue, Enter…"
+                    value={insert.text}
+                    onChange={(e) => setInsert((i) => (i ? { ...i, text: e.target.value } : i))}
+                    onFocus={(e) => focusTag(e.currentTarget, (next) => setInsert((i) => (i ? { ...i, text: next } : i)))}
+                    onBlur={blurTag}
+                    onKeyDown={(e) => {
+                      e.stopPropagation()
+                      if (e.key === 'Enter') {
+                        if (insert.text.trim()) onInsertSegment(insert.speakerId, insert.text.trim(), insert.start_s, insert.ripple)
+                        setInsert(null)
+                      } else if (e.key === 'Escape') setInsert(null)
+                    }}
+                  />
+                )}
+              </div>
+            )}
+
+            {sel && (() => {
+              const a = Math.min(sel.a, sel.b)
+              const w = Math.min(Math.abs(sel.b - sel.a), sel.mode === 'add' ? 60 : 1e9)
+              const isAdd = sel.mode === 'add'
+              const setWidth = (val: number) => {
+                const v = Math.max(0.1, Math.min(val, isAdd ? 60 : 1e9))
+                updateSel({ a, b: a + v, mode: sel.mode })
+              }
+              return (
+                <>
+                  <div
+                    className={`mtk-sel${isAdd ? ' add' : ''}`}
+                    style={{ left: a * pxPerSec, width: w * pxPerSec, top: RULER_H, height: session.tracks.length * rowH }}
+                    onClick={(e) => e.stopPropagation()}
+                    onMouseDown={(e) => {
+                      if ((e.target as HTMLElement).closest('.mtk-sel-h')) return
+                      e.stopPropagation()
+                      pendingRef.current = { kind: 'sel-move', origA: a, origB: a + w, startX: e.clientX }
+                    }}
+                  >
+                    <div className="mtk-sel-h l" onMouseDown={(e) => { e.stopPropagation(); pendingRef.current = { kind: 'sel-l', origA: a, origB: a + w, startX: e.clientX } }} />
+                    <div className="mtk-sel-h r" onMouseDown={(e) => { e.stopPropagation(); pendingRef.current = { kind: 'sel-r', origA: a, origB: a + w, startX: e.clientX } }} />
+                  </div>
+                  <div className={`mtk-sel-menu${isAdd ? ' add' : ''}`} style={{ left: a * pxPerSec, top: RULER_H + 2 }} onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
+                    {selEditing ? (
+                      <input
+                        className="mtk-sel-num"
+                        type="number"
+                        min={0.1}
+                        max={isAdd ? 60 : undefined}
+                        step={0.1}
+                        defaultValue={w.toFixed(2)}
+                        autoFocus
+                        onBlur={(e) => { setWidth(parseFloat(e.target.value) || w); setSelEditing(false) }}
+                        onKeyDown={(e) => {
+                          e.stopPropagation()
+                          if (e.key === 'Enter') { setWidth(parseFloat((e.target as HTMLInputElement).value) || w); setSelEditing(false) }
+                          else if (e.key === 'Escape') setSelEditing(false)
+                        }}
+                      />
+                    ) : (
+                      <span className="mtk-sel-dur" title="Double-click to set exact duration" onDoubleClick={() => setSelEditing(true)}>{w.toFixed(2)}s</span>
+                    )}
+                    {isAdd ? (
+                      <button className="btn sm primary" onClick={() => { onAddSpace(a, w); updateSel(null) }}>⏱ Add space</button>
+                    ) : (
+                      <button className="btn sm bad" onClick={() => { onDeleteSpace(a, w); updateSel(null) }}>🗑 Delete space</button>
+                    )}
+                    <button className="btn sm ghost" onClick={() => updateSel(null)}>✕</button>
+                  </div>
+                </>
+              )
+            })()}
+
+            {head.cur > 0 && (
+              <div className="mtk-head" style={{ left: head.cur * pxPerSec, height: RULER_H + session.tracks.length * rowH }} />
             )}
           </div>
         </div>
       </div>
 
+      <div
+        className="mtk-vresize"
+        onMouseDown={startVResize}
+        onDoubleClick={() => setVScale(1)}
+        title="Drag to grow/shrink the track rows + waveform · double-click to reset"
+      >
+        <span className="mtk-vresize-grip">⇕ rows {Math.round(vScale * 100)}%</span>
+      </div>
+
+      {/* Insert / duplicate mode menu */}
+      {insert && insert.phase === 'menu' && (() => {
+        const insertAudio = session.tracks.find((t) => t.speaker_id === insert.speakerId)?.kind === 'audio'
+        return (
+        <>
+          <div className="mtk-backdrop" onClick={() => setInsert(null)} />
+          <div ref={insertMenuRef} className="mtk-menu" style={{ left: insert.menuX, top: insert.menuY }}>
+            {insert.kind === 'dup' ? (
+              <>
+                <div className="mtk-menu-title">Duplicate @ {insert.start_s.toFixed(1)}s</div>
+                <button className="btn sm" onClick={() => setInsert((i) => (i ? { ...i, ripple: false, phase: 'place' } : i))}>
+                  ⧉ Place copy (no update)
+                </button>
+                <button className="btn sm" onClick={() => setInsert((i) => (i ? { ...i, ripple: true, phase: 'place' } : i))}>
+                  ⇥ Place copy (ripple — push later lines)
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="mtk-menu-title">{insertAudio ? '🎵 Uploaded audio track' : `Add @ ${insert.start_s.toFixed(1)}s`}</div>
+                <button className="btn sm" disabled={insertAudio} title={insertAudio ? 'Uploaded audio tracks are not generative — promote it to a voice channel to add dialogue' : undefined} onClick={() => setInsert((i) => (i ? { ...i, ripple: false, phase: 'place' } : i))}>
+                  ＋ Add segment (no update)
+                </button>
+                <button className="btn sm" disabled={insertAudio} title={insertAudio ? 'Uploaded audio tracks are not generative' : undefined} onClick={() => setInsert((i) => (i ? { ...i, ripple: true, phase: 'place' } : i))}>
+                  ⇥ Add segment (ripple — push later lines)
+                </button>
+                <button
+                  className="btn sm"
+                  onClick={() => {
+                    const a = insert.start_s
+                    setInsert(null)
+                    updateSel({ a, b: a + 3, mode: 'add' })
+                  }}
+                >
+                  ⏱ Add empty playtime
+                </button>
+              </>
+            )}
+          </div>
+        </>
+        )
+      })()}
+
+      {/* Segment actions menu (also the full action set for collapsed clips) */}
+      {segMenu && (() => {
+        const seg = flatSegs.find((s) => s.index === segMenu.index)
+        if (!seg) return null
+        const text = edits[seg.index] ?? seg.text
+        const dirty = edits[seg.index] !== undefined && edits[seg.index] !== seg.text
+        const isPlaying = playingSeg === seg.index
+        const canSplit = head.cur > seg.start_s + 0.05 && head.cur < seg.start_s + seg.duration_s - 0.05
+        const track = session.tracks.find((t) => t.speaker_id === seg.speaker_id)
+        const isAudioChan = track?.kind === 'audio'
+        return (
+          <>
+            <div className="mtk-backdrop" onClick={() => setSegMenu(null)} />
+            <div ref={segMenuRef} className="mtk-menu" style={{ left: segMenu.x, top: segMenu.y }}>
+              <div className="mtk-menu-title">{(isAudioChan ? '🎵 ' : '') + (seg.text.slice(0, 32) || `Segment #${seg.index}`)}</div>
+              <button className="btn sm" onClick={() => { playSeg(seg); setSegMenu(null) }}>{isPlaying ? '■ Stop' : '▶ Play'}</button>
+              {!isAudioChan && (
+                <button className="btn sm" disabled={busy} onClick={() => { onRegen(seg.index, dirty ? edits[seg.index].trim() : undefined); setSegMenu(null) }}>↻ Regenerate{dirty ? ' (edited)' : ''}</button>
+              )}
+              {!isAudioChan && (
+                <button className="btn sm" onClick={() => { startEdit(seg.index, text); setSegMenu(null) }}>✎ Edit dialogue</button>
+              )}
+              <button className="btn sm" onClick={() => { openTrim(seg); setSegMenu(null) }}>✂ Trim / speed</button>
+              {!isAudioChan && (
+                <button className="btn sm" disabled={transcribing != null} title="Transcribe the audio and align the displayed text — no regenerate" onClick={() => { setSegMenu(null); whisperAlign(seg.index) }}>
+                  {transcribing === seg.index ? '… ' : '🎤 '}Update dialogue (Whisper)
+                </button>
+              )}
+              <button className="btn sm" onClick={() => { downloadSeg(seg); setSegMenu(null) }}>⬇ Download slice</button>
+              <div className="mtk-menu-sep" />
+              <button className="btn sm" disabled={!canSplit} title={canSplit ? 'Split at the playhead' : 'Move the playhead inside this clip first'} onClick={() => { onSplitSegment(seg.index, head.cur); setSegMenu(null) }}>
+                ⮂ Split at playhead
+              </button>
+              {!isAudioChan && (
+                <button
+                  className="btn sm"
+                  disabled={slicing != null}
+                  title="Transcribe and auto-split this clip into one segment per sentence"
+                  onClick={async () => { const i = seg.index; setSegMenu(null); setSlicing(i); try { await onAutoSlice(i) } finally { setSlicing(null) } }}
+                >
+                  {slicing === seg.index ? '… Slicing…' : '✁ Auto-slice by sentence'}
+                </button>
+              )}
+              <button
+                className="btn sm"
+                title="Duplicate this clip — choose a spot to drop the copy"
+                onClick={() => {
+                  const start = snap(seg.start_s + seg.duration_s + 0.2)
+                  setSegMenu(null)
+                  setInsert({ kind: 'dup', srcIndex: seg.index, speakerId: seg.speaker_id, start_s: start, ripple: false, phase: 'menu', text: '', menuX: segMenu.x, menuY: segMenu.y })
+                }}
+              >
+                ⧉ Duplicate…
+              </button>
+              {!isAudioChan && (
+                <>
+                  <div className="mtk-menu-sep" />
+                  <button
+                    className={`btn sm${seg.inpaint ? ' on' : ''}`}
+                    disabled={inpainting != null}
+                    title="Vocal Inpaint (per-segment ADR): lock this clip's own audio as the voice, then regenerate the line in that same voice. Channel vocal-processing still applies."
+                    onClick={async () => { const i = seg.index; const en = !seg.inpaint; setSegMenu(null); setInpainting(i); try { await onSetInpaint(i, en) } finally { setInpainting(null) } }}
+                  >
+                    {inpainting === seg.index ? '… ' : seg.inpaint ? '☑ ' : '☐ '}Vocal Inpaint{seg.inpaint ? ' (locked)' : ''}
+                  </button>
+                </>
+              )}
+              <div className="mtk-menu-sep" />
+              <button className="btn sm" onClick={() => { onDeleteSegment(seg.index, true); setSegMenu(null) }}>
+                ⇤ Delete (ripple — pull later up)
+              </button>
+              <button className="btn sm bad" onClick={() => { onDeleteSegment(seg.index, false); setSegMenu(null) }}>
+                🗑 Delete (leave gap)
+              </button>
+            </div>
+          </>
+        )
+      })()}
+
+      {/* Trim / speed panel */}
+      {trimSeg && (
+        <div className="mtk-trim card-inset">
+          <div className="flex-between" style={{ marginBottom: 6 }}>
+            <div className="section-title" style={{ margin: 0 }}>✂ Trim — “{trimSeg.text.slice(0, 60)}”</div>
+            <div className="row" style={{ gap: 6 }}>
+              <button className="btn sm primary" onClick={saveTrim}>💾 Save</button>
+              <button className="btn sm ghost" onClick={() => setTrimIndex(null)}>Cancel</button>
+            </div>
+          </div>
+          <AudioPlayer
+            key={`trim-${trimSeg.index}-${trimSeg.url}`}
+            url={trimSeg.url}
+            autoPlay={false}
+            showDownload={false}
+            initialStart={trimSeg.trim_start_s}
+            initialEnd={trimSeg.trim_end_s}
+            initialGain={trimSeg.gain_db || 0}
+            playbackRate={previewSpeed}
+            onTrimChange={(s, e) => setTrimDraft((d) => ({ ...d, trimStart: s, trimEnd: e }))}
+            onGainChange={(g) => setTrimDraft((d) => ({ ...d, gain: g }))}
+          />
+          <div className="hint" style={{ marginTop: 6, opacity: 0.85 }}>Gain: {trimDraft.gain >= 0 ? '+' : ''}{trimDraft.gain.toFixed(1)} dB — set with the player's dB control; saved with the segment.</div>
+          <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
+            <span style={{ minWidth: 130 }}>Segment speed · {trimDraft.speed.toFixed(2)}×</span>
+            <input
+              type="range" min={0.5} max={1.5} step={0.05} value={trimDraft.speed} style={{ flex: 1 }}
+              onChange={(e) => setTrimDraft((d) => ({ ...d, speed: parseFloat(e.target.value) }))}
+              onMouseUp={() => setPreviewSpeed(trimDraft.speed)}
+              onTouchEnd={() => setPreviewSpeed(trimDraft.speed)}
+            />
+          </label>
+          <div className="hint" style={{ marginTop: 4, opacity: 0.8 }}>Preview speed updates when you release the slider.</div>
+
+          <div className="flex-between" style={{ marginTop: 10, marginBottom: 4 }}>
+            <span className="hint">Dialogue (aligns text to audio — no regenerate)</span>
+            <div className="row" style={{ gap: 6 }}>
+              <button className="btn sm" onClick={whisperTrim} disabled={transcribing != null} title="Transcribe the trimmed clip with Whisper">
+                {transcribing === 'trim' ? <span className="spinner sm" /> : '🎤'} Whisper
+              </button>
+              <button className="btn sm ghost" onClick={() => setTrimText(flatSegs.find((s) => s.index === trimIndex)?.text ?? '')} title="Revert to current text">
+                ↺ Revert
+              </button>
+            </div>
+          </div>
+          <textarea
+            className="input"
+            rows={2}
+            value={trimText}
+            onChange={(e) => setTrimText(e.target.value)}
+            onFocus={(e) => focusTag(e.currentTarget, setTrimText)}
+            onBlur={blurTag}
+            placeholder="Dialogue for this segment…"
+          />
+        </div>
+      )}
+
       <div className="hint" style={{ marginTop: 8 }}>
-        Double-click a line (or ✎) to edit it, then ↻ regenerates that take — edited lines also update the script
-        above. Click anywhere on the timeline to move the playhead. Happy with it? Hit <strong>Finalize audio</strong>{' '}
-        to bake it down and save to history.
+        Drag a clip to move · <strong>shift+scroll</strong> to zoom · <strong>middle-drag</strong> to pan · ⋯ for all
+        actions (play / regenerate / edit / trim / Whisper-align / download / split / duplicate / delete) · double-click an
+        empty spot to <strong>add a line</strong> or <strong>add empty playtime</strong> · drag across empty space to
+        <strong> delete playtime</strong>. Spacebar plays/pauses; click the timeline to move the playhead.{' '}
+        <strong>Finalize audio</strong> bakes it down and saves to history.
+      </div>
+    </div>
+  )
+}
+
+function ChannelLabel({
+  track,
+  rowH,
+  busy,
+  promoting,
+  onSetChannel,
+  onRegenChannel,
+  onPromote,
+}: {
+  track: MultitrackTrack
+  rowH: number
+  busy: boolean
+  promoting: boolean
+  onSetChannel: (pos: string, fields: { name?: string | null; gain_db?: number }) => void
+  onRegenChannel: (pos: string) => void
+  onPromote: (pos: string, name: string) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(track.name)
+  const isAudio = track.kind === 'audio'
+  const applied = track.gain_db ?? 0
+  // Gain is edited freely as a local draft and only committed (one re-stitch /
+  // player reload) when you hit the green check — fast clicks won't thrash.
+  const [gainDraft, setGainDraft] = useState(applied)
+  useEffect(() => { setGainDraft(applied) }, [applied])
+  const gainDirty = Math.abs(gainDraft - applied) > 1e-6
+  const bumpGain = (delta: number) =>
+    setGainDraft((g) => Math.max(-36, Math.min(36, Math.round((g + delta) * 10) / 10)))
+  const applyGain = () => { if (gainDirty) onSetChannel(track.speaker_id, { gain_db: gainDraft }) }
+  const commitName = () => {
+    setEditing(false)
+    const v = draft.trim()
+    if (v !== track.name) onSetChannel(track.speaker_id, { name: v })
+  }
+  return (
+    <div
+      className="mtk-label"
+      style={{ height: rowH, borderLeft: `3px solid hsl(${hueFor(track.speaker_id)} 70% 60%)` }}
+      title={track.voice_name && track.voice_name !== track.name ? `Voice: ${track.voice_name}` : track.name}
+    >
+      <div className="mtk-label-top">
+        {editing ? (
+          <input
+            className="mtk-name-edit"
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commitName}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitName()
+              if (e.key === 'Escape') { setDraft(track.name); setEditing(false) }
+            }}
+          />
+        ) : (
+          <span
+            className="mtk-label-name"
+            onDoubleClick={() => { setDraft(track.name); setEditing(true) }}
+            title="Double-click to rename channel"
+          >
+            {track.name}
+          </span>
+        )}
+      </div>
+      {!isAudio && track.voice_name && track.voice_name !== track.name && (
+        <span className="mtk-label-voice" title="Voice in this channel">🎙 {track.voice_name}</span>
+      )}
+      <div className="mtk-label-ctrls">
+        <span className="mtk-label-sub">{track.segments.length} seg</span>
+        <span className={`mtk-db${gainDirty ? ' dirty' : ''}`}>
+          <button className="mtk-db-btn" onClick={() => bumpGain(-1)} title="−1 dB">−</button>
+          <button className="mtk-db-val" onClick={() => setGainDraft(0)} title="Channel gain — click to zero (apply with ✓)">
+            {gainDraft >= 0 ? '+' : ''}{gainDraft.toFixed(0)}dB
+          </button>
+          <button className="mtk-db-btn" onClick={() => bumpGain(1)} title="+1 dB">+</button>
+          {gainDirty && (
+            <button className="mtk-db-apply" onClick={applyGain} title="Apply channel gain">✓</button>
+          )}
+        </span>
+        {!isAudio && (
+          <button
+            className="mtk-regen-all"
+            disabled={busy || track.segments.length === 0}
+            onClick={() => onRegenChannel(track.speaker_id)}
+            title="Regenerate every segment on this channel (e.g. after re-casting the voice)"
+          >
+            ↻ all
+          </button>
+        )}
+        {isAudio && (
+          <button
+            className="mtk-promote"
+            disabled={busy || promoting || track.segments.length === 0}
+            onClick={() => onPromote(track.speaker_id, track.name)}
+            title="Promote this uploaded audio into a new voice channel: clones the voice, transcribes the dialogue, adds a speaker slot, and removes this upload track"
+          >
+            {promoting ? '… promoting' : '⭐ Promote to voice'}
+          </button>
+        )}
       </div>
     </div>
   )

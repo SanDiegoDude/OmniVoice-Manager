@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
-import type { GenerateBody, HistoryEntry, Job, MultitrackSession, OutputFile, Provider, SpeakerConfig, SystemInfo, Voice, VoiceNode } from './api'
+import type { GenParams, GenerateBody, HistoryEntry, Job, MultitrackSession, OutputFile, Provider, SpeakerConfig, SystemInfo, Voice, VoiceNode } from './api'
 import { SidePanel } from './components/SidePanel'
 import { Studio, type Injected } from './components/Studio'
 import { TopBar } from './components/TopBar'
 import { Toasts, type ToastItem } from './components/ui'
 import { VoiceLab } from './components/VoiceLab'
+import { TagLibrary } from './components/TagLibrary'
 import { VoiceLibrary } from './components/VoiceLibrary'
 
 export default function App() {
@@ -19,6 +20,8 @@ export default function App() {
   const [outputs, setOutputs] = useState<OutputFile[]>([])
   const [job, setJob] = useState<Job | null>(null)
   const [session, setSession] = useState<MultitrackSession | null>(null)
+  const sessionRef = useRef<MultitrackSession | null>(null)
+  const replacingRef = useRef<string | null>(null)
   const [regenIndex, setRegenIndex] = useState<number | null>(null)
   const [finalizing, setFinalizing] = useState(false)
   const [scriptBusy, setScriptBusy] = useState(false)
@@ -28,6 +31,10 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const [playingUrl, setPlayingUrl] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  useEffect(() => {
+    sessionRef.current = session
+  }, [session])
 
   const notify = useCallback((message: string, kind: 'info' | 'error' | 'success' = 'info') => {
     const id = Date.now() + Math.random()
@@ -122,9 +129,22 @@ export default function App() {
         setJob(j)
         if (j.status === 'done') {
           if (j.result?.session) {
-            setSession(j.result.session)
+            const newSession = j.result.session
+            setSession(newSession)
+            if (replacingRef.current && replacingRef.current !== newSession.id) {
+              api.discardSession(replacingRef.current).catch(() => {})
+            }
+            replacingRef.current = null
             setRegenIndex(null)
-            notify(j.result.regenerated_index !== undefined ? 'Segment regenerated' : 'Scene ready — edit in multitrack', 'success')
+            const msg =
+              j.result.regenerated_index !== undefined
+                ? 'Segment regenerated'
+                : j.result.inserted_index !== undefined
+                ? 'Segment added'
+                : j.result.channel_regen !== undefined
+                ? 'Channel regenerated'
+                : 'Scene ready — edit in multitrack'
+            notify(msg, 'success')
           } else {
             notify('Generation complete', 'success')
           }
@@ -219,11 +239,165 @@ export default function App() {
   // ---- generation ----
   const startGenerate = async (body: GenerateBody, _title: string, multitrack = false) => {
     try {
-      setSession(null)
+      if (multitrack) {
+        // Keep any current skeleton up until the populated scene arrives, then
+        // swap + discard the old one (see job poll).
+        replacingRef.current = sessionRef.current?.id ?? null
+      } else {
+        setSession(null)
+      }
       const { job_id } = multitrack ? await api.multitrackGenerate(body) : await api.generate(body)
       setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: { multitrack } })
     } catch (e) {
       notify(String(e), 'error')
+    }
+  }
+
+  // ---- multitrack composition: blank skeleton + on-the-fly speakers ----
+  const creatingRef = useRef(false)
+  const ensureEmptySession = useCallback(
+    async (speakers: Record<string, SpeakerConfig>, params: GenParams) => {
+      if (sessionRef.current || creatingRef.current) return
+      creatingRef.current = true
+      try {
+        const s = await api.multitrackEmpty({ title: 'Untitled Scene', speakers, params })
+        sessionRef.current = s
+        setSession(s)
+      } catch (e) {
+        notify(String(e), 'error')
+      } finally {
+        creatingRef.current = false
+      }
+    },
+    [notify],
+  )
+  const addSpeakerToSession = useCallback(async (cfg: SpeakerConfig) => {
+    const s = sessionRef.current
+    if (!s) return
+    try {
+      setSession(await api.addSpeaker(s.id, cfg))
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  const updateSpeakerInSession = useCallback(async (pos: string, cfg: SpeakerConfig) => {
+    const s = sessionRef.current
+    if (!s) return
+    try {
+      setSession(await api.updateSpeaker(s.id, pos, cfg))
+    } catch {
+      /* roster edits are best-effort */
+    }
+  }, [])
+  const removeSpeakerFromSession = useCallback(async (pos: string) => {
+    const s = sessionRef.current
+    if (!s) return
+    try {
+      setSession(await api.removeSpeaker(s.id, pos))
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const deleteSegment = async (index: number, ripple: boolean) => {
+    if (!session) return
+    try {
+      setSession(await api.deleteSegment(session.id, index, ripple))
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const splitSegment = async (index: number, at_s: number) => {
+    if (!session) return
+    try {
+      setSession(await api.splitSegment(session.id, index, at_s))
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const autoSlice = async (index: number) => {
+    if (!session) return
+    try {
+      const s = await api.autoSlice(session.id, index)
+      const before = session.segment_count
+      setSession(s)
+      notify(`Sliced into ${s.segment_count - before + 1} sentence clips`, 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const setInpaint = async (index: number, enabled: boolean) => {
+    if (!session) return
+    try {
+      setSession(await api.setInpaint(session.id, index, enabled))
+      notify(enabled ? 'Vocal Inpaint locked — regen uses this clip’s voice' : 'Vocal Inpaint off', 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const promoteChannel = async (pos: string, name: string) => {
+    if (!session) return null
+    try {
+      const s = await api.promoteChannel(session.id, pos, name)
+      setSession(s)
+      notify('Promoted to a new voice channel', 'success')
+      return s
+    } catch (e) {
+      notify(String(e), 'error')
+      return null
+    }
+  }
+  const undoSession = async () => {
+    if (!session) return
+    try {
+      setSession(await api.undo(session.id))
+      notify('Undid the last action', 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const deleteSpace = async (start_s: number, amount: number) => {
+    if (!session) return
+    try {
+      setSession(await api.deleteSpace(session.id, start_s, amount))
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const addSpace = async (start_s: number, amount: number) => {
+    if (!session) return
+    try {
+      setSession(await api.addSpace(session.id, start_s, amount))
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const duplicateSegment = async (index: number, start_s: number, ripple: boolean) => {
+    if (!session) return
+    try {
+      setSession(await api.duplicateSegment(session.id, index, start_s, ripple))
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const setSegmentText = async (index: number, text: string) => {
+    if (!session) return
+    try {
+      setSession(await api.setSegmentText(session.id, index, text))
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const transcribeSegment = async (index: number, draft?: { trim_start_s?: number; trim_end_s?: number; speed?: number }) => {
+    if (!session) return null
+    try {
+      const res = await api.transcribeSegment(session.id, index, draft)
+      return res.text
+    } catch (e) {
+      notify(String(e), 'error')
+      return null
     }
   }
 
@@ -236,6 +410,64 @@ export default function App() {
     } catch (e) {
       notify(String(e), 'error')
       setRegenIndex(null)
+    }
+  }
+
+  const editSegment = async (index: number, fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number; gain_db?: number }) => {
+    if (!session) return
+    try {
+      setSession(await api.editSegment(session.id, index, fields))
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+
+  const setChannel = async (pos: string, fields: { name?: string | null; gain_db?: number }) => {
+    if (!session) return
+    try {
+      setSession(await api.setChannel(session.id, pos, fields))
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+
+  const regenChannel = async (pos: string) => {
+    if (!session) return
+    try {
+      const { job_id } = await api.regenChannel(session.id, pos)
+      setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: { multitrack: true, channel_regen: pos } })
+      notify('Regenerating all segments on this channel…', 'info')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+
+  const uploadChannel = async (file: File, name: string) => {
+    if (!session) return
+    try {
+      setSession(await api.uploadChannel(session.id, file, name))
+      notify('Audio channel added', 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+
+  const reflowSession = async (fields: { gap_ms?: number; speed?: number }) => {
+    if (!session) return
+    try {
+      setSession(await api.reflowSession(session.id, fields))
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+
+  const insertSegment = async (speaker_id: string, text: string, start_s: number, ripple: boolean) => {
+    if (!session) return
+    try {
+      const { job_id } = await api.insertSegment(session.id, { speaker_id, text, start_s, ripple })
+      setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: { multitrack: true } })
+    } catch (e) {
+      notify(String(e), 'error')
     }
   }
 
@@ -325,6 +557,7 @@ export default function App() {
             onRefresh={refreshVoices}
             onOpenLab={() => setLabOpen(true)}
           />
+          <TagLibrary notify={notify} />
         </div>
 
         <Studio
@@ -343,6 +576,27 @@ export default function App() {
           onGenerateScript={generateScript}
           onLucky={startGenerate}
           onRegenSegment={regenSegment}
+          onEditSegment={editSegment}
+          onReflow={reflowSession}
+          onInsertSegment={insertSegment}
+          onEnsureSession={ensureEmptySession}
+          onAddSpeaker={addSpeakerToSession}
+          onUpdateSpeaker={updateSpeakerInSession}
+          onRemoveSpeaker={removeSpeakerFromSession}
+          onDeleteSegment={deleteSegment}
+          onSplitSegment={splitSegment}
+          onAutoSlice={autoSlice}
+          onSetInpaint={setInpaint}
+          onPromoteChannel={promoteChannel}
+          onUndo={undoSession}
+          onDeleteSpace={deleteSpace}
+          onAddSpace={addSpace}
+          onDuplicateSegment={duplicateSegment}
+          onSetSegmentText={setSegmentText}
+          onTranscribeSegment={transcribeSegment}
+          onSetChannel={setChannel}
+          onRegenChannel={regenChannel}
+          onUploadChannel={uploadChannel}
           onFinalize={finalizeSession}
           notify={notify}
         />

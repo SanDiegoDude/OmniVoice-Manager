@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { GenParams, GenerateBody, Job, MultitrackSession, Provider, SpeakerConfig, Voice } from '../api'
 import { AudioPlayer } from './AudioPlayer'
 import { MultitrackEditor } from './MultitrackEditor'
 import { SpeakerCard } from './SpeakerCard'
-import { Slider, Toggle } from './ui'
+import { Collapsible, Slider, Toggle } from './ui'
+import { blurTag, focusTag } from '../tagInject'
 
 const defaultSpeaker = (): SpeakerConfig => ({
   mode: 'clone',
@@ -59,6 +60,27 @@ export function Studio({
   onGenerateScript,
   onLucky,
   onRegenSegment,
+  onEditSegment,
+  onReflow,
+  onInsertSegment,
+  onEnsureSession,
+  onAddSpeaker,
+  onUpdateSpeaker,
+  onRemoveSpeaker,
+  onDeleteSegment,
+  onSplitSegment,
+  onDeleteSpace,
+  onAddSpace,
+  onDuplicateSegment,
+  onSetSegmentText,
+  onTranscribeSegment,
+  onSetChannel,
+  onRegenChannel,
+  onUploadChannel,
+  onAutoSlice,
+  onSetInpaint,
+  onPromoteChannel,
+  onUndo,
   onFinalize,
   notify,
 }: {
@@ -77,6 +99,27 @@ export function Studio({
   onGenerateScript: (prompt: string, numSpeakers: number, speakers: SpeakerConfig[], existing: string) => Promise<{ title: string; script: string } | null>
   onLucky: (body: GenerateBody, title: string, multitrack?: boolean) => void
   onRegenSegment: (index: number, text?: string) => void
+  onEditSegment: (index: number, fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number; gain_db?: number }) => void
+  onReflow: (fields: { gap_ms?: number; speed?: number }) => void
+  onInsertSegment: (speakerId: string, text: string, startS: number, ripple: boolean) => void
+  onEnsureSession: (speakers: Record<string, SpeakerConfig>, params: GenParams) => void
+  onAddSpeaker: (cfg: SpeakerConfig) => void
+  onUpdateSpeaker: (pos: string, cfg: SpeakerConfig) => void
+  onRemoveSpeaker: (pos: string) => void
+  onDeleteSegment: (index: number, ripple: boolean) => void
+  onSplitSegment: (index: number, atS: number) => void
+  onDeleteSpace: (startS: number, amount: number) => void
+  onAddSpace: (startS: number, amount: number) => void
+  onDuplicateSegment: (index: number, startS: number, ripple: boolean) => void
+  onSetSegmentText: (index: number, text: string) => void
+  onTranscribeSegment: (index: number, draft?: { trim_start_s?: number; trim_end_s?: number; speed?: number }) => Promise<string | null | undefined>
+  onSetChannel: (pos: string, fields: { name?: string | null; gain_db?: number }) => void
+  onRegenChannel: (pos: string) => void
+  onUploadChannel: (file: File, name: string) => void
+  onAutoSlice: (index: number) => Promise<void>
+  onSetInpaint: (index: number, enabled: boolean) => Promise<void>
+  onPromoteChannel: (pos: string, name: string) => Promise<MultitrackSession | null>
+  onUndo: () => void
   onFinalize: () => void
   notify: (m: string, k?: 'info' | 'error' | 'success') => void
 }) {
@@ -121,27 +164,93 @@ export function Studio({
   const count = mode === 'multi' ? speakers.length : 1
   const activeSpeakers = mode === 'multi' ? speakers : speakers.slice(0, 1)
 
+  const speakerMap = (): Record<string, SpeakerConfig> => {
+    const m: Record<string, SpeakerConfig> = {}
+    activeSpeakers.forEach((s, i) => {
+      m[String(i + 1)] = s
+    })
+    return m
+  }
+
+  // Show a blank multitrack skeleton the moment Multi-speaker is active, so a
+  // scene can be composed by hand (or from a script). The roster stays in lockstep
+  // with the session's tracks via add/remove/update below.
+  const liveSync = mode === 'multi' && !!session
+  useEffect(() => {
+    if (mode === 'multi' && !session) onEnsureSession(speakerMap(), params)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, session])
+
+  const updTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   const setSpeaker = (i: number, c: SpeakerConfig) => {
     const next = [...speakers]
     next[i] = c
     setSpeakers(next)
+    if (liveSync) {
+      const pos = String(i + 1)
+      clearTimeout(updTimers.current[pos])
+      updTimers.current[pos] = setTimeout(() => onUpdateSpeaker(pos, c), 450)
+    }
   }
+
+  // Rebuild the multi-speaker script from the live timeline, ALWAYS ordered by
+  // start time (so newly added / overlapping / promoted clips land in the right
+  // place, not lazily at the end). `override` lets an in-flight edit show before
+  // the session round-trips. Empty lines (e.g. untranscribed audio) are dropped.
+  const scriptFromSession = (s: MultitrackSession, override?: { index: number; text: string }) =>
+    s.tracks
+      .flatMap((t) => t.segments)
+      .slice()
+      .sort((a, b) => a.start_s - b.start_s || a.index - b.index)
+      .map((seg) => ({ id: seg.speaker_id, text: override && override.index === seg.index ? override.text : seg.text }))
+      .filter((x) => x.text && x.text.trim())
+      .map((x) => `Speaker ${x.id}: ${x.text.trim()}`)
+      .join('\n')
 
   // Regenerate a segment; if the dialogue was edited, keep the script in sync.
   const handleRegen = (index: number, text?: string) => {
-    if (text !== undefined && session) {
-      const flat = session.tracks.flatMap((t) => t.segments).slice().sort((a, b) => a.index - b.index)
-      const newScript = flat
-        .map((s) => `Speaker ${s.speaker_id}: ${s.index === index ? text : s.text}`)
-        .join('\n')
-      setScript(newScript)
-    }
+    if (text !== undefined && session) setScript(scriptFromSession(session, { index, text }))
     onRegenSegment(index, text)
   }
 
-  const addSpeaker = () => setSpeakers((prev) => [...prev, defaultSpeaker()])
+  // Align a segment's text to its audio (manual edit in trim panel / Whisper).
+  // Persists without flagging regen, and keeps the script section in sync.
+  const handleSetText = (index: number, text: string) => {
+    if (session) setScript(scriptFromSession(session, { index, text }))
+    onSetSegmentText(index, text)
+  }
+
+  // Manual "Sync dialogue from Editor" — pull every clip's current dialogue into
+  // the script box, in timeline order, without re-running Whisper.
+  const syncScriptFromEditor = () => {
+    if (session) setScript(scriptFromSession(session))
+  }
+
+  // Promote an uploaded audio channel into a generative speaker. Promotion adds a
+  // real speaker slot on the backend, so grow the roster to match (keeps the
+  // multi-speaker menu and the editor's track count in lockstep).
+  const handlePromote = async (pos: string, name: string) => {
+    const s = await onPromoteChannel(pos, name)
+    if (s) {
+      const genCount = s.tracks.filter((t) => t.kind !== 'audio').length
+      setSpeakers((prev) =>
+        genCount > prev.length ? [...prev, ...Array.from({ length: genCount - prev.length }, () => defaultSpeaker())] : prev,
+      )
+    }
+    return s
+  }
+
+  const addSpeaker = () => {
+    const cfg = defaultSpeaker()
+    setSpeakers((prev) => [...prev, cfg])
+    if (liveSync) onAddSpeaker(cfg)
+  }
   const removeSpeaker = (i: number) =>
-    setSpeakers((prev) => (prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev))
+    setSpeakers((prev) => {
+      if (prev.length <= 1) return prev
+      if (liveSync) onRemoveSpeaker(String(i + 1))
+      return prev.filter((_, idx) => idx !== i)
+    })
 
   const buildBody = (): GenerateBody => {
     const speakerMap: Record<string, SpeakerConfig> = {}
@@ -180,9 +289,13 @@ export function Studio({
       body.script = res.script
       body.text = mode === 'single' ? res.script : null
       body.title = res.title
-      onLucky(body, res.title, multitrack)
+      onLucky(body, res.title, useMultitrack)
     }
   }
+
+  // Multitrack is a multi-speaker-only workflow; single voice always renders a
+  // normal one-shot output (the toggle is hidden in single mode).
+  const useMultitrack = mode === 'multi' && multitrack
 
   const running = job?.status === 'running' || job?.status === 'queued'
   const prog = job?.progress
@@ -191,7 +304,7 @@ export function Studio({
   return (
     <div className="col-scroll" style={{ flex: 1 }}>
       {/* Speakers */}
-      <div className="card">
+      <Collapsible className="card" title="🎤 Speakers">
         <div className="flex-between" style={{ marginBottom: 12 }}>
           <div className="segment">
             <button className={mode === 'single' ? 'active' : ''} onClick={() => setMode('single')}>
@@ -227,10 +340,10 @@ export function Studio({
             </button>
           )}
         </div>
-      </div>
+      </Collapsible>
 
       {/* AI prompt */}
-      <div className="card">
+      <Collapsible className="card" title="✨ Smart Script">
         <div className="flex-between" style={{ marginBottom: 8 }}>
           <div className="section-title" style={{ margin: 0 }}>✨ Smart Script — describe what you want</div>
           <div className="row" style={{ gap: 6, alignItems: 'center' }}>
@@ -276,27 +389,45 @@ export function Studio({
             🍀 Feeling lucky (write + speak)
           </button>
         </div>
-      </div>
+      </Collapsible>
 
       {/* Script editor */}
-      <div className="card">
+      <Collapsible className="card" title={mode === 'multi' ? '📝 Script' : '📝 Text to speak'}>
         <div className="flex-between" style={{ marginBottom: 8 }}>
           <div className="section-title" style={{ margin: 0 }}>
             {mode === 'multi' ? 'Script (use “Speaker 1:”, “Speaker 2:” …)' : 'Text to speak'}
           </div>
-          <input
-            className="input"
-            style={{ maxWidth: 220 }}
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="Scene title"
-          />
+          <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+            {mode === 'multi' && (
+              <button
+                className="btn sm ghost"
+                onClick={syncScriptFromEditor}
+                disabled={!session || session.segment_count === 0}
+                title={
+                  !session || session.segment_count === 0
+                    ? 'No segments yet — create a scene first'
+                    : 'Rewrite the script from the timeline’s current dialogue, in order (no Whisper)'
+                }
+              >
+                ⇅ Sync dialogue from Editor
+              </button>
+            )}
+            <input
+              className="input"
+              style={{ maxWidth: 220 }}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Scene title"
+            />
+          </div>
         </div>
         <textarea
           className="input"
           rows={9}
           value={script}
           onChange={(e) => setScript(e.target.value)}
+          onFocus={(e) => focusTag(e.currentTarget, setScript)}
+          onBlur={blurTag}
           placeholder={mode === 'multi' ? 'Speaker 1: Hello!\nSpeaker 2: Hi there.' : 'Type the text to synthesize…'}
         />
 
@@ -305,16 +436,18 @@ export function Studio({
             <button className="btn ghost sm" onClick={() => setShowSettings(!showSettings)}>
               {showSettings ? '▾' : '▸'} Generation settings
             </button>
-            <Toggle
-              checked={multitrack}
-              onChange={setMultitrack}
-              label="Multitrack editor"
-            />
+            {mode === 'multi' && (
+              <Toggle
+                checked={multitrack}
+                onChange={setMultitrack}
+                label="Multitrack editor"
+              />
+            )}
           </div>
           <button
             className="btn primary"
             disabled={running || !script.trim()}
-            onClick={() => onGenerate(buildBody(), title || 'Untitled Scene', multitrack)}
+            onClick={() => onGenerate(buildBody(), title || 'Untitled Scene', useMultitrack)}
           >
             {running ? <span className="spinner" /> : '🎙'} Generate audio
           </button>
@@ -328,8 +461,8 @@ export function Studio({
                 <Slider label="Guidance (CFG)" min={0} max={4} step={0.1} value={params.guidance_scale} onChange={(v) => setParams({ ...params, guidance_scale: v })} format={(v) => v.toFixed(1)} />
               </div>
               <div style={{ flex: 1, minWidth: 200 }}>
-                <Slider label="Speed" min={0.5} max={1.5} step={0.05} value={params.speed} onChange={(v) => setParams({ ...params, speed: v })} format={(v) => v.toFixed(2) + '×'} />
-                <Slider label="Gap between lines" min={0} max={800} step={50} value={params.gap_ms} onChange={(v) => setParams({ ...params, gap_ms: v })} format={(v) => v + 'ms'} />
+                <Slider label="Guidance t-shift" min={0} max={1} step={0.05} value={params.t_shift} onChange={(v) => setParams({ ...params, t_shift: v })} format={(v) => v.toFixed(2)} />
+                <div className="hint" style={{ marginTop: 6 }}>Speed & line gap now live in the multitrack editor — adjust them after generating, no re-render needed.</div>
               </div>
             </div>
             <div className="row wrap" style={{ gap: 16, marginTop: 6 }}>
@@ -359,7 +492,7 @@ export function Studio({
             </div>
           </div>
         )}
-      </div>
+      </Collapsible>
 
       {/* Progress / output */}
       {running && !session && (
@@ -400,18 +533,37 @@ export function Studio({
         </div>
       )}
 
-      {session && (
-        <MultitrackEditor
-          session={session}
-          onRegen={handleRegen}
-          regenIndex={regenIndex}
-          busy={running}
-          onFinalize={onFinalize}
-          finalizing={finalizing}
-        />
+      {session && mode === 'multi' && (
+        <Collapsible className="card" title={`🎚 Multitrack — ${session.title}`}>
+          <MultitrackEditor
+            session={session}
+            onRegen={handleRegen}
+            onEditSegment={onEditSegment}
+            onReflow={onReflow}
+            onInsertSegment={onInsertSegment}
+            onDeleteSegment={onDeleteSegment}
+            onSplitSegment={onSplitSegment}
+            onDeleteSpace={onDeleteSpace}
+            onAddSpace={onAddSpace}
+            onDuplicateSegment={onDuplicateSegment}
+            onSetText={handleSetText}
+            onTranscribe={onTranscribeSegment}
+            onSetChannel={onSetChannel}
+            onRegenChannel={onRegenChannel}
+            onUploadChannel={onUploadChannel}
+            onAutoSlice={onAutoSlice}
+            onSetInpaint={onSetInpaint}
+            onPromoteChannel={handlePromote}
+            onUndo={onUndo}
+            regenIndex={regenIndex}
+            busy={running}
+            onFinalize={onFinalize}
+            finalizing={finalizing}
+          />
+        </Collapsible>
       )}
 
-      {!session && audioUrl && (
+      {(mode === 'single' || !session) && audioUrl && (
         <AudioPlayer
           key={audioUrl}
           url={audioUrl}

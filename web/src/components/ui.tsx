@@ -1,4 +1,35 @@
-import { type ReactNode, useEffect } from 'react'
+import { type ReactNode, useEffect, useState } from 'react'
+
+export function Collapsible({
+  title,
+  children,
+  defaultOpen = true,
+  className = 'card',
+  right,
+}: {
+  title: ReactNode
+  children: ReactNode
+  defaultOpen?: boolean
+  className?: string
+  right?: ReactNode
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+  if (!open) {
+    return (
+      <div className={`${className} collapsed`} onClick={() => setOpen(true)} title="Click to expand">
+        <button className="mini-collapse" onClick={(e) => { e.stopPropagation(); setOpen(true) }} title="Expand">+</button>
+        <span className="collapsed-title">{title}</span>
+      </div>
+    )
+  }
+  return (
+    <div className={`${className} has-collapse`}>
+      <button className="mini-collapse" onClick={() => setOpen(false)} title="Minimize">–</button>
+      {right}
+      {children}
+    </div>
+  )
+}
 
 export function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
   return (

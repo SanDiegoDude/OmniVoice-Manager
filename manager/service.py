@@ -148,6 +148,35 @@ def make_regen_job(
     return job
 
 
+def make_insert_job(
+    model_manager, sid: str, speaker_id: str, text: str, start_s: float, ripple: bool
+) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
+    """Generate a brand-new segment and drop it onto the timeline."""
+    new_index = sessions.reserve_index(sid)
+    payload = sessions.insert_payload(sid, speaker_id, text, new_index)
+
+    def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+        result = model_manager.generate(payload, progress_cb=progress_cb)
+        session = sessions.apply_insert(sid, new_index, speaker_id, text, start_s, ripple, result)
+        return {"session": session, "session_id": sid, "inserted_index": new_index}
+
+    return job
+
+
+def make_channel_regen_job(
+    model_manager, sid: str, pos: str
+) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
+    """Regenerate every spoken segment on a channel (e.g. after re-casting a voice)."""
+    payload = sessions.channel_regen_payload(sid, pos)
+
+    def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+        result = model_manager.generate(payload, progress_cb=progress_cb)
+        session = sessions.apply_channel_regen(sid, pos, result)
+        return {"session": session, "session_id": sid, "channel_regen": pos}
+
+    return job
+
+
 def finalize_session(sid: str) -> Dict[str, Any]:
     """Bake a session's current mix into a normal output + history entry."""
     info = sessions.finalize_info(sid)

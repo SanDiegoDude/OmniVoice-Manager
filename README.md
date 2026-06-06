@@ -8,7 +8,7 @@ A modern, browser-based studio and JSON API for [OmniVoice](https://github.com/k
 
 https://github.com/user-attachments/assets/69f211b9-c8ae-49dd-a050-cddcd7ee8bdf
 
-OmniVoice generates a single utterance per call. The Manager wraps it with everything needed to turn that primitive into finished audio: multi-speaker dialogue stitching, reference-audio cleanup, perceptual loudness matching, an AI scriptwriter, a rich audio editor, and a clean API for automation.
+OmniVoice generates a single utterance per call. The Manager wraps it with everything needed to turn that primitive into finished audio: a full **multitrack timeline editor**, multi-speaker dialogue stitching, reference-audio cleanup, perceptual loudness matching, an AI scriptwriter, a rich audio editor, and a clean API for automation.
 
 ---
 
@@ -19,6 +19,20 @@ A fast single-page app served directly by the backend — no Gradio, no page rel
 
 ### Multi-speaker dialogue, beyond the base model
 OmniVoice synthesizes one voice at a time. The Manager parses `Speaker N:` scripts, assigns a distinct voice (cloned, designed, or auto) to each speaker, generates line by line, and stitches everything into one continuous track — with no hard cap on speaker count. Add or remove speakers dynamically (N+).
+
+### Multitrack timeline editor — a mini-DAW for dialogue
+This is the heart of the Manager. Instead of one baked render, every scene is kept as **individual, regenerable clips on a real timeline**, so a single bad take never costs you the whole 99%-good performance.
+
+- **Per-segment & per-channel regenerate** — re-roll one line (or re-cast an entire speaker's voice and regenerate all their lines) without touching anything else. Regeneration auto-aligns the new clip's endpoint and ripples downstream — unless the clip is layered under a longer one, which it leaves untouched.
+- **True additive mixing** — overlapping clips are summed, not concatenated, so speakers can talk over each other, argue in unison, and react — real, messy, human conversation.
+- **Move / trim / speed / gain per clip** — drag clips anywhere, trim with a waveform, pitch-preserving time-stretch (no "bathroom" echo), and per-clip dB. Plus split, duplicate (ripple or not), delete, and insert/delete empty time.
+- **Compose from scratch** — the moment you pick Multi-speaker you get a blank timeline. Build a whole scene by hand one clip at a time, or generate from a script and refine.
+- **Auto-slice by sentence & Whisper align** — split a monologue into one clip per sentence using word-level timestamps, or align a clip's displayed text to its actual audio — no regenerate.
+- **Vocal Inpaint (per-segment ADR)** — lock a clip's own audio as a temporary, timeline-local voice clone, then rewrite the line in that exact voice. Per-segment automated dialogue replacement.
+- **Uploaded audio channels** — drop in a soundtrack / SFX / recording as its own non-generative layer with independent gain, then **promote** it into a full clone voice channel (auto-transcribed, with a matching speaker added) when you want to put words in its mouth.
+- **Tag library** — hot-clickable OmniVoice non-verbal cues (`[laughter]`, `[whisper]`, …) injected at the cursor in any dialogue field.
+- **Zoom, pan, follow-playhead, spacebar transport, single-step undo**, and a vertical resize to grow the rows + waveform — it feels like an editor, not a form.
+- **Finalize** stitches the timeline to a single, loudness-matched, true-peak-limited track and saves it to history.
 
 ### Professional loudness matching
 Multi-voice mixes usually suffer from one speaker booming while another whispers. The Manager applies **perceptual LUFS loudness matching** (ITU-R BS.1770 / EBU R128, K-weighted) across every segment so all speakers sit at the same perceived volume, then runs a single **true-peak limiter** on the final mix to prevent clipping. This is the same approach broadcast engineers use — not a crude per-clip gain bump.
@@ -36,6 +50,9 @@ Generate or refine `Speaker N:` scripts from a prompt using any OpenAI-compatibl
 
 ### A polished audio player
 The result player renders a waveform and supports **trim**, **output gain (dB)**, **reset**, **autoplay**, and **download of the processed file** reflecting your edits — all in the browser via the Web Audio API.
+
+### Lightweight, shareable outputs
+Finalized scenes are encoded to **MP3 (192k)** instead of 150 MB WAVs — small enough to drop into a message or social post without degrading the audio you actually hear.
 
 ### VRAM controls for any GPU
 - **LOD (Load-On-Demand):** load the TTS model per job in an isolated worker process and free it afterwards, so the GPU sits idle between jobs.
@@ -56,10 +73,12 @@ web/        React + Vite + TypeScript single-page app (built to web/dist)
 manager/    FastAPI backend
   server.py         HTTP API + static UI hosting
   model_manager.py  GPU worker lifecycle (spawn / warm / unload)
-  worker.py         child process: TTS, isolation, de-reverb, loudness, stitching
+  worker.py         child process: TTS, isolation, de-reverb, Whisper, loudness, stitching
+  sessions.py       multitrack timeline: per-clip audio, additive mixing, edits, undo
+  service.py        worker payload building, finalize, history
   scripts_ai.py     Smart Script writer (multi-provider, robust parsing)
   vocal_isolation/  Mel-Band-RoFormer port + DeepFilterNet integration
-  audio_utils.py    LUFS matching, true-peak limiting, normalization
+  audio_utils.py    LUFS matching, true-peak limiting, normalization, time-stretch
 omnivoice/  Upstream OmniVoice model + inference package
 ```
 
@@ -143,8 +162,10 @@ LOD and Low VRAM mode can also be toggled live from the top bar in the UI.
 
 ## Using the UI
 
-- **Studio** — write or AI-generate a script, configure speakers (clone / design / auto), set generation and loudness options, and generate. Watch per-stage progress and edit the result in the player.
-- **Voice Lab** — upload or pick a reference, preview isolation / de-reverb / normalization, and save the cleaned voice to your library.
+- **Studio** — write or AI-generate a script, configure speakers (clone / design / auto), set generation and loudness options, and generate. Watch per-stage progress and edit the result in the player. **Sync dialogue from Editor** pulls the timeline's current lines back into the script box (in timeline order) without re-running Whisper.
+- **Multitrack editor** (multi-speaker) — the timeline described above: regenerate / move / trim / speed / gain individual clips, split / duplicate / delete, insert or remove empty time, layer overlapping dialogue, auto-slice, Vocal Inpaint, add uploaded audio channels and promote them to voices, then **Finalize** to commit and save. Single-step **Undo** covers any edit.
+- **Voice Lab** — upload or pick a reference, manually trim it, preview isolation / de-reverb / normalization, and save (or overwrite) the cleaned voice in your library.
+- **Tag library** — a hot-clickable list of OmniVoice's supported bracket cues that inject at your cursor.
 - **History & Outputs** — replay, download, or fully restore any past generation.
 
 ---
@@ -165,7 +186,19 @@ All endpoints are JSON over HTTP. Selected routes:
 | `GET /api/voices` · `POST /api/voices/upload` · `POST /api/voices/process` | Voice library + Voice Lab |
 | `GET /api/outputs` · `GET /api/history` | Browse results and history |
 
-Generation is asynchronous: submit to `/api/generate`, then poll `/api/jobs/{job_id}` until `status` is `done`.
+### Multitrack timeline
+
+| Method & Path | Purpose |
+| --- | --- |
+| `POST /api/multitrack/generate` · `POST /api/multitrack/empty` | Generate a scene as clips, or start a blank timeline |
+| `POST /api/multitrack/{sid}/speaker` · `POST·DELETE …/speaker/{pos}` | Add / update / remove a speaker track |
+| `POST …/segment/{i}/regenerate` · `…/edit` · `…/text` | Regenerate, move/trim/speed/gain, or align a clip's text |
+| `POST …/segment/{i}/split` · `…/duplicate` · `…/delete` · `…/auto-slice` · `…/inpaint` | Clip operations + Vocal Inpaint |
+| `POST …/delete-space` · `…/add-space` · `…/reflow` · `…/insert` | Timeline structure + global speed/gap |
+| `POST …/upload-channel` · `…/speaker/{pos}/promote` · `…/speaker/{pos}/regenerate` | Audio channels, promote-to-voice, re-cast a channel |
+| `POST …/segment/{i}/transcribe` · `…/{sid}/undo` · `…/{sid}/finalize` | Whisper a clip, single-step undo, commit to history |
+
+Generation is asynchronous: submit to `/api/generate` (or `/api/multitrack/generate`), then poll `/api/jobs/{job_id}` until `status` is `done`. Most timeline edits are synchronous and return the updated session.
 
 ---
 

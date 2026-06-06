@@ -194,6 +194,32 @@ def peak_limit(audio: np.ndarray, ceiling_db: float = -1.0, oversample: int = 4)
     return (audio * (ceiling / peak)).astype(np.float32)
 
 
+def time_stretch(audio: np.ndarray, rate: float) -> np.ndarray:
+    """Speed a clip up/down (rate>1 = faster/shorter) while preserving pitch.
+
+    Used for per-segment / global speed tweaks in the multitrack editor without
+    re-running the model. Prefers WSOLA (audiotsm) which is clean on speech; the
+    librosa phase-vocoder fallback can sound reverberant/"echoey" so it's last
+    resort only."""
+    if audio.size == 0 or rate is None or abs(rate - 1.0) < 1e-3:
+        return audio.astype(np.float32)
+    x = np.ascontiguousarray(audio.astype(np.float32))
+    try:
+        from audiotsm import wsola
+        from audiotsm.io.array import ArrayReader, ArrayWriter
+
+        reader = ArrayReader(x.reshape(1, -1))
+        writer = ArrayWriter(channels=1)
+        wsola(channels=1, speed=float(rate)).run(reader, writer)
+        out = np.asarray(writer.data, dtype=np.float32)
+        return out[0] if out.ndim == 2 else out
+    except Exception:  # noqa: BLE001
+        try:
+            return librosa.effects.time_stretch(y=x, rate=float(rate)).astype(np.float32)
+        except Exception:  # noqa: BLE001
+            return x
+
+
 def trim_silence(audio: np.ndarray, top_db: float = 30.0) -> np.ndarray:
     if audio.size == 0:
         return audio

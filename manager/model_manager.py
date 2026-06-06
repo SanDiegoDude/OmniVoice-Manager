@@ -150,6 +150,11 @@ class ModelManager:
             "dereverb", payload, progress_cb=progress_cb, kill_after=self.settings.load_on_demand
         )
 
+    def transcribe(self, payload: Dict[str, Any], progress_cb: ProgressCb = None) -> Dict[str, Any]:
+        return self._request(
+            "transcribe", payload, progress_cb=progress_cb, kill_after=self.settings.load_on_demand
+        )
+
     def info(self) -> Dict[str, Any]:
         alive = self._proc is not None and self._proc.is_alive()
         return {

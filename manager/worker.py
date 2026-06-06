@@ -115,6 +115,51 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
         get_model()
         return {"loaded": True}
 
+    def handle_transcribe(payload: Dict[str, Any], rid):
+        """Whisper-transcribe an arbitrary clip (used to align a segment's text to
+        its actual audio after trimming/splitting)."""
+        wav = np.asarray(payload["waveform"], dtype=np.float32)
+        sr = int(payload.get("sample_rate", 24000))
+        model = get_model()
+
+        want_chunks = bool(payload.get("chunks", False))
+
+        def _run():
+            if getattr(model, "_asr_pipe", None) is None:
+                raise RuntimeError("ASR model is not loaded.")
+            # Whisper's HF pipeline only accepts <=30s natively; longer clips (and
+            # any timestamped request) need chunked long-form decoding.
+            dur = len(wav) / float(max(sr, 1))
+            if want_chunks or dur > 28.0:
+                w = np.squeeze(wav)
+                # Word-level stamps when chunks are requested (precise sentence
+                # boundaries for auto-slice); segment-level is enough otherwise.
+                res = model._asr_pipe(
+                    {"array": w, "sampling_rate": int(sr)},
+                    return_timestamps="word" if want_chunks else True,
+                    chunk_length_s=30,
+                    batch_size=4,
+                )
+                text = (res.get("text", "") if isinstance(res, dict) else "") or ""
+                chunks = []
+                if want_chunks and isinstance(res, dict):
+                    for c in res.get("chunks", []) or []:
+                        tstamp = c.get("timestamp") or (None, None)
+                        chunks.append({"text": c.get("text", ""), "start": tstamp[0], "end": tstamp[1]})
+                return text, chunks
+            return model.transcribe((wav, sr)), []
+
+        try:
+            text, chunks = _run()
+        except RuntimeError:
+            res_q.put(("progress", rid, {"stage": "loading_asr", "message": "Loading Whisper..."}))
+            model.load_asr_model(model_name=cfg.get("asr_model", "openai/whisper-large-v3-turbo"))
+            text, chunks = _run()
+        out: Dict[str, Any] = {"text": (text or "").strip()}
+        if want_chunks:
+            out["chunks"] = chunks
+        return out
+
     def handle_isolate(payload: Dict[str, Any]):
         iso = get_isolator()
         wav = np.asarray(payload["waveform"], dtype=np.float32)
@@ -270,6 +315,7 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
         "warmup": lambda p, rid: handle_warmup(p),
         "isolate": lambda p, rid: handle_isolate(p),
         "dereverb": lambda p, rid: handle_dereverb(p),
+        "transcribe": handle_transcribe,
         "generate": handle_generate,
     }
 

@@ -53,6 +53,85 @@ class RegenSegmentRequest(BaseModel):
     text: Optional[str] = None
 
 
+class EditSegmentRequest(BaseModel):
+    """Non-generative timeline edits to a single segment."""
+    start_s: Optional[float] = None
+    trim_start_s: Optional[float] = None
+    trim_end_s: Optional[float] = None
+    speed: Optional[float] = None
+    gain_db: Optional[float] = None
+
+
+class SetChannelRequest(BaseModel):
+    """Channel-level (track) controls: custom name and/or output gain."""
+    name: Optional[str] = None
+    gain_db: Optional[float] = None
+
+
+class InpaintRequest(BaseModel):
+    """Toggle per-segment Vocal Inpaint (lock the clip's own audio as its voice)."""
+    enabled: bool
+
+
+class PromoteChannelRequest(BaseModel):
+    """Promote an uploaded audio segment into a new clone speaker channel."""
+    name: Optional[str] = None
+
+
+class ReflowRequest(BaseModel):
+    """Global tidy-up: re-arrange sequentially with a gap / global speed."""
+    gap_ms: Optional[int] = None
+    speed: Optional[float] = None
+
+
+class InsertSegmentRequest(BaseModel):
+    speaker_id: str
+    text: str
+    start_s: float = 0.0
+    ripple: bool = False
+
+
+class EmptySessionRequest(BaseModel):
+    """Spin up a blank multitrack timeline to compose by hand."""
+    title: Optional[str] = None
+    speakers: Dict[str, SpeakerConfig] = Field(default_factory=dict)
+    params: GenParams = Field(default_factory=GenParams)
+
+
+class DeleteSegmentRequest(BaseModel):
+    ripple: bool = False
+
+
+class SplitSegmentRequest(BaseModel):
+    at_s: float
+
+
+class DeleteSpaceRequest(BaseModel):
+    start_s: float
+    amount: float
+
+
+class AddSpaceRequest(BaseModel):
+    start_s: float
+    amount: float = 3.0
+
+
+class DuplicateSegmentRequest(BaseModel):
+    start_s: float
+    ripple: bool = False
+
+
+class TranscribeSegmentRequest(BaseModel):
+    # Optional unsaved trim draft to transcribe instead of the stored values.
+    trim_start_s: Optional[float] = None
+    trim_end_s: Optional[float] = None
+    speed: Optional[float] = None
+
+
+class SetSegmentTextRequest(BaseModel):
+    text: str
+
+
 class ScriptRequest(BaseModel):
     prompt: str
     num_speakers: int = 2
