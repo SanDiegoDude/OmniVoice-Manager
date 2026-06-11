@@ -140,9 +140,15 @@ def generate_seeded(
     keep_mask: torch.Tensor,  # (C, T) bool — True = pin from source
     cfg: OmniVoiceGenerationConfig,
     language: str = "en",
+    release_at: float | None = None,
 ) -> torch.Tensor:
     """generate() with a pre-seeded target grid. Mirrors _generate_iterative
-    (B=1 + CFG pair) but only schedules the ACTUALLY-masked tokens."""
+    (B=1 + CFG pair) but only schedules the ACTUALLY-masked tokens.
+
+    release_at (anneal): fraction of steps to keep the seed pinned. At that
+    point the pinned tokens are re-masked and re-predicted with full context —
+    the seed shapes the global structure early, then the model is free to
+    re-voice it toward the target. 1.0/None = pinned forever; lower = looser."""
     dev = model.device
     C = model.config.num_audio_codebook
     MASK = model.config.audio_mask_id
@@ -197,8 +203,24 @@ def generate_seeded(
         sched.append(int(num))
         rem -= int(num)
 
+    release_step = None
+    if release_at is not None and 0.0 <= release_at < 1.0:
+        release_step = max(1, min(cfg.num_step - 1, int(round(cfg.num_step * release_at))))
+
     layer_ids = torch.arange(C, device=dev).view(1, -1, 1)
     for step in range(cfg.num_step):
+        if release_step is not None and step == release_step:
+            sample = tokens[0:1]
+            rel = keep.unsqueeze(0)
+            extra = int(rel.sum().item())
+            if extra > 0:
+                sample.masked_fill_(rel, MASK)
+                bi[0:1, :, c_len - T : c_len] = sample
+                bi[1:2, :, :T] = sample
+                rem_steps = cfg.num_step - step
+                for j in range(step, cfg.num_step):
+                    sched[j] += extra // rem_steps
+                sched[cfg.num_step - 1] += extra % rem_steps
         k = sched[step]
         if k <= 0:
             continue
@@ -228,11 +250,17 @@ def main() -> None:
     ap.add_argument("--max-seconds", type=float, default=12.0)
     ap.add_argument("--num-step", type=int, default=32)
     ap.add_argument("--guidance-scale", type=float, default=2.0)
-    ap.add_argument("--out", default=str(REPO / "research" / "out" / "p0"))
+    ap.add_argument(
+        "--phase",
+        default="p0",
+        choices=["p0", "p1"],
+        help="p0 = feasibility grid; p1 = strength sweep (anneal/sparse pins)",
+    )
+    ap.add_argument("--out", default=None)
     ap.add_argument("--seed", type=int, default=1234)
     args = ap.parse_args()
 
-    out = Path(args.out)
+    out = Path(args.out) if args.out else REPO / "research" / "out" / args.phase
     out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
 
@@ -290,17 +318,37 @@ def main() -> None:
     def keep_random(frac: float) -> torch.Tensor:
         return torch.rand(C, T, generator=g) < frac
 
-    runs = [
-        # (name, seed_tokens, keep_mask)
-        ("baseline_tts", tok_iso, torch.zeros(C, T, dtype=torch.bool)),
-        ("A_keep0_iso", tok_iso, keep_layers([0])),
-        ("A_keep01_iso", tok_iso, keep_layers([0, 1])),
-        ("B_keep10_iso", tok_iso, keep_random(0.10)),
-        ("B_keep30_iso", tok_iso, keep_random(0.30)),
-        ("B_keep50_iso", tok_iso, keep_random(0.50)),
-        ("A_keep0_raw", tok_raw, keep_layers([0])),
-        ("B_keep30_raw", tok_raw, keep_random(0.30)),
-    ]
+    def keep_stride(layer: int, stride: int) -> torch.Tensor:
+        m = torch.zeros(C, T, dtype=torch.bool)
+        m[layer, ::stride] = True
+        return m
+
+    if args.phase == "p1":
+        # Strength sweep on the raw source (P0 winner). All loosen A_keep0:
+        # anneal = pin then release; drop/stride = sparse pitch anchors.
+        runs = [
+            # (name, seed_tokens, keep_mask, release_at)
+            ("A_keep0_ctrl", tok_raw, keep_layers([0]), None),
+            ("A_anneal75", tok_raw, keep_layers([0]), 0.75),
+            ("A_anneal50", tok_raw, keep_layers([0]), 0.50),
+            ("A_anneal25", tok_raw, keep_layers([0]), 0.25),
+            ("A_drop50", tok_raw, keep_layers([0]) & keep_random(0.50), None),
+            ("A_stride2", tok_raw, keep_stride(0, 2), None),
+            ("A_stride3", tok_raw, keep_stride(0, 3), None),
+            ("B_keep20", tok_raw, keep_random(0.20), None),
+            ("B_keep10", tok_raw, keep_random(0.10), None),
+        ]
+    else:
+        runs = [
+            ("baseline_tts", tok_iso, torch.zeros(C, T, dtype=torch.bool), None),
+            ("A_keep0_iso", tok_iso, keep_layers([0]), None),
+            ("A_keep01_iso", tok_iso, keep_layers([0, 1]), None),
+            ("B_keep10_iso", tok_iso, keep_random(0.10), None),
+            ("B_keep30_iso", tok_iso, keep_random(0.30), None),
+            ("B_keep50_iso", tok_iso, keep_random(0.50), None),
+            ("A_keep0_raw", tok_raw, keep_layers([0]), None),
+            ("B_keep30_raw", tok_raw, keep_random(0.30), None),
+        ]
 
     manifest = {
         "source": args.source,
@@ -314,17 +362,20 @@ def main() -> None:
         "runs": [],
     }
 
-    for name, seed_tok, keep in runs:
+    for name, seed_tok, keep, release in runs:
         kept = int(keep.sum().item())
+        rel_s = f", release@{release:.2f}" if release is not None else ""
         print(
             f"[{time.time()-t0:6.1f}s] {name}: kept {kept}/{C*T} tokens "
-            f"({100.0*kept/(C*T):.0f}%) ..."
+            f"({100.0*kept/(C*T):.0f}%{rel_s}) ..."
         )
-        tk = generate_seeded(model, text, vc, seed_tok, keep, cfg)
+        tk = generate_seeded(model, text, vc, seed_tok, keep, cfg, release_at=release)
         with torch.inference_mode():
             audio = model._decode_and_post_process(tk, vc.ref_rms, cfg)
         sf.write(out / f"{name}.wav", audio, SR)
-        manifest["runs"].append({"name": name, "kept_tokens": kept, "out": f"{name}.wav"})
+        manifest["runs"].append(
+            {"name": name, "kept_tokens": kept, "release_at": release, "out": f"{name}.wav"}
+        )
 
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     print(f"[{time.time()-t0:6.1f}s] done -> {out}")
