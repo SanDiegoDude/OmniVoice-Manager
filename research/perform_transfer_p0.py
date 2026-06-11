@@ -33,8 +33,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 import time
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -273,14 +275,18 @@ def main() -> None:
     ap.add_argument(
         "--phase",
         default="p0",
-        choices=["p0", "p1", "swap", "inpaint"],
+        choices=["p0", "p1", "swap", "inpaint", "wordswap", "slider"],
         help=(
             "p0 = feasibility grid; p1 = strength sweep; "
             "swap = run --variants against each of --targets; "
-            "inpaint = mask the pause, insert --insert-text in the source's own voice"
+            "inpaint = mask the pause, insert --insert-text in the source's own voice; "
+            "wordswap = surgical word replacement on an as-is clip (--swap-from/--swap-to); "
+            "slider = character (anneal) + voice (stride) strength ladders vs --target"
         ),
     )
     ap.add_argument("--targets", nargs="+", default=None, help="(swap) target voice wavs")
+    ap.add_argument("--swap-from", default=None, help="(wordswap) word to replace")
+    ap.add_argument("--swap-to", default=None, help="(wordswap) replacement word")
     ap.add_argument(
         "--variants",
         default="anneal25",
@@ -302,26 +308,39 @@ def main() -> None:
     )
     C = model.config.num_audio_codebook
 
-    print(f"[{time.time()-t0:6.1f}s] loading + slicing source ...")
-    full = load_mono_24k(args.source)
-    raw, text, end_s = word_bounded_slice(model, full, args.max_seconds)
-    print(f"  slice: {end_s:.2f}s ({len(raw)} samples, {len(raw)//HOP} tokens)")
-    print(f"  transcript: {len(text)} chars (kept in manifest only)")
+    as_is = args.phase in ("wordswap", "slider")
+    if as_is:
+        # Source is an already-clean clip (e.g. a previous output): no slicing,
+        # no isolation, no re-leveling — operate on it verbatim.
+        print(f"[{time.time()-t0:6.1f}s] loading source as-is ...")
+        raw = load_mono_24k(args.source)
+        raw = raw[: len(raw) - (len(raw) % HOP)]
+        isolated = raw
+        end_s = len(raw) / SR
+        text = ""  # set per-phase below
+        print(f"  clip: {end_s:.2f}s ({len(raw)//HOP} tokens)")
+        sf.write(out / "source_input.wav", raw, SR)
+    else:
+        print(f"[{time.time()-t0:6.1f}s] loading + slicing source ...")
+        full = load_mono_24k(args.source)
+        raw, text, end_s = word_bounded_slice(model, full, args.max_seconds)
+        print(f"  slice: {end_s:.2f}s ({len(raw)} samples, {len(raw)//HOP} tokens)")
+        print(f"  transcript: {len(text)} chars (kept in manifest only)")
 
-    print(f"[{time.time()-t0:6.1f}s] isolating vocals (source cleanup) ...")
-    from manager.vocal_isolation import VocalIsolator
+        print(f"[{time.time()-t0:6.1f}s] isolating vocals (source cleanup) ...")
+        from manager.vocal_isolation import VocalIsolator
 
-    iso = VocalIsolator(device="cuda")
-    isolated = iso.isolate(raw, sample_rate=SR).astype(np.float32)
-    n = min(len(raw), len(isolated)) // HOP * HOP
-    raw, isolated = raw[:n], isolated[:n]
-    del iso
-    torch.cuda.empty_cache()
+        iso = VocalIsolator(device="cuda")
+        isolated = iso.isolate(raw, sample_rate=SR).astype(np.float32)
+        n = min(len(raw), len(isolated)) // HOP * HOP
+        raw, isolated = raw[:n], isolated[:n]
+        del iso
+        torch.cuda.empty_cache()
 
-    raw = normalize_active(raw)
-    isolated = normalize_active(isolated)
-    sf.write(out / "source_raw.wav", raw, SR)
-    sf.write(out / "source_isolated.wav", isolated, SR)
+        raw = normalize_active(raw)
+        isolated = normalize_active(isolated)
+        sf.write(out / "source_raw.wav", raw, SR)
+        sf.write(out / "source_isolated.wav", isolated, SR)
 
     print(f"[{time.time()-t0:6.1f}s] tokenizing source takes ...")
     tok_raw = encode_tokens(model, raw)
@@ -404,6 +423,66 @@ def main() -> None:
             ("inpaint_iso", tok_iso, keep_inpaint.clone(), None, self_ref),
             ("inpaint_raw", tok_raw, keep_inpaint.clone(), None, self_ref),
         ]
+    elif args.phase == "wordswap":
+        # Surgical replacement: mask ONLY the word's time-span (all layers),
+        # swap it in the transcript, condition on the clip's own voice.
+        if not args.swap_from or not args.swap_to:
+            ap.error("--phase wordswap requires --swap-from and --swap-to")
+        words = transcribe_words(model, raw)
+
+        def norm_w(s: str) -> str:
+            return re.sub(r"[^a-z']", "", s.lower())
+
+        target_norm = norm_w(args.swap_from)
+        span = None
+        for i in range(len(words)):
+            acc = ""
+            for j in range(i, min(i + 3, len(words))):
+                acc += norm_w(words[j][0])
+                if acc == target_norm:
+                    span = (i, j)
+                    break
+                if len(acc) >= len(target_norm):
+                    break
+            if span:
+                break
+        if span is None:
+            raise RuntimeError(f"word {args.swap_from!r} not found in clip transcript")
+        w_s, w_e = words[span[0]][1], words[span[1]][2]
+        span_text = "".join(w[0] for w in words[span[0] : span[1] + 1])
+        m = re.search(r"[?!.,]+\s*$", span_text)
+        punct = m.group(0).strip() if m else ""
+        pre = "".join(w[0] for w in words[: span[0]])
+        post = "".join(w[0] for w in words[span[1] + 1 :])
+        text = (pre + " " + args.swap_to + punct + post).strip()
+        margin = 0.08
+        a = max(0, int((w_s - margin) * SR / HOP))
+        b = min(T, int(round((w_e + margin) * SR / HOP)) + 1)
+        print(f"  word span {w_s:.2f}s..{w_e:.2f}s -> masking tokens {a}..{b} ({8*(b-a)} tokens)")
+        keep_word = torch.ones(C, T, dtype=torch.bool)
+        keep_word[:, a:b] = False
+        manifest_extra = {"swap_from": args.swap_from, "swap_to": args.swap_to, "mask_tokens": [a, b]}
+        runs = [("wordswap", tok_raw, keep_word, None, args.source)]
+    elif args.phase == "slider":
+        # Strength ladders for the two ears-validated modes, one target voice:
+        #   character rigidity = anneal release point (earlier = more character)
+        #   vocal similarity   = pin density via stride (denser = closer to source)
+        if not args.target:
+            ap.error("--phase slider requires --target")
+        text = "".join(w[0] for w in transcribe_words(model, raw)).strip()
+        tt = args.target
+        runs = [
+            ("char_rel10", tok_raw, keep_layers([0]), 0.10, tt),
+            ("char_rel25", tok_raw, keep_layers([0]), 0.25, tt),
+            ("char_rel40", tok_raw, keep_layers([0]), 0.40, tt),
+            ("char_rel60", tok_raw, keep_layers([0]), 0.60, tt),
+            ("char_rel80", tok_raw, keep_layers([0]), 0.80, tt),
+            ("voice_stride1", tok_raw, keep_layers([0]), None, tt),
+            ("voice_stride2", tok_raw, keep_stride(0, 2), None, tt),
+            ("voice_stride3", tok_raw, keep_stride(0, 3), None, tt),
+            ("voice_stride4", tok_raw, keep_stride(0, 4), None, tt),
+            ("voice_stride6", tok_raw, keep_stride(0, 6), None, tt),
+        ]
     elif args.phase == "p1":
         # Strength sweep on the raw source (P0 winner). All loosen A_keep0:
         # anneal = pin then release; drop/stride = sparse pitch anchors.
@@ -460,6 +539,9 @@ def main() -> None:
 
     for name, seed_tok, keep, release, target_ref in runs:
         vc = get_vc(target_ref)
+        # Deterministic per-run: same --seed + same config name = identical
+        # output; vary --seed to re-roll a read without touching settings.
+        torch.manual_seed((args.seed + zlib.crc32(name.encode())) % (2**31))
         kept = int(keep.sum().item())
         rel_s = f", release@{release:.2f}" if release is not None else ""
         print(
