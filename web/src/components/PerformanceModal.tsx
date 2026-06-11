@@ -61,6 +61,10 @@ export default function PerformanceModal({
   const timerRef = useRef<number | null>(null)
   const urlRef = useRef<string | null>(null)
 
+  // getUserMedia only exists on secure origins (https:// or localhost). Plain
+  // http:// over the LAN hides the whole API — explain instead of erroring.
+  const micSupported = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia
+
   useEffect(
     () => () => {
       if (urlRef.current) URL.revokeObjectURL(urlRef.current)
@@ -180,9 +184,19 @@ export default function PerformanceModal({
         over <em>your</em> performance on the next regenerate.
       </div>
 
+      {withMic && !micSupported && (
+        <div className="hint" style={{ marginBottom: 8, padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 6 }}>
+          🎙 <strong>Mic recording is blocked on this origin.</strong> Browsers only allow microphone
+          access on <code>https://</code> or <code>localhost</code>. Either open the app via{' '}
+          <code>localhost</code> (e.g. an SSH tunnel: <code>ssh -L {window.location.port || '8200'}:localhost:{window.location.port || '8200'} &lt;server&gt;</code>),
+          or restart the server with <code>--ssl</code> and reload over <code>https://</code>.
+          Uploading a file below still works.
+        </div>
+      )}
+
       {/* Source: record / upload / re-record */}
       <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        {withMic && !recording && (
+        {withMic && micSupported && !recording && (
           <button className="btn sm" onClick={startRecord}>
             {hasTake ? '🔁 Re-record' : '🔴 Record'}
           </button>

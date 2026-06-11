@@ -1003,10 +1003,50 @@ def _mount_spa() -> None:
 _mount_spa()
 
 
+def _ensure_ssl_cert() -> tuple[str, str]:
+    """Create (once) and reuse a self-signed cert so the UI can be served over
+    HTTPS. Browsers only expose microphone capture (getUserMedia) on secure
+    origins — plain http:// over the LAN hides the whole API."""
+    import socket
+    import subprocess
+
+    d = DATA_DIR / "ssl"
+    d.mkdir(parents=True, exist_ok=True)
+    crt, key = d / "server.crt", d / "server.key"
+    if not (crt.exists() and key.exists()):
+        host = socket.gethostname()
+        san = {f"DNS:{host}", "DNS:localhost", "IP:127.0.0.1"}
+        try:
+            for ip in socket.gethostbyname_ex(host)[2]:
+                san.add(f"IP:{ip}")
+        except OSError:
+            pass
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-sha256",
+                "-days", "3650", "-nodes",
+                "-keyout", str(key), "-out", str(crt),
+                "-subj", f"/CN={host}",
+                "-addext", f"subjectAltName={','.join(sorted(san))}",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        print(f"Generated self-signed TLS cert: {crt}", flush=True)
+    return str(crt), str(key)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="omnivoice-manager")
     parser.add_argument("--host", default=settings.host)
     parser.add_argument("--port", type=int, default=settings.port)
+    parser.add_argument(
+        "--ssl",
+        action="store_true",
+        help="Serve over HTTPS with a self-signed cert (required for mic recording "
+        "when the UI is opened from another machine — browsers only allow "
+        "getUserMedia on secure origins).",
+    )
     parser.add_argument("--model", default=settings.model_id)
     parser.add_argument("--device", default=settings.device)
     parser.add_argument("--lod", action="store_true", help="Load model on demand (free VRAM after each job).")
@@ -1039,8 +1079,13 @@ def main() -> int:
 
     import uvicorn
 
-    print(f"OmniVoice Manager on http://{settings.host}:{settings.port}  (LOD={settings.load_on_demand})", flush=True)
-    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
+    ssl_kw = {}
+    if args.ssl:
+        crt, key = _ensure_ssl_cert()
+        ssl_kw = {"ssl_certfile": crt, "ssl_keyfile": key}
+    scheme = "https" if args.ssl else "http"
+    print(f"OmniVoice Manager on {scheme}://{settings.host}:{settings.port}  (LOD={settings.load_on_demand})", flush=True)
+    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info", **ssl_kw)
     return 0
 
 
