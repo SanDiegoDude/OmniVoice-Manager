@@ -105,6 +105,26 @@ def word_bounded_slice(model: OmniVoice, wav: np.ndarray, max_s: float) -> tuple
     return wav[a : a + n].copy(), text, n / SR
 
 
+def transcribe_words(model: OmniVoice, wav: np.ndarray) -> list:
+    """Word-level timestamps for a clip, with implausible durations dropped."""
+    res = model._asr_pipe(
+        {"array": wav, "sampling_rate": SR},
+        return_timestamps="word",
+        chunk_length_s=30,
+        batch_size=4,
+    )
+    words = []
+    for c in res.get("chunks", []) or []:
+        ts = c.get("timestamp") or (None, None)
+        if ts[0] is None or ts[1] is None:
+            continue
+        s, e = float(ts[0]), float(ts[1])
+        if not (0.0 < e - s <= 3.0):
+            continue
+        words.append((c.get("text", ""), s, e))
+    return words
+
+
 def normalize_active(wav: np.ndarray, sr: int = SR, target_rms: float = 0.1) -> np.ndarray:
     """Scale so the RMS of ACTIVE (non-silent) frames hits target_rms. Movie
     dialogue is mixed quiet; seeding the grid with near-silence tokens makes the
@@ -245,7 +265,7 @@ def generate_seeded(
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--source", required=True, help="Acted source performance (any sr)")
-    ap.add_argument("--target", required=True, help="Target voice reference wav")
+    ap.add_argument("--target", default=None, help="Target voice reference wav (p0/p1)")
     ap.add_argument("--model", default="k2-fsa/OmniVoice")
     ap.add_argument("--max-seconds", type=float, default=12.0)
     ap.add_argument("--num-step", type=int, default=32)
@@ -253,9 +273,20 @@ def main() -> None:
     ap.add_argument(
         "--phase",
         default="p0",
-        choices=["p0", "p1"],
-        help="p0 = feasibility grid; p1 = strength sweep (anneal/sparse pins)",
+        choices=["p0", "p1", "swap", "inpaint"],
+        help=(
+            "p0 = feasibility grid; p1 = strength sweep; "
+            "swap = run --variants against each of --targets; "
+            "inpaint = mask the pause, insert --insert-text in the source's own voice"
+        ),
     )
+    ap.add_argument("--targets", nargs="+", default=None, help="(swap) target voice wavs")
+    ap.add_argument(
+        "--variants",
+        default="anneal25",
+        help="(swap) comma list: anneal25 (character swap), stride3 (pure voice swap), keep0, anneal50",
+    )
+    ap.add_argument("--insert-text", default="Ever heard of inpainting?")
     ap.add_argument("--out", default=None)
     ap.add_argument("--seed", type=int, default=1234)
     args = ap.parse_args()
@@ -292,9 +323,6 @@ def main() -> None:
     sf.write(out / "source_raw.wav", raw, SR)
     sf.write(out / "source_isolated.wav", isolated, SR)
 
-    print(f"[{time.time()-t0:6.1f}s] building target clone prompt ...")
-    vc = model.create_voice_clone_prompt(ref_audio=args.target, ref_text=None)
-
     print(f"[{time.time()-t0:6.1f}s] tokenizing source takes ...")
     tok_raw = encode_tokens(model, raw)
     tok_iso = encode_tokens(model, isolated)
@@ -323,36 +351,95 @@ def main() -> None:
         m[layer, ::stride] = True
         return m
 
-    if args.phase == "p1":
+    # name -> (keep_mask factory, release_at). Ears-validated semantics:
+    #   anneal25 = "character swap" (target's mannerisms take over the read)
+    #   stride3  = "pure voice swap" (source performance, target timbre)
+    variant_defs = {
+        "anneal25": (lambda: keep_layers([0]), 0.25),
+        "anneal50": (lambda: keep_layers([0]), 0.50),
+        "keep0": (lambda: keep_layers([0]), None),
+        "stride3": (lambda: keep_stride(0, 3), None),
+    }
+
+    manifest_extra = {}
+    if args.phase == "swap":
+        if not args.targets:
+            ap.error("--phase swap requires --targets")
+        variants = [v.strip() for v in args.variants.split(",") if v.strip()]
+        runs = []
+        for tpath in args.targets:
+            stem = Path(tpath).stem
+            for pre in ("cust-", "cust_", "Cust-", "Cust_"):
+                stem = stem.removeprefix(pre)
+            for v in variants:
+                mk, rel = variant_defs[v]
+                runs.append((f"{stem}__{v}", tok_raw, mk(), rel, tpath))
+    elif args.phase == "inpaint":
+        # Mask the pause (all layers), splice the new line into the transcript,
+        # condition on the source's OWN voice -> seamless insert, same speaker.
+        words = transcribe_words(model, isolated)
+        if len(words) < 2:
+            raise RuntimeError("need >=2 words to find the gap")
+        gaps = [
+            (words[i + 1][1] - words[i][2], words[i][2], words[i + 1][1], i)
+            for i in range(len(words) - 1)
+        ]
+        gap_dur, gap_s, gap_e, gi = max(gaps)
+        pre_text = "".join(w[0] for w in words[: gi + 1]).strip()
+        post_text = "".join(w[0] for w in words[gi + 1 :]).strip()
+        full_text = f"{pre_text} {args.insert_text} {post_text}"
+        margin = min(0.3, gap_dur * 0.15)
+        a = int(round((gap_s + margin) * SR / HOP))
+        b = int(round((gap_e - margin) * SR / HOP))
+        print(
+            f"  gap: {gap_s:.2f}s..{gap_e:.2f}s ({gap_dur:.2f}s) -> masking tokens {a}..{b} "
+            f"of {T} ({8*(b-a)} tokens)"
+        )
+        keep_inpaint = torch.ones(C, T, dtype=torch.bool)
+        keep_inpaint[:, a:b] = False
+        text = full_text  # override conditioning text for all inpaint runs
+        manifest_extra = {"insert_text": args.insert_text, "mask_tokens": [a, b]}
+        self_ref = str(out / "source_isolated.wav")
+        runs = [
+            ("inpaint_iso", tok_iso, keep_inpaint.clone(), None, self_ref),
+            ("inpaint_raw", tok_raw, keep_inpaint.clone(), None, self_ref),
+        ]
+    elif args.phase == "p1":
         # Strength sweep on the raw source (P0 winner). All loosen A_keep0:
         # anneal = pin then release; drop/stride = sparse pitch anchors.
+        if not args.target:
+            ap.error("--phase p1 requires --target")
+        tt = args.target
         runs = [
-            # (name, seed_tokens, keep_mask, release_at)
-            ("A_keep0_ctrl", tok_raw, keep_layers([0]), None),
-            ("A_anneal75", tok_raw, keep_layers([0]), 0.75),
-            ("A_anneal50", tok_raw, keep_layers([0]), 0.50),
-            ("A_anneal25", tok_raw, keep_layers([0]), 0.25),
-            ("A_drop50", tok_raw, keep_layers([0]) & keep_random(0.50), None),
-            ("A_stride2", tok_raw, keep_stride(0, 2), None),
-            ("A_stride3", tok_raw, keep_stride(0, 3), None),
-            ("B_keep20", tok_raw, keep_random(0.20), None),
-            ("B_keep10", tok_raw, keep_random(0.10), None),
+            # (name, seed_tokens, keep_mask, release_at, target_ref)
+            ("A_keep0_ctrl", tok_raw, keep_layers([0]), None, tt),
+            ("A_anneal75", tok_raw, keep_layers([0]), 0.75, tt),
+            ("A_anneal50", tok_raw, keep_layers([0]), 0.50, tt),
+            ("A_anneal25", tok_raw, keep_layers([0]), 0.25, tt),
+            ("A_drop50", tok_raw, keep_layers([0]) & keep_random(0.50), None, tt),
+            ("A_stride2", tok_raw, keep_stride(0, 2), None, tt),
+            ("A_stride3", tok_raw, keep_stride(0, 3), None, tt),
+            ("B_keep20", tok_raw, keep_random(0.20), None, tt),
+            ("B_keep10", tok_raw, keep_random(0.10), None, tt),
         ]
     else:
+        if not args.target:
+            ap.error("--phase p0 requires --target")
+        tt = args.target
         runs = [
-            ("baseline_tts", tok_iso, torch.zeros(C, T, dtype=torch.bool), None),
-            ("A_keep0_iso", tok_iso, keep_layers([0]), None),
-            ("A_keep01_iso", tok_iso, keep_layers([0, 1]), None),
-            ("B_keep10_iso", tok_iso, keep_random(0.10), None),
-            ("B_keep30_iso", tok_iso, keep_random(0.30), None),
-            ("B_keep50_iso", tok_iso, keep_random(0.50), None),
-            ("A_keep0_raw", tok_raw, keep_layers([0]), None),
-            ("B_keep30_raw", tok_raw, keep_random(0.30), None),
+            ("baseline_tts", tok_iso, torch.zeros(C, T, dtype=torch.bool), None, tt),
+            ("A_keep0_iso", tok_iso, keep_layers([0]), None, tt),
+            ("A_keep01_iso", tok_iso, keep_layers([0, 1]), None, tt),
+            ("B_keep10_iso", tok_iso, keep_random(0.10), None, tt),
+            ("B_keep30_iso", tok_iso, keep_random(0.30), None, tt),
+            ("B_keep50_iso", tok_iso, keep_random(0.50), None, tt),
+            ("A_keep0_raw", tok_raw, keep_layers([0]), None, tt),
+            ("B_keep30_raw", tok_raw, keep_random(0.30), None, tt),
         ]
 
     manifest = {
         "source": args.source,
-        "target": args.target,
+        "phase": args.phase,
         "slice_seconds": end_s,
         "text": text,
         "tokens": [C, T],
@@ -360,9 +447,19 @@ def main() -> None:
         "guidance_scale": args.guidance_scale,
         "seed": args.seed,
         "runs": [],
+        **manifest_extra,
     }
 
-    for name, seed_tok, keep, release in runs:
+    vc_cache: dict = {}
+
+    def get_vc(path: str):
+        if path not in vc_cache:
+            print(f"[{time.time()-t0:6.1f}s] clone prompt: {Path(path).name} ...")
+            vc_cache[path] = model.create_voice_clone_prompt(ref_audio=path, ref_text=None)
+        return vc_cache[path]
+
+    for name, seed_tok, keep, release, target_ref in runs:
+        vc = get_vc(target_ref)
         kept = int(keep.sum().item())
         rel_s = f", release@{release:.2f}" if release is not None else ""
         print(
@@ -374,7 +471,13 @@ def main() -> None:
             audio = model._decode_and_post_process(tk, vc.ref_rms, cfg)
         sf.write(out / f"{name}.wav", audio, SR)
         manifest["runs"].append(
-            {"name": name, "kept_tokens": kept, "release_at": release, "out": f"{name}.wav"}
+            {
+                "name": name,
+                "kept_tokens": kept,
+                "release_at": release,
+                "target": target_ref,
+                "out": f"{name}.wav",
+            }
         )
 
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
