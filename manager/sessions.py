@@ -211,6 +211,8 @@ def _stitch(session: Dict[str, Any]) -> np.ndarray:
     placed: List[tuple] = []  # (start_sample, clip)
     for seg in session["segments"]:
         chan = _channel_of(session, seg["speaker_id"])
+        if chan.get("muted"):  # muted track: keep its clips on disk, just drop from the mix
+            continue
         is_audio = chan.get("kind") == "audio"  # uploaded soundtrack/SFX: don't LUFS it
         clip = _render_clip(d, seg, sr, level and not is_audio, target, extra_gain_db=float(chan.get("gain_db", 0.0) or 0.0))
         if clip.size == 0:
@@ -279,6 +281,18 @@ def public(session: Dict[str, Any]) -> Dict[str, Any]:
                 "inpaint": bool(s.get("inpaint", False)),
                 "has_bed": bool(s.get("inpaint_bed")),
                 "preserve_nonvocal": bool(s.get("preserve_nonvocal", False)),
+                "perform": (
+                    {
+                        "mode": s["perform"].get("mode", "character"),
+                        "strength": int(s["perform"].get("strength", 3)),
+                        "gain_db": float(s["perform"].get("gain_db", 0.0) or 0.0),
+                        "speed": float(s["perform"].get("speed", 1.0) or 1.0),
+                        "dirty": bool(s["perform"].get("dirty", False)),
+                        "url": seg_url(s["perform"]["file"]),
+                    }
+                    if s.get("perform") and s["perform"].get("file")
+                    else None
+                ),
                 "url": seg_url(s["file"]),
                 "clip_url": f"/api/multitrack/{sid}/segment/{s['index']}/clip?t={bust}",
             }
@@ -295,6 +309,7 @@ def public(session: Dict[str, Any]) -> Dict[str, Any]:
                 "voice_name": voice_name,
                 "custom_name": custom_name,
                 "gain_db": float(cfg.get("gain_db", 0.0) or 0.0),
+                "muted": bool(cfg.get("muted", False)),
                 "kind": cfg.get("kind", "speaker"),
                 "mode": cfg.get("mode", "auto"),
                 "segments": segs,
@@ -383,6 +398,31 @@ def _inpaint_worker(session: Dict[str, Any], seg: Dict[str, Any], ipkey: str, sr
     return spk
 
 
+def _perform_line(session: Dict[str, Any], seg: Dict[str, Any], sr: int) -> Optional[Dict[str, Any]]:
+    """Build the worker `perform` payload for a segment in vocal-performance
+    mode: the recorded take with its dB boost and speed baked in."""
+    pf = seg.get("perform")
+    if not pf or not pf.get("file"):
+        return None
+    path = _dir(session["id"]) / pf["file"]
+    if not path.exists():
+        return None
+    wav = load_audio(path, sr=sr)
+    gain = float(pf.get("gain_db", 0.0) or 0.0)
+    if abs(gain) > 1e-3:
+        wav = np.clip(wav * (10.0 ** (gain / 20.0)), -1.0, 1.0).astype(np.float32)
+    speed = float(pf.get("speed", 1.0) or 1.0)
+    if abs(speed - 1.0) > 1e-3:
+        wav = time_stretch(wav, speed)
+    return {
+        "waveform": wav,
+        "sample_rate": sr,
+        "mode": pf.get("mode", "character"),
+        "strength": int(pf.get("strength", 3)),
+        "seed": pf.get("seed"),
+    }
+
+
 def _store_refs(session: Dict[str, Any], worker_result: Dict[str, Any], sr: int) -> None:
     """Persist any cleaned references the worker handed back (cold builds), so the
     next regen/insert for that speaker is fast and consistent."""
@@ -408,21 +448,41 @@ def regen_payload(sid: str, index: int, text: Optional[str] = None) -> Dict[str,
             seg["text"] = text.strip()
             _write(session)
         sr = int(session["sample_rate"])
+        perform = _perform_line(session, seg, sr)  # V2V: ride the recorded take
         # Vocal Inpaint: synthesize against the segment's own locked clone, keyed
         # off the segment index so it never collides with the channel's voice ref.
         if seg.get("inpaint") and seg.get("inpaint_ref") and (_dir(sid) / seg["inpaint_ref"]).exists():
             ipkey = f"ip{int(index)}"
+            line = {"speaker_id": ipkey, "text": seg["text"], "index": int(index)}
+            if perform:
+                line["perform"] = perform
             return {
-                "lines": [{"speaker_id": ipkey, "text": seg["text"], "index": int(index)}],
+                "lines": [line],
                 "speakers": {ipkey: _inpaint_worker(session, seg, ipkey, sr)},
                 "params": session.get("params", {}),
                 "gap_ms": session.get("gap_ms", 250),
                 "multitrack": True,
             }
         spk_id = seg["speaker_id"]
+        spk = _speaker_worker(session, spk_id, sr)
+        if perform and spk.get("mode") != "clone":
+            # Performance transfer needs a voice reference. Channels without a
+            # clone (auto/design) fall back to the segment's own current audio —
+            # the established voice IS the target.
+            spk = {
+                **spk,
+                "mode": "clone",
+                "waveform": load_audio(_dir(sid) / seg["file"], sr=sr),
+                "isolate": False,
+                "normalize": True,
+                "dereverb": False,
+            }
+        line = {"speaker_id": spk_id, "text": seg["text"], "index": int(index)}
+        if perform:
+            line["perform"] = perform
         return {
-            "lines": [{"speaker_id": spk_id, "text": seg["text"], "index": int(index)}],
-            "speakers": {spk_id: _speaker_worker(session, spk_id, sr)},
+            "lines": [line],
+            "speakers": {spk_id: spk},
             "params": session.get("params", {}),
             "gap_ms": session.get("gap_ms", 250),
             "multitrack": True,
@@ -538,6 +598,9 @@ def apply_regen(sid: str, index: int, worker_result: Dict[str, Any]) -> Dict[str
         new_eff = _eff_duration(target)  # speed reset to 1 → == dur
 
         _ripple_endpoint(session, int(index), end_old, new_eff - old_eff, controls)
+
+        if target.get("perform"):
+            target["perform"]["dirty"] = False  # take has been rendered
 
         _store_refs(session, worker_result, sr)
         _stitch(session)
@@ -721,9 +784,9 @@ def update_speaker(sid: str, pos: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         return public(session)
 
 
-def set_channel(sid: str, pos: str, name: Optional[str] = None, gain_db: Optional[float] = None) -> Dict[str, Any]:
-    """Set a channel's custom display name and/or output gain (dB). Re-stitches
-    when gain changes so the mix reflects the new level."""
+def set_channel(sid: str, pos: str, name: Optional[str] = None, gain_db: Optional[float] = None, muted: Optional[bool] = None) -> Dict[str, Any]:
+    """Set a channel's custom display name, output gain (dB) and/or mute state.
+    Re-stitches when gain or mute changes so the mix reflects it."""
     with _lock:
         session = _read(sid)
         if not session:
@@ -736,6 +799,9 @@ def set_channel(sid: str, pos: str, name: Optional[str] = None, gain_db: Optiona
             cfg["custom_name"] = name.strip() or None
         if gain_db is not None:
             cfg["gain_db"] = float(np.clip(float(gain_db), -36.0, 36.0))
+            restitch = True
+        if muted is not None:
+            cfg["muted"] = bool(muted)
             restitch = True
         session["speakers"][str(pos)] = cfg
         if restitch:
@@ -970,6 +1036,103 @@ def split_segment(sid: str, index: int, at_s: float) -> Dict[str, Any]:
         return public(session)
 
 
+def _bake_clip(d: Path, seg: Dict[str, Any], sr: int) -> np.ndarray:
+    """Render a segment's audio with trim + speed + per-segment gain baked in, at
+    raw level (no LUFS leveling, no channel gain — those still apply at stitch)."""
+    raw = load_audio(d / seg["file"], sr=sr)
+    rdur = len(raw) / sr
+    ts = max(0.0, min(float(seg.get("trim_start_s", 0.0) or 0.0), rdur))
+    te = seg.get("trim_end_s")
+    te = float(te) if te else rdur
+    te = max(ts, min(te, rdur))
+    clip = raw[int(ts * sr) : int(te * sr)]
+    speed = float(seg.get("speed", 1.0) or 1.0)
+    if abs(speed - 1.0) > 1e-3 and clip.size:
+        clip = time_stretch(clip, speed)
+    g = float(seg.get("gain_db", 0.0) or 0.0)
+    if clip.size and abs(g) > 1e-3:
+        clip = clip * float(10.0 ** (g / 20.0))
+    return clip.astype(np.float32)
+
+
+def merge_segments(sid: str, indices: List[int]) -> Dict[str, Any]:
+    """Flatten 2+ segments on the SAME track into one continuous clip. The merged
+    audio is laid out by each clip's timeline position (gaps become silence) and
+    baked down (trim/speed/gain applied); the result behaves like any other
+    segment — movable, trimmable, re-sliceable. Texts are concatenated."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        want = {int(i) for i in indices}
+        sel = [s for s in session["segments"] if int(s["index"]) in want]
+        if len(sel) < 2:
+            raise ValueError("Select at least two segments to merge")
+        spks = {str(s["speaker_id"]) for s in sel}
+        if len(spks) > 1:
+            raise ValueError("Can only merge segments on the same track")
+        sr = int(session["sample_rate"])
+        d = _dir(sid)
+        sel.sort(key=lambda s: float(s.get("start_s", 0.0) or 0.0))
+        min_start = float(sel[0].get("start_s", 0.0) or 0.0)
+        placed: List[tuple] = []
+        for s in sel:
+            clip = _bake_clip(d, s, sr)
+            off = int(round((float(s.get("start_s", 0.0) or 0.0) - min_start) * sr))
+            placed.append((max(0, off), clip))
+        total = max((off + len(c) for off, c in placed), default=0)
+        buf = np.zeros(max(total, 1), dtype=np.float32)
+        for off, c in placed:
+            if c.size:
+                buf[off : off + len(c)] += c
+        buf = peak_limit(buf)
+
+        nid = int(session.get("next_index", max((s["index"] for s in session["segments"]), default=-1) + 1))
+        session["next_index"] = nid + 1
+        fn = f"seg_{nid:03d}.wav"
+        save_wav(d / fn, buf, sr)
+        dur = duration_seconds(buf, sr)
+        text = " ".join(t for t in ((s.get("text") or "").strip() for s in sel) if t)
+        speaker_id = str(sel[0]["speaker_id"])
+
+        gone = {int(s["index"]) for s in sel}
+        for s in sel:
+            (d / s["file"]).unlink(missing_ok=True)
+            for key in ("inpaint_ref", "inpaint_bed"):
+                if s.get(key):
+                    (d / s[key]).unlink(missing_ok=True)
+            session.get("refs", {}).pop(f"ip{int(s['index'])}", None)
+        session["segments"] = [s for s in session["segments"] if int(s["index"]) not in gone]
+        session["segments"].append(
+            {
+                "index": nid,
+                "speaker_id": speaker_id,
+                "text": text,
+                "file": fn,
+                "raw_duration_s": dur,
+                "trim_start_s": 0.0,
+                "trim_end_s": dur,
+                "speed": 1.0,
+                "gain_db": 0.0,
+                "start_s": round(min_start, 3),
+            }
+        )
+        _stitch(session)
+        _write(session)
+        return public(session)
+
+
+def collapse_track(sid: str, pos: str) -> Dict[str, Any]:
+    """Flatten an ENTIRE track into one continuous segment (timing preserved)."""
+    session = _read(sid)
+    if not session:
+        raise FileNotFoundError("Session not found")
+    idxs = [int(s["index"]) for s in session["segments"] if str(s["speaker_id"]) == str(pos)]
+    if len(idxs) < 2:
+        raise ValueError("This track needs at least two segments to collapse")
+    return merge_segments(sid, idxs)
+
+
 def add_space(sid: str, start_s: float, amount: float) -> Dict[str, Any]:
     """Insert empty time: push every clip that starts at/after `start_s` later by
     `amount` (inverse of delete_space)."""
@@ -1200,6 +1363,68 @@ def set_preserve_nonvocal(sid: str, index: int, enabled: bool) -> Dict[str, Any]
         if enabled and not (seg.get("inpaint_bed") and (_dir(sid) / seg["inpaint_bed"]).exists()):
             raise ValueError("No non-vocal bed was captured for this clip (isolation unavailable).")
         seg["preserve_nonvocal"] = bool(enabled)
+        _write(session)
+        return public(session)
+
+
+def set_performance(
+    sid: str,
+    index: int,
+    wav: Optional[np.ndarray],
+    sr: Optional[int],
+    *,
+    gain_db: float = 0.0,
+    speed: float = 1.0,
+    mode: str = "character",
+    strength: int = 3,
+    text: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Attach (or update) a recorded vocal performance on a segment. With audio,
+    the take is stored and the segment enters perform mode; without audio, only
+    the params change (existing take required). Either way the segment is marked
+    dirty until the next regen renders it."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
+        if seg is None:
+            raise FileNotFoundError(f"Segment {index} not found")
+        pf = dict(seg.get("perform") or {})
+        if wav is not None:
+            fn = f"perform_{int(index):03d}.wav"
+            save_wav(_dir(sid) / fn, np.asarray(wav, dtype=np.float32), int(sr or session["sample_rate"]))
+            pf["file"] = fn
+        if not pf.get("file") or not (_dir(sid) / pf["file"]).exists():
+            raise ValueError("No performance audio attached to this segment yet.")
+        pf.update(
+            {
+                "gain_db": float(gain_db),
+                "speed": float(speed),
+                "mode": "voice" if str(mode).lower() == "voice" else "character",
+                "strength": max(1, min(5, int(strength))),
+                "dirty": True,
+            }
+        )
+        seg["perform"] = pf
+        if text is not None and text.strip():
+            seg["text"] = text.strip()
+        _write(session)
+        return public(session)
+
+
+def clear_performance(sid: str, index: int) -> Dict[str, Any]:
+    """Detach a segment's vocal performance (back to plain TTS regen)."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
+        if seg is None:
+            raise FileNotFoundError(f"Segment {index} not found")
+        pf = seg.pop("perform", None)
+        if pf and pf.get("file"):
+            (_dir(sid) / pf["file"]).unlink(missing_ok=True)
         _write(session)
         return public(session)
 

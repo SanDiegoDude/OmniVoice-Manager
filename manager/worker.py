@@ -248,6 +248,39 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
                 kw["instruct"] = spk["instruct"].strip()
             # auto: no voice prompt
 
+            perf = line.get("perform")
+            if perf is not None:
+                # V2V performance transfer: seed the token grid from the user's
+                # recorded take and re-voice it with this speaker's clone prompt.
+                from manager.perform import perform_transfer
+
+                vc = clone_prompts.get(sid)
+                if vc is None:
+                    raise RuntimeError(
+                        "Performance transfer needs a voice reference on this channel "
+                        "(clone voice, promoted track, or Vocal Inpaint lock)."
+                    )
+                res_q.put(
+                    ("progress", rid, {"stage": "performing", "line": idx + 1, "total": total, "text": text[:80]})
+                )
+                audio = perform_transfer(
+                    model,
+                    text=text,
+                    vc_prompt=vc,
+                    perf_wav=np.asarray(perf["waveform"], dtype=np.float32),
+                    perf_sr=int(perf.get("sample_rate", REF_SR)),
+                    mode=str(perf.get("mode", "character")),
+                    strength=int(perf.get("strength", 3)),
+                    seed=perf.get("seed"),
+                    language=language,
+                    gen_params=params,
+                ).astype(np.float32)
+                speech.append(audio)
+                segments_out.append(
+                    {"index": int(line.get("index", idx)), "speaker_id": sid, "text": text, "waveform": audio}
+                )
+                continue
+
             res_q.put(
                 ("progress", rid, {"stage": "generating", "line": idx + 1, "total": total, "text": text[:80]})
             )

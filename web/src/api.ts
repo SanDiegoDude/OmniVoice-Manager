@@ -85,6 +85,15 @@ export interface Job {
   meta: { title?: string; multitrack?: boolean; regen?: number; channel_regen?: string }
 }
 
+export interface PerformInfo {
+  mode: 'character' | 'voice'
+  strength: number
+  gain_db: number
+  speed: number
+  dirty: boolean
+  url: string
+}
+
 export interface MultitrackSegment {
   index: number
   speaker_id: string
@@ -99,6 +108,7 @@ export interface MultitrackSegment {
   inpaint?: boolean
   has_bed?: boolean
   preserve_nonvocal?: boolean
+  perform?: PerformInfo | null
   url: string
   clip_url: string
 }
@@ -109,6 +119,7 @@ export interface MultitrackTrack {
   voice_name?: string
   custom_name?: string | null
   gain_db?: number
+  muted?: boolean
   kind?: string
   mode: string
   segments: MultitrackSegment[]
@@ -279,10 +290,40 @@ export const api = {
   promoteChannel: (sid: string, pos: string, name: string) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/speaker/${pos}/promote`, { method: 'POST', body: JSON.stringify({ name }) }),
   undo: (sid: string) => jfetch<MultitrackSession>(`/api/multitrack/${sid}/undo`, { method: 'POST' }),
-  setChannel: (sid: string, pos: string, fields: { name?: string | null; gain_db?: number }) =>
+  setChannel: (sid: string, pos: string, fields: { name?: string | null; gain_db?: number; muted?: boolean }) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/speaker/${pos}/channel`, { method: 'POST', body: JSON.stringify(fields) }),
+  mergeSegments: (sid: string, indices: number[]) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/merge`, { method: 'POST', body: JSON.stringify({ indices }) }),
+  collapseTrack: (sid: string, pos: string) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/speaker/${pos}/collapse`, { method: 'POST' }),
   regenChannel: (sid: string, pos: string) =>
     jfetch<{ job_id: string }>(`/api/multitrack/${sid}/speaker/${pos}/regenerate`, { method: 'POST' }),
+  async setPerformance(
+    sid: string,
+    index: number,
+    wav: Blob | null,
+    params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
+  ): Promise<MultitrackSession> {
+    const fd = new FormData()
+    if (wav) fd.append('file', wav, 'performance.wav')
+    fd.append('gain_db', String(params.gain_db))
+    fd.append('speed', String(params.speed))
+    fd.append('mode', params.mode)
+    fd.append('strength', String(params.strength))
+    if (params.text) fd.append('text', params.text)
+    const res = await fetch(`/api/multitrack/${sid}/segment/${index}/performance`, { method: 'POST', body: fd })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Save failed')
+    return res.json()
+  },
+  clearPerformance: (sid: string, index: number) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/performance`, { method: 'DELETE' }),
+  async transcribeClip(wav: Blob): Promise<string> {
+    const fd = new FormData()
+    fd.append('file', wav, 'clip.wav')
+    const res = await fetch('/api/transcribe-clip', { method: 'POST', body: fd })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Transcription failed')
+    return ((await res.json()).text || '').trim()
+  },
   async uploadChannel(sid: string, file: File, name: string): Promise<MultitrackSession> {
     const fd = new FormData()
     fd.append('file', file)

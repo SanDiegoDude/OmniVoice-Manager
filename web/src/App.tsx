@@ -292,14 +292,35 @@ export default function App() {
   }, [])
   const removeSpeakerFromSession = useCallback(async (pos: string) => {
     const s = sessionRef.current
-    if (!s) return
+    if (!s) return null
     try {
-      setSession(await api.removeSpeaker(s.id, pos))
+      const next = await api.removeSpeaker(s.id, pos)
+      setSession(next)
+      return next
     } catch (e) {
       notify(String(e), 'error')
+      return null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+  const mergeSegments = async (indices: number[]) => {
+    if (!session) return
+    try {
+      setSession(await api.mergeSegments(session.id, indices))
+      notify(`Merged ${indices.length} segments into one`, 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const collapseTrack = async (pos: string) => {
+    if (!session) return
+    try {
+      setSession(await api.collapseTrack(session.id, pos))
+      notify('Collapsed track into one segment', 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
 
   const deleteSegment = async (index: number, ripple: boolean) => {
     if (!session) return
@@ -346,6 +367,26 @@ export default function App() {
       notify(String(e), 'error')
     }
   }
+  const setPerformance = async (
+    index: number,
+    wav: Blob | null,
+    params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
+  ) => {
+    if (!session) return
+    const s = await api.setPerformance(session.id, index, wav, params)
+    setSession(s)
+    notify('Performance saved — hit ↻ Regenerate on the clip to render it', 'success')
+  }
+  const clearPerformance = async (index: number) => {
+    if (!session) return
+    try {
+      setSession(await api.clearPerformance(session.id, index))
+      notify('Performance removed — back to plain TTS regen', 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const transcribeClip = (wav: Blob) => api.transcribeClip(wav)
   const promoteChannel = async (pos: string, name: string) => {
     if (!session) return null
     try {
@@ -598,7 +639,12 @@ export default function App() {
           onSetInpaint={setInpaint}
           onSetPreserveNonvocal={setPreserveNonvocal}
           onPromoteChannel={promoteChannel}
+          onMergeSegments={mergeSegments}
+          onCollapseTrack={collapseTrack}
           onUndo={undoSession}
+          onSetPerformance={setPerformance}
+          onClearPerformance={clearPerformance}
+          onTranscribeClip={transcribeClip}
           onDeleteSpace={deleteSpace}
           onAddSpace={addSpace}
           onDuplicateSegment={duplicateSegment}

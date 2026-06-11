@@ -81,7 +81,12 @@ export function Studio({
   onSetInpaint,
   onSetPreserveNonvocal,
   onPromoteChannel,
+  onMergeSegments,
+  onCollapseTrack,
   onUndo,
+  onSetPerformance,
+  onClearPerformance,
+  onTranscribeClip,
   onFinalize,
   notify,
 }: {
@@ -106,7 +111,7 @@ export function Studio({
   onEnsureSession: (speakers: Record<string, SpeakerConfig>, params: GenParams) => void
   onAddSpeaker: (cfg: SpeakerConfig) => void
   onUpdateSpeaker: (pos: string, cfg: SpeakerConfig) => void
-  onRemoveSpeaker: (pos: string) => void
+  onRemoveSpeaker: (pos: string) => Promise<MultitrackSession | null> | void
   onDeleteSegment: (index: number, ripple: boolean) => void
   onSplitSegment: (index: number, atS: number) => void
   onDeleteSpace: (startS: number, amount: number) => void
@@ -121,7 +126,16 @@ export function Studio({
   onSetInpaint: (index: number, enabled: boolean) => Promise<void>
   onSetPreserveNonvocal: (index: number, enabled: boolean) => Promise<void>
   onPromoteChannel: (pos: string, name: string) => Promise<MultitrackSession | null>
+  onMergeSegments: (indices: number[]) => Promise<void>
+  onCollapseTrack: (pos: string) => Promise<void>
   onUndo: () => void
+  onSetPerformance: (
+    index: number,
+    wav: Blob | null,
+    params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
+  ) => Promise<void>
+  onClearPerformance: (index: number) => Promise<void>
+  onTranscribeClip: (wav: Blob) => Promise<string>
   onFinalize: () => void
   notify: (m: string, k?: 'info' | 'error' | 'success') => void
 }) {
@@ -240,6 +254,17 @@ export function Studio({
       )
     }
     return s
+  }
+
+  // Delete a track straight from the editor pin. Removal renumbers generative
+  // speakers on the backend, so shrink the roster to match (audio channels live
+  // outside the 1..N namespace and leave the roster untouched).
+  const handleRemoveTrack = async (pos: string) => {
+    const s = await onRemoveSpeaker(pos)
+    if (s) {
+      const genCount = s.tracks.filter((t) => t.kind !== 'audio').length
+      setSpeakers((prev) => (prev.length > genCount ? prev.slice(0, Math.max(1, genCount)) : prev))
+    }
   }
 
   const addSpeaker = () => {
@@ -557,7 +582,13 @@ export function Studio({
             onSetInpaint={onSetInpaint}
             onSetPreserveNonvocal={onSetPreserveNonvocal}
             onPromoteChannel={handlePromote}
+            onRemoveTrack={handleRemoveTrack}
+            onMergeSegments={onMergeSegments}
+            onCollapseTrack={onCollapseTrack}
             onUndo={onUndo}
+            onSetPerformance={onSetPerformance}
+            onClearPerformance={onClearPerformance}
+            onTranscribeClip={onTranscribeClip}
             regenIndex={regenIndex}
             busy={running}
             onFinalize={onFinalize}

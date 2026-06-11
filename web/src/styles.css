@@ -246,10 +246,20 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 .mtk-grid { display: flex; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); overflow: hidden; background: var(--bg); }
 .mtk-labels { flex: 0 0 auto; background: var(--bg-elev); border-right: 1px solid var(--border); z-index: 2; }
 .mtk-corner { border-bottom: 1px solid var(--border-soft); }
-.mtk-label { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 0 8px 0 9px; border-bottom: 1px solid var(--border-soft); overflow: hidden; }
+.mtk-label { position: relative; display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 0 8px 0 9px; border-bottom: 1px solid var(--border-soft); overflow: hidden; }
+.mtk-label.muted { opacity: 0.62; }
+.mtk-label.muted .mtk-label-name { text-decoration: line-through; text-decoration-color: var(--text-faint); }
 .mtk-label-name { font-weight: 600; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
 .mtk-label-sub { font-size: 10.5px; color: var(--text-faint); }
-.mtk-label-top { display: flex; align-items: center; }
+.mtk-label-top { display: flex; align-items: center; gap: 4px; }
+.mtk-label-top .mtk-label-name { flex: 1; min-width: 0; }
+.mtk-label-actions { display: flex; align-items: center; gap: 3px; margin-left: auto; }
+.mtk-label-x { width: 18px; height: 18px; line-height: 1; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-elev); color: var(--text-faint); cursor: pointer; font-size: 10px; }
+.mtk-label-x:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.mtk-label-x:disabled { opacity: 0.4; cursor: default; }
+.mtk-label-x.del:hover:not(:disabled) { color: #fff; background: var(--bad); border-color: var(--bad); }
+.mtk-label-x.mute.on { border-color: var(--bad); }
+.mtk-label-confirm { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; gap: 6px; align-items: center; justify-content: center; padding: 6px; background: var(--bg-elev); border: 1px solid var(--bad); border-radius: 6px; font-size: 10.5px; text-align: center; }
 .mtk-name-edit { width: 100%; font-size: 12.5px; font-weight: 600; padding: 1px 4px; border: 1px solid var(--accent); border-radius: 4px; background: var(--bg); color: var(--text); }
 .mtk-label-voice { font-size: 10px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mtk-label-ctrls { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
@@ -288,6 +298,24 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 .mtk-seg.regen { outline: 2px solid var(--accent); outline-offset: -1px; }
 .mtk-seg.inpaint { border-left: 3px solid #f0abfc !important; }
 .mtk-seg.inpaint::after { content: '◉'; position: absolute; top: 2px; right: 20px; font-size: 9px; color: #f0abfc; pointer-events: none; }
+
+/* Vocal performance mode (V2V): gold clip, like a DAW take lane */
+.mtk-seg.perform {
+  border-left: 3px solid #f5c542 !important;
+  background: linear-gradient(180deg, rgba(245, 197, 66, 0.16), rgba(245, 197, 66, 0.05));
+}
+.mtk-seg.perform::before { content: '🎙'; position: absolute; top: 1px; right: 32px; font-size: 9px; pointer-events: none; opacity: 0.9; }
+/* Armed but not yet rendered: pulse until regenerated */
+.mtk-seg.perform-dirty { animation: perfPulse 1.6s ease-in-out infinite; }
+@keyframes perfPulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(245, 197, 66, 0.35); }
+  50% { box-shadow: 0 0 10px 2px rgba(245, 197, 66, 0.65); }
+}
+.btn.perf-glow { border-color: #f5c542; box-shadow: 0 0 8px rgba(245, 197, 66, 0.55); animation: perfPulse 1.6s ease-in-out infinite; }
+
+/* Recording indicator */
+.rec-dot { width: 10px; height: 10px; border-radius: 50%; background: #ef4444; display: inline-block; animation: recBlink 1s ease-in-out infinite; }
+@keyframes recBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 .mtk-seg-bar { display: flex; align-items: center; gap: 4px; }
 .mtk-ic { width: 22px; height: 19px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; border: 1px solid rgba(255,255,255,.18); background: rgba(0,0,0,.28); color: #fff; cursor: pointer; font-size: 10px; padding: 0; line-height: 1; }
 .mtk-ic:hover:not(:disabled) { background: rgba(0,0,0,.45); }
@@ -300,9 +328,13 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 .mtk-seg.dirty { box-shadow: 0 0 0 1px var(--warn) inset; }
 .mtk-ic.warn { background: var(--warn); border-color: var(--warn); color: #1b1300; }
 .mtk-head { position: absolute; top: 0; width: 2px; background: var(--bad); pointer-events: none; z-index: 3; box-shadow: 0 0 6px rgba(255,107,125,.6); }
+.mtk-edge { position: absolute; top: 0; width: 1px; background: rgba(255,255,255,.18); pointer-events: none; z-index: 1; }
+.mtk-edge.on { width: 2px; background: var(--accent-2); box-shadow: 0 0 6px var(--accent-2); z-index: 3; }
 .mtk-seg { cursor: grab; }
 .mtk-seg.dragging { cursor: grabbing; z-index: 4; box-shadow: var(--shadow); }
 .mtk-seg.trimming { outline: 2px solid var(--accent-2); outline-offset: -1px; }
+.mtk-seg.selected { outline: 2px solid var(--accent-2); outline-offset: 1px; box-shadow: 0 0 0 2px rgba(0,0,0,.35), 0 0 8px var(--accent-2); }
+.mtk-seg.selected::before { content: '✓'; position: absolute; top: 2px; left: 4px; font-size: 10px; font-weight: 700; color: var(--accent-2); pointer-events: none; }
 .mtk-badge { font-size: 9.5px; padding: 0 4px; border-radius: 3px; background: rgba(155,109,255,.3); color: #d7c7ff; font-variant-numeric: tabular-nums; }
 .mtk-transport { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; padding: 8px 10px; background: var(--bg-elev); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); }
 .mtk-glob { display: flex; align-items: center; gap: 7px; }
@@ -320,6 +352,32 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 .mtk-menu { max-height: 80vh; overflow-y: auto; }
 .mtk-menu .btn.sm { justify-content: flex-start; text-align: left; }
 .mtk-trim { margin-top: 12px; padding: 12px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+
+/* ── Standard tool modal (trim/speed, vocal performance, future plug-ins) ── */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(8, 10, 14, 0.62);
+  backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px;
+}
+.modal-panel {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 10px);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+  max-height: calc(100vh - 48px);
+  display: flex; flex-direction: column;
+  animation: modalIn 0.14s ease-out;
+}
+@keyframes modalIn { from { transform: translateY(8px) scale(0.985); opacity: 0; } to { transform: none; opacity: 1; } }
+.modal-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal-body { padding: 14px; overflow-y: auto; }
 /* delete-space selection */
 .mtk-sel { position: absolute; z-index: 6; background: rgba(255,77,79,.22); border: 1px solid rgba(255,107,125,.9); border-radius: 3px; cursor: grab; }
 .mtk-sel-h { position: absolute; top: 0; bottom: 0; width: 8px; cursor: ew-resize; background: rgba(255,107,125,.55); }

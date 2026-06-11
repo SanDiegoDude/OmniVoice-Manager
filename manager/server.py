@@ -54,6 +54,7 @@ from .schemas import (
     EmptySessionRequest,
     GenerateRequest,
     InpaintRequest,
+    MergeSegmentsRequest,
     InsertSegmentRequest,
     LoadModelRequest,
     PromoteChannelRequest,
@@ -601,6 +602,75 @@ def multitrack_inpaint_preserve(sid: str, index: int, req: InpaintRequest):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/multitrack/{sid}/segment/{index}/performance")
+async def multitrack_set_performance(
+    sid: str,
+    index: int,
+    file: UploadFile | None = File(None),
+    gain_db: float = Form(0.0),
+    speed: float = Form(1.0),
+    mode: str = Form("character"),
+    strength: int = Form(3),
+    text: str = Form(""),
+):
+    """Attach a recorded vocal performance to a segment (V2V mode). With a file
+    the take is (re)stored; without one, only the params update."""
+    wav = None
+    in_sr = None
+    if file is not None:
+        import librosa
+
+        data = await file.read()
+        tmp = TMP_DIR / f"perform_{uuid.uuid4().hex}.bin"
+        tmp.write_bytes(data)
+        try:
+            wav, in_sr = librosa.load(str(tmp), sr=None, mono=True)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"Could not read audio: {e}")
+        finally:
+            tmp.unlink(missing_ok=True)
+        if len(wav) < 2400:  # < 0.1 s — junk recording
+            raise HTTPException(400, "Recording is too short.")
+    try:
+        return sessions.set_performance(
+            sid, index, wav, int(in_sr) if in_sr else None,
+            gain_db=gain_db, speed=speed, mode=mode, strength=strength,
+            text=text or None,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/multitrack/{sid}/segment/{index}/performance")
+def multitrack_clear_performance(sid: str, index: int):
+    """Detach a segment's vocal performance (back to plain TTS regen)."""
+    try:
+        return sessions.clear_performance(sid, index)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/transcribe-clip")
+async def transcribe_clip(file: UploadFile = File(...)):
+    """Whisper-transcribe an arbitrary uploaded clip (e.g. a take being edited
+    in the performance modal, before it's saved)."""
+    import librosa
+
+    data = await file.read()
+    tmp = TMP_DIR / f"tclip_{uuid.uuid4().hex}.bin"
+    tmp.write_bytes(data)
+    try:
+        wav, in_sr = librosa.load(str(tmp), sr=None, mono=True)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Could not read audio: {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+    res = model_manager.transcribe({"waveform": wav, "sample_rate": int(in_sr)})
+    return {"text": (res.get("text") or "").strip()}
+
+
 @app.post("/api/multitrack/{sid}/speaker/{pos}/promote")
 def multitrack_promote(sid: str, pos: str, req: PromoteChannelRequest | None = None):
     """Promote an uploaded AUDIO channel into a new generative clone speaker:
@@ -685,11 +755,33 @@ def multitrack_edit(sid: str, index: int, req: EditSegmentRequest):
 
 @app.post("/api/multitrack/{sid}/speaker/{pos}/channel")
 def multitrack_set_channel(sid: str, pos: str, req: SetChannelRequest):
-    """Set a channel's custom name and/or output gain."""
+    """Set a channel's custom name, output gain and/or mute state."""
     try:
-        return sessions.set_channel(sid, pos, name=req.name, gain_db=req.gain_db)
+        return sessions.set_channel(sid, pos, name=req.name, gain_db=req.gain_db, muted=req.muted)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/speaker/{pos}/collapse")
+def multitrack_collapse_track(sid: str, pos: str):
+    """Flatten an entire track into one continuous segment."""
+    try:
+        return sessions.collapse_track(sid, pos)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/multitrack/{sid}/merge")
+def multitrack_merge_segments(sid: str, req: MergeSegmentsRequest):
+    """Flatten 2+ selected segments on one track into a single clip."""
+    try:
+        return sessions.merge_segments(sid, req.indices)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/multitrack/{sid}/speaker/{pos}/regenerate")
