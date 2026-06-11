@@ -63,9 +63,15 @@ class EditSegmentRequest(BaseModel):
 
 
 class SetChannelRequest(BaseModel):
-    """Channel-level (track) controls: custom name and/or output gain."""
+    """Channel-level (track) controls: custom name, output gain and/or mute."""
     name: Optional[str] = None
     gain_db: Optional[float] = None
+    muted: Optional[bool] = None
+
+
+class MergeSegmentsRequest(BaseModel):
+    """Flatten 2+ segments on the same track into one continuous clip."""
+    indices: List[int]
 
 
 class InpaintRequest(BaseModel):
