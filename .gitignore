@@ -45,6 +45,10 @@ web/dist/
 # ── Local-only planning notes (keep private) ──────────────────────────────────
 ROADMAP.md
 
+# ── Research: local test media + experiment outputs (never commit) ────────────
+examples/box-of-chocolates.wav
+research/out/
+
 # ── Editor / OS ───────────────────────────────────────────────────────────────
 .DS_Store
 .vscode/
