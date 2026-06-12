@@ -51,6 +51,9 @@ class RegenSegmentRequest(BaseModel):
     # Optional edited dialogue for the segment; if set, it replaces the stored
     # line before regenerating (and is persisted to the session).
     text: Optional[str] = None
+    # Ignore any attached vocal performance and render plain TTS with the
+    # channel voice (Capture Performance toggled off).
+    plain: bool = False
 
 
 class EditSegmentRequest(BaseModel):

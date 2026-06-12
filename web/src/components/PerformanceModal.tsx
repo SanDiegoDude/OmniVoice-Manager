@@ -747,7 +747,7 @@ export default function PerformanceModal({
               <strong>Rendered output</strong> — trim &amp; gain apply to the clip on Save
               {capture ? ' (trim copied from the take)' : ''}.
             </span>
-            {hasTake && (
+            {capture && hasTake && (
               <div className="row" style={{ gap: 6 }}>
                 <button
                   className={`btn sm${abPlaying === 'ab' ? ' on' : ''}`}

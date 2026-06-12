@@ -252,10 +252,10 @@ export const api = {
   multitrackGenerate: (body: GenerateBody) =>
     jfetch<{ job_id: string }>('/api/multitrack/generate', { method: 'POST', body: JSON.stringify(body) }),
   multitrackGet: (sid: string) => jfetch<MultitrackSession>(`/api/multitrack/${sid}`),
-  regenSegment: (sid: string, index: number, text?: string) =>
+  regenSegment: (sid: string, index: number, text?: string, plain?: boolean) =>
     jfetch<{ job_id: string }>(`/api/multitrack/${sid}/segment/${index}/regenerate`, {
       method: 'POST',
-      body: JSON.stringify({ text: text ?? null }),
+      body: JSON.stringify({ text: text ?? null, plain: plain ?? false }),
     }),
   editSegment: (
     sid: string,

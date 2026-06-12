@@ -477,10 +477,11 @@ export default function App() {
     }
   }
 
-  // In-modal plain TTS render of an existing segment (capture-performance off).
+  // In-modal plain TTS render of an existing segment (capture-performance off):
+  // plain=true bypasses any attached performance so the channel voice is used.
   const regenSegmentAndWait = async (index: number, text?: string): Promise<MultitrackSegment | null> => {
     if (!session) return null
-    const { job_id } = await api.regenSegment(session.id, index, text)
+    const { job_id } = await api.regenSegment(session.id, index, text, true)
     setRegenIndex(index)
     try {
       const j = await waitJob(job_id)

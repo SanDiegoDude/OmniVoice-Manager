@@ -135,14 +135,17 @@ def make_multitrack_job(
 
 
 def make_regen_job(
-    model_manager, sid: str, index: int, text: str | None = None
+    model_manager, sid: str, index: int, text: str | None = None, plain: bool = False
 ) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
-    """Regenerate a single segment of a session and re-stitch the mix."""
-    payload = sessions.regen_payload(sid, index, text=text)
+    """Regenerate a single segment of a session and re-stitch the mix.
+
+    With ``plain`` the render ignores any attached vocal performance and uses
+    the channel voice only (Capture Performance toggled off in the UI)."""
+    payload = sessions.regen_payload(sid, index, text=text, plain=plain)
 
     def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
         result = model_manager.generate(payload, progress_cb=progress_cb)
-        session = sessions.apply_regen(sid, index, result)
+        session = sessions.apply_regen(sid, index, result, perform_rendered=not plain)
         return {"session": session, "session_id": sid, "regenerated_index": index}
 
     return job

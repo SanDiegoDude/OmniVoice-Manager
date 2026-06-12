@@ -810,7 +810,9 @@ def multitrack_segment_clip(sid: str, index: int, dl: int = 0):
 @app.post("/api/multitrack/{sid}/segment/{index}/regenerate")
 def multitrack_regen(sid: str, index: int, req: Optional[RegenSegmentRequest] = None):
     try:
-        job_fn = service.make_regen_job(model_manager, sid, index, text=req.text if req else None)
+        job_fn = service.make_regen_job(
+            model_manager, sid, index, text=req.text if req else None, plain=bool(req and req.plain)
+        )
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(404, str(e))
     job_id = job_manager.submit(job_fn, meta={"multitrack": True, "regen": index})

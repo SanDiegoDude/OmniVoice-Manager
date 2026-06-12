@@ -435,7 +435,9 @@ def _store_refs(session: Dict[str, Any], worker_result: Dict[str, Any], sr: int)
         session.setdefault("refs", {})[sid] = fn
 
 
-def regen_payload(sid: str, index: int, text: Optional[str] = None) -> Dict[str, Any]:
+def regen_payload(
+    sid: str, index: int, text: Optional[str] = None, plain: bool = False
+) -> Dict[str, Any]:
     """Single-segment payload for regeneration (optionally with edited text)."""
     with _lock:
         session = _read(sid)
@@ -448,7 +450,9 @@ def regen_payload(sid: str, index: int, text: Optional[str] = None) -> Dict[str,
             seg["text"] = text.strip()
             _write(session)
         sr = int(session["sample_rate"])
-        perform = _perform_line(session, seg, sr)  # V2V: ride the recorded take
+        # V2V: ride the recorded take — unless the caller asked for a plain TTS
+        # render (Capture Performance off), which must use the channel voice only.
+        perform = None if plain else _perform_line(session, seg, sr)
         # Vocal Inpaint: synthesize against the segment's own locked clone, keyed
         # off the segment index so it never collides with the channel's voice ref.
         if seg.get("inpaint") and seg.get("inpaint_ref") and (_dir(sid) / seg["inpaint_ref"]).exists():
@@ -563,7 +567,9 @@ def _apply_bed(sid: str, seg: Dict[str, Any], vocal: np.ndarray, sr: int) -> np.
     return peak_limit(out)
 
 
-def apply_regen(sid: str, index: int, worker_result: Dict[str, Any]) -> Dict[str, Any]:
+def apply_regen(
+    sid: str, index: int, worker_result: Dict[str, Any], perform_rendered: bool = True
+) -> Dict[str, Any]:
     """Replace one segment with a fresh take. Resets trim + speed, keeps position.
 
     Endpoint-align: if the new take is a different length, ripple downstream clips
@@ -599,7 +605,7 @@ def apply_regen(sid: str, index: int, worker_result: Dict[str, Any]) -> Dict[str
 
         _ripple_endpoint(session, int(index), end_old, new_eff - old_eff, controls)
 
-        if target.get("perform"):
+        if perform_rendered and target.get("perform"):
             target["perform"]["dirty"] = False  # take has been rendered
 
         _store_refs(session, worker_result, sr)
