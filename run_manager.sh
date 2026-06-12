@@ -6,8 +6,16 @@ cd "$(dirname "$0")"
 
 PORT="${PORT:-8200}"
 
-# Build the SPA once if it hasn't been built yet.
+# Build the SPA once if it hasn't been built yet. We never install Node/npm
+# for you — bring your own (https://nodejs.org, 18+). It is only needed for
+# this one-time build; the server itself runs without it.
 if [ ! -f web/dist/index.html ]; then
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "The web UI is not built yet, and 'npm' was not found on your PATH." >&2
+    echo "Install Node.js 18+ from https://nodejs.org (or your package manager)," >&2
+    echo "then re-run this script. Node is only needed for this one-time build." >&2
+    exit 1
+  fi
   echo "Building web UI (first run)..."
   (cd web && npm install && npm run build)
 fi

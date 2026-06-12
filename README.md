@@ -106,12 +106,22 @@ All GPU work runs in a dedicated child process. This isolates the CUDA context, 
 
 Linux and Windows are both supported.
 
+Bring your own tooling — the installer never installs or modifies system-level
+tools (Node, Python, ffmpeg), so it can't break your existing environments.
+Have these on your PATH before you start:
+
 - An NVIDIA GPU with CUDA (CPU works but is slow)
-- Node.js 18+ (only to build the web UI)
-- [`uv`](https://github.com/astral-sh/uv) for Python dependency management
-  (you do **not** need Python pre-installed — `uv sync` downloads a managed
-  Python 3.10 automatically, without touching any Python already on your system)
-- `ffmpeg` on your PATH for MP3/M4A/OGG output encoding (without it, outputs fall back to WAV)
+- **Node.js 18+** with npm — used only for a one-time build of the web UI, never
+  installed for you. Get it from [nodejs.org](https://nodejs.org) or a package
+  manager (`winget install OpenJS.NodeJS.LTS` / `brew install node` /
+  `apt install nodejs npm`). After `web/dist` is built, Node isn't needed to run.
+- **[`uv`](https://docs.astral.sh/uv/getting-started/installation/)** for Python
+  dependency management. You do **not** need Python pre-installed — `uv sync`
+  downloads a managed Python 3.10 into its own cache, without touching any
+  Python already on your system.
+- **`ffmpeg`** for MP3/M4A/OGG output encoding (without it, outputs fall back to
+  WAV). [ffmpeg.org/download](https://ffmpeg.org/download.html), or
+  `winget install Gyan.FFmpeg` / `brew install ffmpeg` / `apt install ffmpeg`.
 
 ---
 
