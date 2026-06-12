@@ -3,6 +3,7 @@ import { api } from '../api'
 import type { Voice } from '../api'
 import { AudioPlayer } from './AudioPlayer'
 import { Modal, Slider, Toggle } from './ui'
+import { claimPlayback } from '../audioBus'
 
 export function VoiceLab({
   voices,
@@ -28,6 +29,7 @@ export function VoiceLab({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+  const previewBusRef = useRef(Symbol('lab-preview'))
 
   // Manual trim window (seconds), reported by the source AudioPlayer.
   const [trimStart, setTrimStart] = useState(0)
@@ -194,7 +196,17 @@ export function VoiceLab({
 
       <div className="divider" />
       <div className="section-title">4 · Preview & save</div>
-      {previewUrl && <audio controls src={previewUrl} style={{ width: '100%', marginBottom: 10 }} />}
+      {previewUrl && (
+        <audio
+          controls
+          src={previewUrl}
+          style={{ width: '100%', marginBottom: 10 }}
+          onPlay={(e) => {
+            const el = e.currentTarget
+            claimPlayback(previewBusRef.current, () => el.pause())
+          }}
+        />
+      )}
 
       {isLibrary && (
         <label className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 8, cursor: 'pointer' }}>

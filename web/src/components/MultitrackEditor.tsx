@@ -4,6 +4,7 @@ import type { MultitrackSegment, MultitrackSession, MultitrackTrack } from '../a
 import { AudioPlayer, type AudioPlayerHandle } from './AudioPlayer'
 import { Toggle } from './ui'
 import { blurTag, focusTag } from '../tagInject'
+import { claimPlayback, releasePlayback } from '../audioBus'
 import PerformanceModal from './PerformanceModal'
 import ToolModal from './ToolModal'
 
@@ -540,22 +541,36 @@ export function MultitrackEditor({
 
   // Solo preview plays the backend-rendered clip (trim + speed + level already
   // baked in) so it matches the mix exactly — no client-side trim math.
+  const segBusRef = useRef(Symbol('seg-preview'))
+  const stopSegPreview = useCallback(() => {
+    segAudioRef.current?.pause()
+    setPlayingSeg(null)
+    releasePlayback(segBusRef.current)
+  }, [])
+
   const playSeg = useCallback(
     (seg: MultitrackSegment) => {
       if (!segAudioRef.current) segAudioRef.current = new Audio()
       const a = segAudioRef.current
       if (playingSeg === seg.index) {
-        a.pause()
-        setPlayingSeg(null)
+        stopSegPreview()
         return
       }
-      a.onended = () => setPlayingSeg(null)
+      claimPlayback(segBusRef.current, stopSegPreview)
+      a.onended = () => stopSegPreview()
       a.src = seg.clip_url
       a.currentTime = 0
-      a.play().then(() => setPlayingSeg(seg.index)).catch(() => setPlayingSeg(null))
+      a.play().then(() => setPlayingSeg(seg.index)).catch(() => stopSegPreview())
     },
-    [playingSeg],
+    [playingSeg, stopSegPreview],
   )
+
+  // Any session update re-renders clips (URLs cache-bust) — a solo preview that
+  // kept playing the old audio couldn't be stopped from its clip. Kill it.
+  useEffect(() => {
+    if (playingSeg != null) stopSegPreview()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session])
 
   const downloadSeg = (seg: MultitrackSegment) => {
     const aTag = document.createElement('a')
@@ -903,13 +918,13 @@ export function MultitrackEditor({
                   {t.segments.map((seg) => {
                     // Live (uncommitted) tool-drag overrides: trim edges, fades, gain.
                     const segTool = tool && tool.index === seg.index ? tool : null
-                    const trimS = segTool?.trimStart ?? seg.trim_start_s
-                    const trimE = segTool?.trimEnd ?? seg.trim_end_s
+                    const trimS = segTool?.trimStart ?? seg.trim_start_s ?? 0
+                    const trimE = segTool?.trimEnd ?? seg.trim_end_s ?? seg.raw_duration_s ?? 0
                     const spd = seg.speed || 1
                     const liveDur =
                       segTool && (segTool.trimStart != null || segTool.trimEnd != null)
                         ? Math.max(0.05, (trimE - trimS) / spd)
-                        : seg.duration_s
+                        : seg.duration_s || 0
                     // Dragging onto ANOTHER lane: the clip stays put (dimmed) and a
                     // ghost rides the cursor on the target lane instead.
                     const lifting = drag && drag.index === seg.index && drag.lane !== ti
@@ -917,9 +932,11 @@ export function MultitrackEditor({
                       drag && drag.index === seg.index && !lifting ? drag.cur : segTool?.start ?? seg.start_s
                     const left = live * pxPerSec
                     const width = Math.max(MIN_SEG_PX, liveDur * pxPerSec)
-                    const fadeIn = segTool?.fadeIn ?? seg.fade_in_s
-                    const fadeOut = segTool?.fadeOut ?? seg.fade_out_s
-                    const gain = segTool?.gain ?? seg.gain_db
+                    // `?? 0` matters: a backend that predates fades omits these
+                    // fields, and `undefined.toFixed()` would blank the whole page.
+                    const fadeIn = segTool?.fadeIn ?? seg.fade_in_s ?? 0
+                    const fadeOut = segTool?.fadeOut ?? seg.fade_out_s ?? 0
+                    const gain = segTool?.gain ?? seg.gain_db ?? 0
                     // Collapse inline controls into the ⋯ menu as the clip shrinks.
                     const tier = width >= 232 ? 4 : width >= 172 ? 3 : width >= 120 ? 2 : width >= 70 ? 1 : 0
                     const isPlaying = playingSeg === seg.index
@@ -946,7 +963,6 @@ export function MultitrackEditor({
                           fadeIn={fadeIn}
                           fadeOut={fadeOut}
                           gainDb={gain}
-                          hue={hue}
                         />
                         <div className="mtk-seg-bar" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
                           {tier >= 1 && (
@@ -973,8 +989,8 @@ export function MultitrackEditor({
                           >
                             ⋯
                           </button>
-                          {tier >= 2 && seg.speed !== 1 && <span className="mtk-badge">{seg.speed.toFixed(2)}×</span>}
-                          {tier >= 3 && <span className="mtk-seg-dur">{seg.duration_s.toFixed(1)}s</span>}
+                          {tier >= 2 && spd !== 1 && <span className="mtk-badge">{spd.toFixed(2)}×</span>}
+                          {tier >= 3 && <span className="mtk-seg-dur">{(seg.duration_s || 0).toFixed(1)}s</span>}
                         </div>
                         {isEditing ? (
                           <textarea
@@ -1052,8 +1068,8 @@ export function MultitrackEditor({
                                   kind: 'fade',
                                   index: seg.index,
                                   side: 'in',
-                                  orig: seg.fade_in_s,
-                                  eff: seg.duration_s,
+                                  orig: seg.fade_in_s || 0,
+                                  eff: seg.duration_s || 0,
                                   startX: e.clientX,
                                 }
                               }}
@@ -1069,8 +1085,8 @@ export function MultitrackEditor({
                                   kind: 'fade',
                                   index: seg.index,
                                   side: 'out',
-                                  orig: seg.fade_out_s,
-                                  eff: seg.duration_s,
+                                  orig: seg.fade_out_s || 0,
+                                  eff: seg.duration_s || 0,
                                   startX: e.clientX,
                                 }
                               }}
@@ -1740,7 +1756,6 @@ function SegWave({
   fadeIn,
   fadeOut,
   gainDb,
-  hue,
 }: {
   sid: string
   seg: MultitrackSegment
@@ -1751,7 +1766,6 @@ function SegWave({
   fadeIn: number
   fadeOut: number
   gainDb: number
-  hue: number
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const key = `${sid}:${seg.index}:${seg.rev}`
@@ -1802,7 +1816,8 @@ function SegWave({
     const foFrac = Math.max(0, Math.min(1, fadeOut / audDur))
     const bw = 2
     const bars = Math.max(1, Math.floor(w / bw))
-    ctx.fillStyle = `hsla(${hue}, 75%, 64%, 0.45)`
+    // Ice-white reads against every track hue (clip bodies are dark ~22% lightness).
+    ctx.fillStyle = 'rgba(236, 245, 255, 0.62)'
     for (let i = 0; i < bars; i++) {
       const x = (i + 0.5) / bars
       const idx = Math.min(n - 1, Math.floor((f0 + x * (f1 - f0)) * n))
@@ -1827,7 +1842,7 @@ function SegWave({
       ctx.lineTo(w - foFrac * w, 0)
       ctx.stroke()
     }
-  }, [data, width, height, trimStart, trimEnd, fadeIn, fadeOut, gainDb, hue, seg.speed])
+  }, [data, width, height, trimStart, trimEnd, fadeIn, fadeOut, gainDb, seg.speed])
 
   return <canvas ref={canvasRef} className="mtk-seg-wave" aria-hidden />
 }

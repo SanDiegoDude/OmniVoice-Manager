@@ -8,6 +8,7 @@ import { Toasts, type ToastItem } from './components/ui'
 import { VoiceLab } from './components/VoiceLab'
 import { TagLibrary } from './components/TagLibrary'
 import { VoiceLibrary } from './components/VoiceLibrary'
+import { claimPlayback, releasePlayback } from './audioBus'
 
 export default function App() {
   const [info, setInfo] = useState<SystemInfo | null>(null)
@@ -47,6 +48,7 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const [playingUrl, setPlayingUrl] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const previewBusRef = useRef(Symbol('voice-preview'))
 
   useEffect(() => {
     sessionRef.current = session
@@ -255,20 +257,22 @@ export default function App() {
     }
   }
 
-  const playUrl = (url: string) => {
-    if (!audioRef.current) audioRef.current = new Audio()
-    const a = audioRef.current
-    a.onended = () => setPlayingUrl(null)
-    a.src = url
-    a.play().then(() => setPlayingUrl(url)).catch(() => setPlayingUrl(null))
-  }
-
   const stopPlayback = () => {
     if (audioRef.current) {
       audioRef.current.pause()
       audioRef.current.currentTime = 0
     }
     setPlayingUrl(null)
+    releasePlayback(previewBusRef.current)
+  }
+
+  const playUrl = (url: string) => {
+    if (!audioRef.current) audioRef.current = new Audio()
+    const a = audioRef.current
+    claimPlayback(previewBusRef.current, stopPlayback)
+    a.onended = () => stopPlayback()
+    a.src = url
+    a.play().then(() => setPlayingUrl(url)).catch(() => stopPlayback())
   }
 
   const togglePlay = (url: string) => {

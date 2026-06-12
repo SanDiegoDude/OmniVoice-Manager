@@ -1,4 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { claimPlayback, releasePlayback } from '../audioBus'
 
 export interface AudioPlayerHandle {
   seek: (t: number) => void
@@ -89,6 +90,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   const pendingAutoplayRef = useRef(false)
   const pendingSeekRef = useRef<{ t: number; play: boolean } | null>(null)
   const playingRef = useRef(false)
+  const busIdRef = useRef(Symbol('audio-player'))
 
   const [duration, setDuration] = useState(0)
   const [start, setStart] = useState(0)
@@ -329,9 +331,18 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
     rafRef.current = requestAnimationFrame(tick)
   }, [start, end])
 
+  const stop = useCallback(() => {
+    const el = audioElRef.current
+    if (el) el.pause()
+    if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    setPlaying(false)
+    releasePlayback(busIdRef.current)
+  }, [])
+
   const play = useCallback(async () => {
     const el = audioElRef.current
     if (!el) return
+    claimPlayback(busIdRef.current, stop)
     ensureGraph()
     ;(el as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = true
     el.playbackRate = playbackRate || 1
@@ -341,14 +352,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
     setPlaying(true)
     setStarted(true)
     rafRef.current = requestAnimationFrame(tick)
-  }, [start, end, ensureGraph, tick, playbackRate])
-
-  const stop = useCallback(() => {
-    const el = audioElRef.current
-    if (el) el.pause()
-    if (rafRef.current) cancelAnimationFrame(rafRef.current)
-    setPlaying(false)
-  }, [])
+  }, [start, end, ensureGraph, tick, playbackRate, stop])
 
   // Imperative seek (used by the multitrack timeline). Queues until the media
   // element knows its duration so it works right after a remount.
@@ -364,6 +368,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
       setCur(t)
       pendingSeekRef.current = null
       if (p.play) {
+        claimPlayback(busIdRef.current, stop)
         if (ctxRef.current?.state === 'suspended') ctxRef.current.resume()
         el.play()
           .then(() => {
@@ -376,11 +381,14 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
     }
     if (el.readyState >= 1 && el.duration) go()
     else el.addEventListener('loadedmetadata', go, { once: true })
-  }, [duration, ensureGraph, tick])
+  }, [duration, ensureGraph, tick, stop])
 
   useEffect(() => {
     playingRef.current = playing
   }, [playing])
+
+  // If this player unmounts while holding the bus, let go of it.
+  useEffect(() => () => releasePlayback(busIdRef.current), [])
 
   useImperativeHandle(
     ref,
