@@ -3,6 +3,8 @@ import type { MultitrackSegment, MultitrackSession, MultitrackTrack } from '../a
 import { AudioPlayer, type AudioPlayerHandle } from './AudioPlayer'
 import { Toggle } from './ui'
 import { blurTag, focusTag } from '../tagInject'
+import PerformanceModal from './PerformanceModal'
+import ToolModal from './ToolModal'
 
 const ROW_H = 74
 const RULER_H = 22
@@ -39,6 +41,8 @@ type Insert = {
   text: string
   menuX: number
   menuY: number
+  gapStart?: number
+  gapAmount?: number
 } | null
 type TrimDraft = { trimStart: number; trimEnd: number; speed: number; gain: number }
 
@@ -62,13 +66,24 @@ export function MultitrackEditor({
   onSetInpaint,
   onSetPreserveNonvocal,
   onPromoteChannel,
+  onRemoveTrack,
+  onMergeSegments,
+  onCollapseTrack,
   onUndo,
+  playCue,
+  onSetPerformance,
+  onRenderPerformance,
+  onRegenAndWait,
+  onInsertAndRender,
+  onClearPerformance,
+  onTranscribeClip,
   regenIndex,
   busy,
   onFinalize,
   finalizing,
 }: {
   session: MultitrackSession
+  playCue: { nonce: number; index?: number; channel?: string; at?: number } | null
   onRegen: (index: number, text?: string) => void
   onEditSegment: (index: number, fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number; gain_db?: number }) => void
   onReflow: (fields: { gap_ms?: number; speed?: number }) => void
@@ -87,7 +102,32 @@ export function MultitrackEditor({
   onSetInpaint: (index: number, enabled: boolean) => Promise<void>
   onSetPreserveNonvocal: (index: number, enabled: boolean) => Promise<void>
   onPromoteChannel: (pos: string, name: string) => Promise<MultitrackSession | null>
+  onRemoveTrack: (pos: string) => Promise<void>
+  onMergeSegments: (indices: number[]) => Promise<void>
+  onCollapseTrack: (pos: string) => Promise<void>
   onUndo: () => void
+  onSetPerformance: (
+    index: number,
+    wav: Blob | null,
+    params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
+  ) => Promise<void>
+  onRenderPerformance: (
+    index: number,
+    wav: Blob | null,
+    params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
+  ) => Promise<MultitrackSegment | null>
+  onRegenAndWait: (index: number, text?: string) => Promise<MultitrackSegment | null>
+  onInsertAndRender: (
+    speakerId: string,
+    text: string,
+    startS: number,
+    perf: {
+      wav: Blob | null
+      params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string }
+    } | null,
+  ) => Promise<MultitrackSegment | null>
+  onClearPerformance: (index: number) => Promise<void>
+  onTranscribeClip: (wav: Blob) => Promise<string>
   regenIndex: number | null
   busy: boolean
   onFinalize: () => void
@@ -108,6 +148,11 @@ export function MultitrackEditor({
   const [trimDraft, setTrimDraft] = useState<TrimDraft>({ trimStart: 0, trimEnd: 0, speed: 1, gain: 0 })
   const [trimText, setTrimText] = useState('')
   const [transcribing, setTranscribing] = useState<number | 'trim' | null>(null)
+  const [perfModal, setPerfModal] = useState<
+    | { index: number; mic: boolean; capture: boolean }
+    | { draft: { speakerId: string; startS: number }; mic: boolean; capture: boolean }
+    | null
+  >(null)
   const [slicing, setSlicing] = useState<number | null>(null)
   const [inpainting, setInpainting] = useState<number | null>(null)
   const [promoting, setPromoting] = useState<string | null>(null)
@@ -155,6 +200,18 @@ export function MultitrackEditor({
   const [speedVal, setSpeedVal] = useState(1)
   const [sel, setSel] = useState<Sel>(null)
   const [selEditing, setSelEditing] = useState(false)
+  // Multi-select for merge: shift-click toggles; selection is sticky (survives
+  // scrolling / clicks) until explicitly cleared or merged.
+  const [selSegs, setSelSegs] = useState<Set<number>>(new Set())
+  const toggleSelSeg = useCallback((index: number) => {
+    setSelSegs((prev) => {
+      const n = new Set(prev)
+      if (n.has(index)) n.delete(index)
+      else n.add(index)
+      return n
+    })
+  }, [])
+  const [merging, setMerging] = useState(false)
   const [segMenu, setSegMenu] = useState<SegMenu>(null)
   useLayoutEffect(() => { clampToViewport(segMenuRef.current) }, [segMenu])
   useLayoutEffect(() => { clampToViewport(insertMenuRef.current) }, [insert])
@@ -186,6 +243,20 @@ export function MultitrackEditor({
     [flatSegs],
   )
   const trimSeg = trimIndex != null ? flatSegs.find((s) => s.index === trimIndex) : undefined
+  // Merge is only valid for 2+ live segments on the SAME track.
+  const selValid = useMemo(() => flatSegs.filter((s) => selSegs.has(s.index)), [flatSegs, selSegs])
+  const selTrackCount = useMemo(() => new Set(selValid.map((s) => s.speaker_id)).size, [selValid])
+  const canMerge = selValid.length >= 2 && selTrackCount === 1
+  const doMerge = async () => {
+    if (!canMerge) return
+    setMerging(true)
+    try {
+      await onMergeSegments(selValid.map((s) => s.index))
+      setSelSegs(new Set())
+    } finally {
+      setMerging(false)
+    }
+  }
 
   const timeFromClientX = useCallback(
     (clientX: number) => {
@@ -194,6 +265,34 @@ export function MultitrackEditor({
       return Math.max(0, Math.min(total, (clientX - rect.left) / pxPerSec))
     },
     [pxPerSec, total],
+  )
+
+  // Every segment edge (start + end) across all tracks — selection drags snap to
+  // these so empty-space wipes land cleanly even when zoomed out.
+  const edges = useMemo(() => {
+    const e = new Set<number>()
+    for (const s of flatSegs) {
+      e.add(Math.round(s.start_s * 1000) / 1000)
+      e.add(Math.round((s.start_s + s.duration_s) * 1000) / 1000)
+    }
+    return [...e].sort((a, b) => a - b)
+  }, [flatSegs])
+  const edgesRef = useRef<number[]>([])
+  useEffect(() => { edgesRef.current = edges }, [edges])
+  // Magnetic snap: pull a time to the nearest segment edge within ~8px (so the
+  // pull strength is constant on screen at any zoom); otherwise round to 0.1s.
+  const magnet = useCallback(
+    (t: number) => {
+      const tol = 8 / pxPerSec
+      let best: number | null = null
+      let bestD = tol
+      for (const e of edgesRef.current) {
+        const d = Math.abs(e - t)
+        if (d <= bestD) { bestD = d; best = e }
+      }
+      return best != null ? Math.max(0, best) : snap(t)
+    },
+    [pxPerSec],
   )
 
   // Reset transient UI when the session is replaced.
@@ -205,6 +304,7 @@ export function MultitrackEditor({
     setTrimIndex(null)
     setSegMenu(null)
     updateSel(null)
+    setSelSegs(new Set())
     setGapVal(session.gap_ms)
     setSpeedVal(1)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -238,6 +338,25 @@ export function MultitrackEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.mix_url])
 
+  // After any render (segment regen, insert, channel regen, full scene) play
+  // what was just rendered. Defined after the restore effect on purpose: both
+  // queue a seek on the remounted player, and the latest pending target wins.
+  const cueNonceRef = useRef(0)
+  useEffect(() => {
+    if (!playCue || playCue.nonce === cueNonceRef.current) return
+    cueNonceRef.current = playCue.nonce
+    let t = playCue.at ?? 0
+    if (playCue.index != null) {
+      const s = flatSegs.find((sg) => sg.index === playCue.index)
+      if (s) t = s.start_s
+    } else if (playCue.channel != null) {
+      const tr = session.tracks.find((x) => x.speaker_id === playCue.channel)
+      if (tr?.segments.length) t = Math.min(...tr.segments.map((sg) => sg.start_s))
+    }
+    playerRef.current?.seekAndPlay(Math.max(0, t - 0.02))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playCue])
+
   // Global drag listeners: segment move, insert-ghost move, delete-space select,
   // and red-bar move/resize.
   useEffect(() => {
@@ -255,17 +374,16 @@ export function MultitrackEditor({
       } else if (p.kind === 'ghost') {
         setInsert((i) => (i ? { ...i, start_s: snap(p.origStart + dt) } : i))
       } else if (p.kind === 'select') {
-        updateSel({ a: p.origStart, b: Math.max(0, p.origStart + dt), mode: 'del' })
+        updateSel({ a: p.origStart, b: magnet(Math.max(0, p.origStart + dt)), mode: 'del' })
       } else if (p.kind === 'sel-move') {
         const mode = selRef.current?.mode ?? 'del'
-        let na = p.origA + dt
-        let nb = p.origB + dt
-        if (na < 0) { nb -= na; na = 0 }
-        updateSel({ a: na, b: nb, mode })
+        const w = p.origB - p.origA
+        const na = Math.max(0, magnet(p.origA + dt))
+        updateSel({ a: na, b: na + w, mode })
       } else if (p.kind === 'sel-l') {
-        updateSel({ a: Math.max(0, p.origA + dt), b: p.origB, mode: selRef.current?.mode ?? 'del' })
+        updateSel({ a: Math.max(0, magnet(p.origA + dt)), b: p.origB, mode: selRef.current?.mode ?? 'del' })
       } else if (p.kind === 'sel-r') {
-        updateSel({ a: p.origA, b: Math.max(0, p.origB + dt), mode: selRef.current?.mode ?? 'del' })
+        updateSel({ a: p.origA, b: Math.max(0, magnet(p.origB + dt)), mode: selRef.current?.mode ?? 'del' })
       } else if (p.kind === 'pan') {
         if (scrollRef.current) scrollRef.current.scrollLeft = p.origScroll - dx
       }
@@ -293,7 +411,7 @@ export function MultitrackEditor({
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
-  }, [pxPerSec, onEditSegment, updateSel])
+  }, [pxPerSec, onEditSegment, updateSel, magnet])
 
   // Spacebar = play/pause (unless typing).
   useEffect(() => {
@@ -388,6 +506,15 @@ export function MultitrackEditor({
 
   const startSegDrag = (e: React.MouseEvent, seg: MultitrackSegment) => {
     if (e.button !== 0) return // middle-click falls through to pan
+    // Shift-click toggles the clip in the (sticky) merge selection — no drag/seek.
+    if (e.shiftKey) {
+      e.preventDefault()
+      e.stopPropagation()
+      toggleSelSeg(seg.index)
+      suppressClickRef.current = true
+      setTimeout(() => (suppressClickRef.current = false), 80)
+      return
+    }
     const tgt = e.target as HTMLElement
     if (tgt.closest('.mtk-seg-bar, .mtk-seg-text, .mtk-seg-edit')) return
     pendingRef.current = { kind: 'seg', index: seg.index, origStart: seg.start_s, startX: e.clientX }
@@ -404,7 +531,7 @@ export function MultitrackEditor({
     const tgt = e.target as HTMLElement
     if (tgt.closest('.mtk-seg, .mtk-ghost, .mtk-sel, button, input, textarea')) return
     if (insert) return
-    pendingRef.current = { kind: 'select', origStart: Math.max(0, timeFromClientX(e.clientX)), startX: e.clientX }
+    pendingRef.current = { kind: 'select', origStart: magnet(Math.max(0, timeFromClientX(e.clientX))), startX: e.clientX }
   }
 
   // Shift + mouse wheel zooms, keeping the time under the cursor fixed.
@@ -491,6 +618,21 @@ export function MultitrackEditor({
             Zoom
             <input type="range" min={MIN_PPS} max={MAX_PPS} step={2} value={pxPerSec} onChange={(e) => setPxPerSec(clampPps(parseInt(e.target.value, 10)))} title="Shift + scroll over the timeline to zoom" />
           </label>
+          {selValid.length > 0 && (
+            <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+              <button
+                className="btn sm primary"
+                disabled={!canMerge || busy || merging}
+                title={canMerge
+                  ? 'Merge the selected clips on this track into one continuous segment (gaps become silence)'
+                  : 'Select 2+ clips on the SAME track to merge (shift-click clips)'}
+                onClick={doMerge}
+              >
+                {merging ? '… ' : '🔗 '}Merge {selValid.length}
+              </button>
+              <button className="btn sm ghost" onClick={() => setSelSegs(new Set())} title="Clear the merge selection">✕</button>
+            </div>
+          )}
           <button className="btn sm ghost" onClick={onUndo} disabled={busy || !session.can_undo} title="Undo the last action (single step back — regenerate, move, trim, add, delete, etc.)">
             ↶ Undo
           </button>
@@ -572,6 +714,8 @@ export function MultitrackEditor({
               onSetChannel={onSetChannel}
               onRegenChannel={onRegenChannel}
               onPromote={async (pos, name) => { setPromoting(pos); try { await onPromoteChannel(pos, name) } finally { setPromoting(null) } }}
+              onCollapse={onCollapseTrack}
+              onRemove={onRemoveTrack}
             />
           ))}
         </div>
@@ -594,7 +738,19 @@ export function MultitrackEditor({
                   style={{ height: rowH, backgroundImage: `repeating-linear-gradient(90deg, rgba(255,255,255,.045) 0 1px, transparent 1px ${pxPerSec}px)` }}
                   onDoubleClick={(e) => {
                     if ((e.target as HTMLElement).closest('.mtk-seg')) return
-                    setInsert({ kind: 'new', speakerId: t.speaker_id, start_s: snap(timeFromClientX(e.clientX)), ripple: false, phase: 'menu', text: '', menuX: e.clientX, menuY: e.clientY })
+                    // Detect a gap at the click: the clip ending just before and the
+                    // clip starting just after, on THIS track → offer a ripple-close.
+                    const clickT = timeFromClientX(e.clientX)
+                    const spans = t.segments.map((s) => ({ start: s.start_s, end: s.start_s + s.duration_s }))
+                    const prev = spans.filter((s) => s.end <= clickT + 1e-3).sort((a, b) => b.end - a.end)[0]
+                    const next = spans.filter((s) => s.start >= clickT - 1e-3).sort((a, b) => a.start - b.start)[0]
+                    let gapStart: number | undefined
+                    let gapAmount: number | undefined
+                    if (prev && next && next.start - prev.end > 0.05) {
+                      gapStart = prev.end
+                      gapAmount = next.start - prev.end
+                    }
+                    setInsert({ kind: 'new', speakerId: t.speaker_id, start_s: snap(clickT), ripple: false, phase: 'menu', text: '', menuX: e.clientX, menuY: e.clientY, gapStart, gapAmount })
                   }}
                   title="Double-click an empty spot to add a segment"
                 >
@@ -613,7 +769,7 @@ export function MultitrackEditor({
                     return (
                       <div
                         key={seg.index}
-                        className={`mtk-seg${isRegen ? ' regen' : ''}${dirty ? ' dirty' : ''}${isTrimming ? ' trimming' : ''}${seg.inpaint ? ' inpaint' : ''}${drag && drag.index === seg.index ? ' dragging' : ''}`}
+                        className={`mtk-seg${isRegen ? ' regen' : ''}${dirty ? ' dirty' : ''}${isTrimming ? ' trimming' : ''}${seg.inpaint ? ' inpaint' : ''}${seg.perform ? ' perform' : ''}${seg.perform?.dirty ? ' perform-dirty' : ''}${selSegs.has(seg.index) ? ' selected' : ''}${drag && drag.index === seg.index ? ' dragging' : ''}`}
                         style={{ left, width, background: `hsl(${hue} 45% 22%)`, borderColor: dirty ? 'var(--warn)' : `hsl(${hue} 60% 45%)` }}
                         title={`${text}\n(drag to move)`}
                         onMouseDown={(e) => startSegDrag(e, seg)}
@@ -728,6 +884,19 @@ export function MultitrackEditor({
               </div>
             )}
 
+            {/* Segment-edge guides — shown while a selection is active so empty-space
+                wipes snap cleanly; the edge you're snapped to lights up. */}
+            {sel && edges.map((e) => {
+              const onEdge = Math.abs(e - sel.a) < 1e-3 || Math.abs(e - sel.b) < 1e-3
+              return (
+                <div
+                  key={e}
+                  className={`mtk-edge${onEdge ? ' on' : ''}`}
+                  style={{ left: e * pxPerSec, height: RULER_H + session.tracks.length * rowH }}
+                />
+              )
+            })}
+
             {sel && (() => {
               const a = Math.min(sel.a, sel.b)
               const w = Math.min(Math.abs(sel.b - sel.a), sel.mode === 'add' ? 60 : 1e9)
@@ -826,6 +995,19 @@ export function MultitrackEditor({
                 </button>
                 <button
                   className="btn sm"
+                  disabled={insertAudio}
+                  title={insertAudio ? 'Uploaded audio tracks are not generative' : 'Speak the line, Whisper transcribes it, render it here in this track\u2019s voice'}
+                  onClick={() => {
+                    const speakerId = insert.speakerId
+                    const startS = insert.start_s
+                    setInsert(null)
+                    setPerfModal({ draft: { speakerId, startS }, mic: true, capture: false })
+                  }}
+                >
+                  🎙 Record dialog…
+                </button>
+                <button
+                  className="btn sm"
                   onClick={() => {
                     const a = insert.start_s
                     setInsert(null)
@@ -834,6 +1016,15 @@ export function MultitrackEditor({
                 >
                   ⏱ Add empty playtime
                 </button>
+                {insert.gapAmount != null && insert.gapStart != null && (
+                  <button
+                    className="btn sm bad"
+                    title="Close the gap between the previous and next clip, pulling everything downstream up"
+                    onClick={() => { onDeleteSpace(insert.gapStart!, insert.gapAmount!); setInsert(null) }}
+                  >
+                    ⇤ Close gap (−{insert.gapAmount.toFixed(2)}s)
+                  </button>
+                )}
               </>
             )}
           </div>
@@ -858,7 +1049,14 @@ export function MultitrackEditor({
               <div className="mtk-menu-title">{(isAudioChan ? '🎵 ' : '') + (seg.text.slice(0, 32) || `Segment #${seg.index}`)}</div>
               <button className="btn sm" onClick={() => { playSeg(seg); setSegMenu(null) }}>{isPlaying ? '■ Stop' : '▶ Play'}</button>
               {!isAudioChan && (
-                <button className="btn sm" disabled={busy} onClick={() => { onRegen(seg.index, dirty ? edits[seg.index].trim() : undefined); setSegMenu(null) }}>↻ Regenerate{dirty ? ' (edited)' : ''}</button>
+                <button
+                  className={`btn sm${seg.perform?.dirty ? ' perf-glow' : ''}`}
+                  disabled={busy}
+                  title={seg.perform ? 'Renders the vocal performance transfer (V2V)' : undefined}
+                  onClick={() => { onRegen(seg.index, dirty ? edits[seg.index].trim() : undefined); setSegMenu(null) }}
+                >
+                  ↻ Regenerate{dirty ? ' (edited)' : seg.perform?.dirty ? ' (render performance)' : ''}
+                </button>
               )}
               {!isAudioChan && (
                 <button className="btn sm" onClick={() => { startEdit(seg.index, text); setSegMenu(null) }}>✎ Edit dialogue</button>
@@ -918,6 +1116,41 @@ export function MultitrackEditor({
                       {seg.preserve_nonvocal ? '☑ ' : '☐ '}Preserve non-vocal
                     </button>
                   )}
+                  <div className="mtk-menu-sep" />
+                  {!seg.perform ? (
+                    <>
+                      <button
+                        className="btn sm"
+                        title="Act the line yourself and paint this clip's voice over YOUR performance (timing, emphasis, emotion preserved)"
+                        onClick={() => { setPerfModal({ index: seg.index, mic: true, capture: true }); setSegMenu(null) }}
+                      >
+                        🎙 Record vocal performance…
+                      </button>
+                      <button
+                        className="btn sm"
+                        title="Import a recorded performance from a file"
+                        onClick={() => { setPerfModal({ index: seg.index, mic: false, capture: true }); setSegMenu(null) }}
+                      >
+                        📁 Import vocal performance…
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        className="btn sm on"
+                        onClick={() => { setPerfModal({ index: seg.index, mic: true, capture: true }); setSegMenu(null) }}
+                      >
+                        🎙 Edit performance ({seg.perform.mode === 'voice' ? 'voice' : 'character'} · {seg.perform.strength})
+                      </button>
+                      <button
+                        className="btn sm"
+                        title="Detach the performance — back to plain TTS regeneration"
+                        onClick={async () => { const i = seg.index; setSegMenu(null); await onClearPerformance(i) }}
+                      >
+                        ✕ Remove performance
+                      </button>
+                    </>
+                  )}
                 </>
               )}
               <div className="mtk-menu-sep" />
@@ -932,16 +1165,16 @@ export function MultitrackEditor({
         )
       })()}
 
-      {/* Trim / speed panel */}
+      {/* Trim / speed tool modal */}
       {trimSeg && (
-        <div className="mtk-trim card-inset">
-          <div className="flex-between" style={{ marginBottom: 6 }}>
-            <div className="section-title" style={{ margin: 0 }}>✂ Trim — “{trimSeg.text.slice(0, 60)}”</div>
-            <div className="row" style={{ gap: 6 }}>
-              <button className="btn sm primary" onClick={saveTrim}>💾 Save</button>
-              <button className="btn sm ghost" onClick={() => setTrimIndex(null)}>Cancel</button>
-            </div>
-          </div>
+        <ToolModal
+          open
+          title={<span>✂ Trim / speed — “{trimSeg.text.slice(0, 48)}”</span>}
+          onClose={() => setTrimIndex(null)}
+          actions={
+            <button className="btn sm primary" onClick={saveTrim}>💾 Save</button>
+          }
+        >
           <AudioPlayer
             key={`trim-${trimSeg.index}-${trimSeg.url}`}
             url={trimSeg.url}
@@ -986,15 +1219,42 @@ export function MultitrackEditor({
             onBlur={blurTag}
             placeholder="Dialogue for this segment…"
           />
-        </div>
+        </ToolModal>
       )}
 
+      {/* Vocal performance / record-dialog tool modal */}
+      {perfModal && (() => {
+        const segIndex = 'index' in perfModal ? perfModal.index : null
+        const seg = segIndex != null ? flatSegs.find((s) => s.index === segIndex) ?? null : null
+        if (segIndex != null && !seg) return null
+        const draft = 'draft' in perfModal ? perfModal.draft : null
+        return (
+          <PerformanceModal
+            seg={seg}
+            draft={draft}
+            defaultCapture={perfModal.capture}
+            withMic={perfModal.mic}
+            onSave={(i, wav, params) => onSetPerformance(i, wav, params)}
+            onRender={(i, wav, params) => onRenderPerformance(i, wav, params)}
+            onRenderPlain={(i, text) => onRegenAndWait(i, text)}
+            onInsertRender={(text, perf) =>
+              draft ? onInsertAndRender(draft.speakerId, text, draft.startS, perf) : Promise.resolve(null)
+            }
+            onSetText={(i, text) => onSetText(i, text)}
+            onApplyOutput={(i, fields) => onEditSegment(i, fields)}
+            onWhisper={onTranscribeClip}
+            onClose={() => setPerfModal(null)}
+          />
+        )
+      })()}
+
       <div className="hint" style={{ marginTop: 8 }}>
-        Drag a clip to move · <strong>shift+scroll</strong> to zoom · <strong>middle-drag</strong> to pan · ⋯ for all
+        Drag a clip to move · <strong>shift+click</strong> clips to select &amp; <strong>Merge</strong> them ·
+        <strong> shift+scroll</strong> to zoom · <strong>middle-drag</strong> to pan · ⋯ for all
         actions (play / regenerate / edit / trim / Whisper-align / download / split / duplicate / delete) · double-click an
-        empty spot to <strong>add a line</strong> or <strong>add empty playtime</strong> · drag across empty space to
-        <strong> delete playtime</strong>. Spacebar plays/pauses; click the timeline to move the playhead.{' '}
-        <strong>Finalize audio</strong> bakes it down and saves to history.
+        empty spot to <strong>add a line</strong>, <strong>add empty playtime</strong> or <strong>close a gap</strong> · drag
+        across empty space to <strong>delete playtime</strong>. On a track pin: 🔊 mute, ⬓ collapse, ✕ delete. Spacebar
+        plays/pauses; click the timeline to move the playhead. <strong>Finalize audio</strong> bakes it down and saves.
       </div>
     </div>
   )
@@ -1008,18 +1268,25 @@ function ChannelLabel({
   onSetChannel,
   onRegenChannel,
   onPromote,
+  onCollapse,
+  onRemove,
 }: {
   track: MultitrackTrack
   rowH: number
   busy: boolean
   promoting: boolean
-  onSetChannel: (pos: string, fields: { name?: string | null; gain_db?: number }) => void
+  onSetChannel: (pos: string, fields: { name?: string | null; gain_db?: number; muted?: boolean }) => void
   onRegenChannel: (pos: string) => void
   onPromote: (pos: string, name: string) => void
+  onCollapse: (pos: string) => Promise<void>
+  onRemove: (pos: string) => Promise<void>
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(track.name)
+  const [confirmDel, setConfirmDel] = useState(false)
+  const [working, setWorking] = useState(false)
   const isAudio = track.kind === 'audio'
+  const muted = !!track.muted
   const applied = track.gain_db ?? 0
   // Gain is edited freely as a local draft and only committed (one re-stitch /
   // player reload) when you hit the green check — fast clicks won't thrash.
@@ -1034,12 +1301,29 @@ function ChannelLabel({
     const v = draft.trim()
     if (v !== track.name) onSetChannel(track.speaker_id, { name: v })
   }
+  const doDelete = async () => {
+    if (track.segments.length === 0) {
+      setWorking(true)
+      try { await onRemove(track.speaker_id) } finally { setWorking(false) }
+    } else {
+      setConfirmDel(true)
+    }
+  }
   return (
     <div
-      className="mtk-label"
+      className={`mtk-label${muted ? ' muted' : ''}`}
       style={{ height: rowH, borderLeft: `3px solid hsl(${hueFor(track.speaker_id)} 70% 60%)` }}
       title={track.voice_name && track.voice_name !== track.name ? `Voice: ${track.voice_name}` : track.name}
     >
+      {confirmDel && (
+        <div className="mtk-label-confirm" onClick={(e) => e.stopPropagation()}>
+          <span>Delete “{track.name}” &amp; {track.segments.length} seg?</span>
+          <div className="row" style={{ gap: 6 }}>
+            <button className="btn sm bad" disabled={working} onClick={async () => { setWorking(true); try { await onRemove(track.speaker_id) } finally { setWorking(false); setConfirmDel(false) } }}>Delete</button>
+            <button className="btn sm ghost" onClick={() => setConfirmDel(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
       <div className="mtk-label-top">
         {editing ? (
           <input
@@ -1062,6 +1346,16 @@ function ChannelLabel({
             {track.name}
           </span>
         )}
+        <div className="mtk-label-actions">
+          <button
+            className={`mtk-label-x mute${muted ? ' on' : ''}`}
+            onClick={() => onSetChannel(track.speaker_id, { muted: !muted })}
+            title={muted ? 'Unmute track' : 'Mute track'}
+          >
+            {muted ? '🔇' : '🔊'}
+          </button>
+          <button className="mtk-label-x del" disabled={working || busy} onClick={doDelete} title="Delete this track">✕</button>
+        </div>
       </div>
       {!isAudio && track.voice_name && track.voice_name !== track.name && (
         <span className="mtk-label-voice" title="Voice in this channel">🎙 {track.voice_name}</span>
@@ -1078,6 +1372,14 @@ function ChannelLabel({
             <button className="mtk-db-apply" onClick={applyGain} title="Apply channel gain">✓</button>
           )}
         </span>
+        <button
+          className="mtk-regen-all"
+          disabled={busy || working || track.segments.length < 2}
+          onClick={async () => { setWorking(true); try { await onCollapse(track.speaker_id) } finally { setWorking(false) } }}
+          title="Collapse every clip on this track into one continuous segment (timing preserved)"
+        >
+          {working ? '…' : '⬓ flat'}
+        </button>
         {!isAudio && (
           <button
             className="mtk-regen-all"
@@ -1093,9 +1395,9 @@ function ChannelLabel({
             className="mtk-promote"
             disabled={busy || promoting || track.segments.length === 0}
             onClick={() => onPromote(track.speaker_id, track.name)}
-            title="Promote this uploaded audio into a new voice channel: clones the voice, transcribes the dialogue, adds a speaker slot, and removes this upload track"
+            title="Promote to a voice track: clones the voice, transcribes the dialogue, adds a speaker slot, and removes this upload track"
           >
-            {promoting ? '… promoting' : '⭐ Promote to voice'}
+            {promoting ? '…' : '⭐'}
           </button>
         )}
       </div>

@@ -201,7 +201,12 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
                 if low_vram:
                     _free("dereverber", "dfn")
             if spk.get("normalize"):
-                wav = normalize_rms(wav)
+                # Active-frame leveling (not whole-signal RMS): quiet references
+                # don't just clone quietly — decode scales output to the ref's
+                # RMS, so an under-leveled ref drags every render down with it.
+                from manager.perform import normalize_active
+
+                wav = normalize_active(wav, spk_sr)
             cleaned[sid] = (wav, spk_sr, spk.get("ref_text") or None)
 
         # Make sure no secondary model is resident before the TTS model loads.
@@ -247,6 +252,39 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
             elif mode == "design" and spk.get("instruct"):
                 kw["instruct"] = spk["instruct"].strip()
             # auto: no voice prompt
+
+            perf = line.get("perform")
+            if perf is not None:
+                # V2V performance transfer: seed the token grid from the user's
+                # recorded take and re-voice it with this speaker's clone prompt.
+                from manager.perform import perform_transfer
+
+                vc = clone_prompts.get(sid)
+                if vc is None:
+                    raise RuntimeError(
+                        "Performance transfer needs a voice reference on this channel "
+                        "(clone voice, promoted track, or Vocal Inpaint lock)."
+                    )
+                res_q.put(
+                    ("progress", rid, {"stage": "performing", "line": idx + 1, "total": total, "text": text[:80]})
+                )
+                audio = perform_transfer(
+                    model,
+                    text=text,
+                    vc_prompt=vc,
+                    perf_wav=np.asarray(perf["waveform"], dtype=np.float32),
+                    perf_sr=int(perf.get("sample_rate", REF_SR)),
+                    mode=str(perf.get("mode", "character")),
+                    strength=int(perf.get("strength", 3)),
+                    seed=perf.get("seed"),
+                    language=language,
+                    gen_params=params,
+                ).astype(np.float32)
+                speech.append(audio)
+                segments_out.append(
+                    {"index": int(line.get("index", idx)), "speaker_id": sid, "text": text, "waveform": audio}
+                )
+                continue
 
             res_q.put(
                 ("progress", rid, {"stage": "generating", "line": idx + 1, "total": total, "text": text[:80]})

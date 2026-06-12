@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
-import type { GenParams, GenerateBody, HistoryEntry, Job, MultitrackSession, OutputFile, Provider, SpeakerConfig, SystemInfo, Voice, VoiceNode } from './api'
+import type { GenParams, GenerateBody, HistoryEntry, Job, MultitrackSegment, MultitrackSession, OutputFile, Provider, SpeakerConfig, SystemInfo, Voice, VoiceNode } from './api'
 import { SidePanel } from './components/SidePanel'
 import { Studio, type Injected } from './components/Studio'
 import { TopBar } from './components/TopBar'
@@ -20,6 +20,22 @@ export default function App() {
   const [outputs, setOutputs] = useState<OutputFile[]>([])
   const [job, setJob] = useState<Job | null>(null)
   const [session, setSession] = useState<MultitrackSession | null>(null)
+  // Cues the multitrack editor to play from a spot after a render completes.
+  const [playCue, setPlayCue] = useState<{ nonce: number; index?: number; channel?: string; at?: number } | null>(null)
+  // Side columns: collapsible on desktop, pop-over drawers on mobile.
+  const isMobile = () => window.matchMedia('(max-width: 1000px)').matches
+  const [leftOpen, setLeftOpen] = useState(() => !isMobile() && localStorage.getItem('ov-left') !== '0')
+  const [rightOpen, setRightOpen] = useState(() => !isMobile() && localStorage.getItem('ov-right') !== '0')
+  const toggleLeft = () =>
+    setLeftOpen((v) => {
+      localStorage.setItem('ov-left', v ? '0' : '1')
+      return !v
+    })
+  const toggleRight = () =>
+    setRightOpen((v) => {
+      localStorage.setItem('ov-right', v ? '0' : '1')
+      return !v
+    })
   const sessionRef = useRef<MultitrackSession | null>(null)
   const replacingRef = useRef<string | null>(null)
   const [regenIndex, setRegenIndex] = useState<number | null>(null)
@@ -120,6 +136,20 @@ export default function App() {
     return () => clearInterval(iv)
   }, [refreshInfo, refreshVoices, refreshHistory, refreshOutputs, refreshProviders])
 
+  // Backstop for swipe-back / accidental close: confirm before leaving while a
+  // scene has content (overscroll-behavior kills the gesture itself; this
+  // catches actual navigation like back-button or tab close).
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if ((sessionRef.current?.segment_count ?? 0) > 0) {
+        e.preventDefault()
+        e.returnValue = ''
+      }
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [])
+
   // Poll the active job.
   useEffect(() => {
     if (!job || job.status === 'done' || job.status === 'error') return
@@ -145,6 +175,16 @@ export default function App() {
                 ? 'Channel regenerated'
                 : 'Scene ready — edit in multitrack'
             notify(msg, 'success')
+            // Always play what was just rendered — instant "it's done" feedback.
+            if (j.result.regenerated_index !== undefined) {
+              setPlayCue({ nonce: Date.now(), index: j.result.regenerated_index as number })
+            } else if (j.result.inserted_index !== undefined) {
+              setPlayCue({ nonce: Date.now(), index: j.result.inserted_index as number })
+            } else if (j.result.channel_regen !== undefined) {
+              setPlayCue({ nonce: Date.now(), channel: String(j.result.channel_regen) })
+            } else {
+              setPlayCue({ nonce: Date.now(), at: 0 })
+            }
           } else {
             notify('Generation complete', 'success')
           }
@@ -243,11 +283,29 @@ export default function App() {
         // Keep any current skeleton up until the populated scene arrives, then
         // swap + discard the old one (see job poll).
         replacingRef.current = sessionRef.current?.id ?? null
-      } else {
-        setSession(null)
       }
+      // One-shot renders leave any ADR session untouched — the Voice Clone tab
+      // is a side trip, not a scene replacement.
       const { job_id } = multitrack ? await api.multitrackGenerate(body) : await api.generate(body)
       setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: { multitrack } })
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+
+  // Voice Clone tab: one-shot performance-guided render (V2V over the take).
+  const performGenerate = async (
+    body: GenerateBody,
+    perf: { blob: Blob; gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number },
+  ) => {
+    try {
+      const { job_id } = await api.generatePerform(body, perf.blob, {
+        mode: perf.mode,
+        strength: perf.strength,
+        gain_db: perf.gain_db,
+        speed: perf.speed,
+      })
+      setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: {} })
     } catch (e) {
       notify(String(e), 'error')
     }
@@ -292,14 +350,35 @@ export default function App() {
   }, [])
   const removeSpeakerFromSession = useCallback(async (pos: string) => {
     const s = sessionRef.current
-    if (!s) return
+    if (!s) return null
     try {
-      setSession(await api.removeSpeaker(s.id, pos))
+      const next = await api.removeSpeaker(s.id, pos)
+      setSession(next)
+      return next
     } catch (e) {
       notify(String(e), 'error')
+      return null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+  const mergeSegments = async (indices: number[]) => {
+    if (!session) return
+    try {
+      setSession(await api.mergeSegments(session.id, indices))
+      notify(`Merged ${indices.length} segments into one`, 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const collapseTrack = async (pos: string) => {
+    if (!session) return
+    try {
+      setSession(await api.collapseTrack(session.id, pos))
+      notify('Collapsed track into one segment', 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
 
   const deleteSegment = async (index: number, ripple: boolean) => {
     if (!session) return
@@ -346,6 +425,122 @@ export default function App() {
       notify(String(e), 'error')
     }
   }
+  const setPerformance = async (
+    index: number,
+    wav: Blob | null,
+    params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
+  ) => {
+    if (!session) return
+    const s = await api.setPerformance(session.id, index, wav, params)
+    setSession(s)
+    notify('Performance saved — hit ↻ Regenerate on the clip to render it', 'success')
+  }
+  // Poll a job to completion outside the global poller (used by the in-modal
+  // render flows, so the global job state stays free for the main UI).
+  const waitJob = async (job_id: string): Promise<Job> => {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 700))
+      const j = await api.job(job_id)
+      if (j.status === 'error') throw new Error(j.error || 'Render failed')
+      if (j.status === 'done') return j
+    }
+  }
+  const segInSession = (s: MultitrackSession, index: number): MultitrackSegment | null => {
+    for (const t of s.tracks) {
+      const seg = t.segments.find((sg) => sg.index === index)
+      if (seg) return seg
+    }
+    return null
+  }
+
+  // In-modal render: save the performance, fire the regen job, poll it to
+  // completion, and hand the refreshed segment back for output preview.
+  const renderPerformance = async (
+    index: number,
+    wav: Blob | null,
+    params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
+  ): Promise<MultitrackSegment | null> => {
+    if (!session) return null
+    const sid = session.id
+    const s = await api.setPerformance(sid, index, wav, params)
+    setSession(s)
+    const { job_id } = await api.regenSegment(sid, index)
+    setRegenIndex(index)
+    try {
+      const j = await waitJob(job_id)
+      const ns = j.result?.session as MultitrackSession | undefined
+      if (!ns) return null
+      setSession(ns)
+      return segInSession(ns, index)
+    } finally {
+      setRegenIndex(null)
+    }
+  }
+
+  // In-modal plain TTS render of an existing segment (capture-performance off):
+  // plain=true bypasses any attached performance so the channel voice is used.
+  const regenSegmentAndWait = async (index: number, text?: string): Promise<MultitrackSegment | null> => {
+    if (!session) return null
+    const { job_id } = await api.regenSegment(session.id, index, text, true)
+    setRegenIndex(index)
+    try {
+      const j = await waitJob(job_id)
+      const ns = j.result?.session as MultitrackSession | undefined
+      if (!ns) return null
+      setSession(ns)
+      return segInSession(ns, index)
+    } finally {
+      setRegenIndex(null)
+    }
+  }
+
+  // Record Dialog first render: insert a fresh segment (TTS), then optionally
+  // run the performance transfer on top of it. Returns the final segment.
+  const insertAndRender = async (
+    speakerId: string,
+    text: string,
+    startS: number,
+    perf: {
+      wav: Blob | null
+      params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string }
+    } | null,
+  ): Promise<MultitrackSegment | null> => {
+    if (!session) return null
+    const sid = session.id
+    const { job_id } = await api.insertSegment(sid, { speaker_id: speakerId, text, start_s: startS, ripple: false })
+    const j = await waitJob(job_id)
+    let ns = j.result?.session as MultitrackSession | undefined
+    const index = j.result?.inserted_index as number | undefined
+    if (!ns || index === undefined) return null
+    setSession(ns)
+    if (perf) {
+      const s2 = await api.setPerformance(sid, index, perf.wav, perf.params)
+      setSession(s2)
+      const r = await api.regenSegment(sid, index)
+      setRegenIndex(index)
+      try {
+        const j2 = await waitJob(r.job_id)
+        const ns2 = j2.result?.session as MultitrackSession | undefined
+        if (ns2) {
+          setSession(ns2)
+          ns = ns2
+        }
+      } finally {
+        setRegenIndex(null)
+      }
+    }
+    return segInSession(ns, index)
+  }
+  const clearPerformance = async (index: number) => {
+    if (!session) return
+    try {
+      setSession(await api.clearPerformance(session.id, index))
+      notify('Performance removed — back to plain TTS regen', 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const transcribeClip = (wav: Blob) => api.transcribeClip(wav)
   const promoteChannel = async (pos: string, name: string) => {
     if (!session) return null
     try {
@@ -554,8 +749,8 @@ export default function App() {
         onToggleLod={toggleLod}
         onToggleLowVram={toggleLowVram}
       />
-      <div className="workspace">
-        <div className="col">
+      <div className={`workspace${leftOpen ? '' : ' no-left'}${rightOpen ? '' : ' no-right'}`}>
+        <div className="col side-left">
           <VoiceLibrary
             tree={tree}
             count={voices.length}
@@ -582,6 +777,7 @@ export default function App() {
           onSelectProvider={selectProvider}
           onReloadProviders={reloadProviders}
           onGenerate={startGenerate}
+          onPerformGenerate={performGenerate}
           onGenerateScript={generateScript}
           onLucky={startGenerate}
           onRegenSegment={regenSegment}
@@ -598,7 +794,16 @@ export default function App() {
           onSetInpaint={setInpaint}
           onSetPreserveNonvocal={setPreserveNonvocal}
           onPromoteChannel={promoteChannel}
+          onMergeSegments={mergeSegments}
+          onCollapseTrack={collapseTrack}
           onUndo={undoSession}
+          playCue={playCue}
+          onSetPerformance={setPerformance}
+          onRenderPerformance={renderPerformance}
+          onRegenAndWait={regenSegmentAndWait}
+          onInsertAndRender={insertAndRender}
+          onClearPerformance={clearPerformance}
+          onTranscribeClip={transcribeClip}
           onDeleteSpace={deleteSpace}
           onAddSpace={addSpace}
           onDuplicateSegment={duplicateSegment}
@@ -611,7 +816,7 @@ export default function App() {
           notify={notify}
         />
 
-        <div className="col">
+        <div className="col side-right">
           <SidePanel
             history={history}
             outputs={outputs}
@@ -623,6 +828,34 @@ export default function App() {
           />
         </div>
       </div>
+
+      {/* Side-panel toggles: ride the panel edge when open, dock to the screen
+          edge when closed. On mobile the panels become overlay drawers. */}
+      <button
+        className={`edge-tab left${leftOpen ? ' open' : ''}`}
+        onClick={toggleLeft}
+        title={leftOpen ? 'Hide voices & tags' : 'Voices & tags'}
+        aria-label="Toggle voice library"
+      >
+        {leftOpen ? '◂' : '🎙'}
+      </button>
+      <button
+        className={`edge-tab right${rightOpen ? ' open' : ''}`}
+        onClick={toggleRight}
+        title={rightOpen ? 'Hide history & outputs' : 'History & outputs'}
+        aria-label="Toggle history"
+      >
+        {rightOpen ? '▸' : '🕘'}
+      </button>
+      {(leftOpen || rightOpen) && (
+        <div
+          className="drawer-backdrop"
+          onClick={() => {
+            if (leftOpen) toggleLeft()
+            if (rightOpen) toggleRight()
+          }}
+        />
+      )}
 
       {labOpen && (
         <VoiceLab voices={voices} onClose={() => setLabOpen(false)} onSaved={refreshVoices} notify={notify} />

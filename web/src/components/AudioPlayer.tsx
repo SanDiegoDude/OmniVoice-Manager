@@ -86,7 +86,6 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   const bufferRef = useRef<AudioBuffer | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const rafRef = useRef<number | null>(null)
-  const peaksRef = useRef<number[]>([])
   const pendingAutoplayRef = useRef(false)
   const pendingSeekRef = useRef<{ t: number; play: boolean } | null>(null)
   const playingRef = useRef(false)
@@ -98,6 +97,17 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   const [playing, setPlaying] = useState(false)
   const [cur, setCur] = useState(0)
   const [downloading, setDownloading] = useState(false)
+  // Visible window in seconds (zoom/pan). Trim times live in absolute seconds,
+  // so they survive any amount of zooming or going off-screen.
+  const [view, setView] = useState<{ t0: number; t1: number }>({ t0: 0, t1: 0 })
+  const viewRef = useRef(view)
+  viewRef.current = view
+  const trimRef = useRef({ start: 0, end: 0 })
+  trimRef.current = { start, end }
+  // Active handle drag: which handle, its pre-grab value (for cancel), and
+  // whether the pointer is currently over the waveform.
+  const handleDragRef = useRef<{ which: 'start' | 'end'; orig: number; over: boolean } | null>(null)
+  const [dragTick, setDragTick] = useState(0) // repaint trigger during drags
 
   // Decode the audio once for the waveform + offline processing on download.
   useEffect(() => {
@@ -118,20 +128,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
         setDuration(buf.duration)
         setStart(initialStart != null ? Math.max(0, Math.min(initialStart, buf.duration)) : 0)
         setEnd(initialEnd != null ? Math.max(0, Math.min(initialEnd, buf.duration)) : buf.duration)
-        // Precompute waveform peaks.
-        const ch = buf.getChannelData(0)
-        const bars = 320
-        const block = Math.floor(ch.length / bars) || 1
-        const peaks: number[] = []
-        for (let i = 0; i < bars; i++) {
-          let max = 0
-          for (let j = 0; j < block; j++) {
-            const v = Math.abs(ch[i * block + j] || 0)
-            if (v > max) max = v
-          }
-          peaks.push(max)
-        }
-        peaksRef.current = peaks
+        setView({ t0: 0, t1: buf.duration })
         draw(0)
       } catch {
         /* decoding failed (e.g. unsupported) — controls still work via element */
@@ -143,11 +140,37 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url])
 
+  // Map an absolute time to canvas x for the current view window.
+  const timeToX = useCallback((t: number, w: number) => {
+    const v = viewRef.current
+    const span = Math.max(1e-6, v.t1 - v.t0)
+    return ((t - v.t0) / span) * w
+  }, [])
+  const xToTime = useCallback((x: number, w: number) => {
+    const v = viewRef.current
+    const span = Math.max(1e-6, v.t1 - v.t0)
+    return v.t0 + (x / Math.max(1, w)) * span
+  }, [])
+
+  const HANDLE_GRAB_PX = 9
+
+  // Where a handle is drawn: its real x, or ghosted at the edge when the trim
+  // point is outside the visible window (still grabbable there).
+  const handleDrawX = useCallback(
+    (t: number, w: number): { x: number; ghost: 'left' | 'right' | null } => {
+      const x = timeToX(t, w)
+      if (x < 0) return { x: 5, ghost: 'left' }
+      if (x > w) return { x: w - 5, ghost: 'right' }
+      return { x, ghost: null }
+    },
+    [timeToX],
+  )
+
   const draw = useCallback(
     (playhead: number) => {
       const canvas = canvasRef.current
-      const peaks = peaksRef.current
-      if (!canvas || !peaks.length) return
+      const buf = bufferRef.current
+      if (!canvas || !buf) return
       const dpr = window.devicePixelRatio || 1
       const w = canvas.clientWidth
       const h = canvas.clientHeight
@@ -156,34 +179,94 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
       const ctx = canvas.getContext('2d')!
       ctx.scale(dpr, dpr)
       ctx.clearRect(0, 0, w, h)
-      const dur = duration || 1
-      const sx = (start / dur) * w
-      const ex = (end / dur) * w
+      const v = viewRef.current
+      const span = Math.max(1e-6, v.t1 - v.t0)
+
+      // Per-draw peaks over the visible window (stride-sampled so even fully
+      // zoomed-out long clips stay cheap).
+      const ch = buf.getChannelData(0)
+      const sr = buf.sampleRate
+      const bars = Math.max(64, Math.floor(w / 2))
+      const s0 = Math.floor(v.t0 * sr)
+      const block = Math.max(1, Math.floor((span * sr) / bars))
+      const stride = Math.max(1, Math.floor(block / 64))
       const gain = Math.pow(10, gainDb / 20)
-      const bw = w / peaks.length
-      for (let i = 0; i < peaks.length; i++) {
+      const sx = timeToX(start, w)
+      const ex = timeToX(end, w)
+      const bw = w / bars
+      for (let i = 0; i < bars; i++) {
+        let max = 0
+        const base = s0 + i * block
+        for (let j = 0; j < block; j += stride) {
+          const val = Math.abs(ch[base + j] || 0)
+          if (val > max) max = val
+        }
         const x = i * bw
-        const inRegion = x >= sx && x <= ex
-        const amp = Math.min(1, peaks[i] * gain)
+        const inRegion = x + bw >= sx && x <= ex
+        const amp = Math.min(1, max * gain)
         const bh = Math.max(1, amp * (h * 0.92))
         ctx.fillStyle = inRegion ? '#6d8bff' : '#33405e'
         ctx.fillRect(x, (h - bh) / 2, Math.max(1, bw - 0.5), bh)
       }
       // Dim outside the trim region.
       ctx.fillStyle = 'rgba(10,14,24,.55)'
-      ctx.fillRect(0, 0, sx, h)
-      ctx.fillRect(ex, 0, w - ex, h)
+      if (sx > 0) ctx.fillRect(0, 0, Math.min(sx, w), h)
+      if (ex < w) ctx.fillRect(Math.max(0, ex), 0, w - Math.max(0, ex), h)
+
       // Playhead.
-      const px = (playhead / dur) * w
-      ctx.fillStyle = '#ff6b7d'
-      ctx.fillRect(px - 0.5, 0, 1.5, h)
+      const px = timeToX(playhead, w)
+      if (px >= 0 && px <= w) {
+        ctx.fillStyle = '#ff6b7d'
+        ctx.fillRect(px - 0.5, 0, 1.5, h)
+      }
+
+      // Trim handles — start green, end red; ghosted at the edge when their
+      // time is off-screen (translucent + arrow showing which way it lives).
+      const drawHandle = (t: number, color: string, which: 'start' | 'end') => {
+        const { x, ghost } = handleDrawX(t, w)
+        ctx.save()
+        ctx.globalAlpha = ghost ? 0.45 : 1
+        ctx.fillStyle = color
+        ctx.fillRect(x - 1, 0, 2, h)
+        if (ghost) ctx.setLineDash([3, 3])
+        // Grab tab: flag at the top pointing into the kept region.
+        const dir = which === 'start' ? 1 : -1
+        ctx.beginPath()
+        ctx.moveTo(x, 0)
+        ctx.lineTo(x + 9 * dir, 0)
+        ctx.lineTo(x + 9 * dir, 7)
+        ctx.lineTo(x, 12)
+        ctx.closePath()
+        ctx.fill()
+        if (ghost) {
+          // Arrow pointing off-screen toward the real position.
+          const ax = ghost === 'left' ? x + 4 : x - 4
+          const adir = ghost === 'left' ? -1 : 1
+          ctx.beginPath()
+          ctx.moveTo(ax + 4 * adir, h / 2)
+          ctx.lineTo(ax, h / 2 - 5)
+          ctx.lineTo(ax, h / 2 + 5)
+          ctx.closePath()
+          ctx.fill()
+        }
+        ctx.restore()
+      }
+      drawHandle(start, '#34d399', 'start')
+      drawHandle(end, '#ef4444', 'end')
+
+      // Zoom indicator.
+      if (v.t0 > 0.01 || v.t1 < duration - 0.01) {
+        ctx.fillStyle = 'rgba(255,255,255,.55)'
+        ctx.font = '9px sans-serif'
+        ctx.fillText(`${fmt(v.t0)} – ${fmt(v.t1)}  (shift+scroll: zoom · scroll: pan)`, 6, h - 5)
+      }
     },
-    [duration, start, end, gainDb],
+    [duration, start, end, gainDb, timeToX, handleDrawX],
   )
 
   useEffect(() => {
     draw(cur)
-  }, [draw, cur, waveHeight])
+  }, [draw, cur, waveHeight, view, dragTick])
 
   // Report the trim window to a parent (Voice Lab uses this to send the cut to
   // the backend). Fires whenever the region or loaded duration changes.
@@ -335,16 +418,120 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
     setEnd(duration)
     setGainDb(0)
     setCur(0)
+    setView({ t0: 0, t1: duration })
     if (audioElRef.current) audioElRef.current.currentTime = 0
   }
 
-  const seek = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect()
-    const frac = (e.clientX - rect.left) / rect.width
-    const t = Math.max(start, Math.min(end, frac * duration))
+  // ---- waveform pointer interactions: handle dragging + click-to-seek ----
+  const onWaveMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = e.currentTarget
+    const rect = canvas.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const w = rect.width
+    // Hit-test handles at their drawn (possibly ghosted) position; when both
+    // are within grab range prefer the closer one.
+    const hs = handleDrawX(trimRef.current.start, w)
+    const he = handleDrawX(trimRef.current.end, w)
+    const dS = Math.abs(x - hs.x)
+    const dE = Math.abs(x - he.x)
+    let which: 'start' | 'end' | null = null
+    if (dS <= HANDLE_GRAB_PX && dS <= dE) which = 'start'
+    else if (dE <= HANDLE_GRAB_PX) which = 'end'
+
+    if (which) {
+      e.preventDefault()
+      const orig = which === 'start' ? trimRef.current.start : trimRef.current.end
+      handleDragRef.current = { which, orig, over: true }
+      const setVal = (t: number) => {
+        const { start: s, end: en } = trimRef.current
+        if (handleDragRef.current!.which === 'start') setStart(Math.max(0, Math.min(t, en - 0.05)))
+        else setEnd(Math.min(duration, Math.max(t, s + 0.05)))
+      }
+      const onMove = (ev: MouseEvent) => {
+        const r = canvas.getBoundingClientRect()
+        const over =
+          ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top - 24 && ev.clientY <= r.bottom + 24
+        handleDragRef.current!.over = over
+        if (over) {
+          setVal(xToTime(ev.clientX - r.left, r.width))
+        } else {
+          // Preview the cancel: snap back to where it was grabbed from.
+          setVal(handleDragRef.current!.orig)
+        }
+        setDragTick((n) => n + 1)
+      }
+      const onUp = (ev: MouseEvent) => {
+        const r = canvas.getBoundingClientRect()
+        const over =
+          ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top - 24 && ev.clientY <= r.bottom + 24
+        if (!over) setVal(handleDragRef.current!.orig) // released off the waveform → cancel the grab
+        handleDragRef.current = null
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+        setDragTick((n) => n + 1)
+      }
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+      return
+    }
+
+    // Plain click → seek.
+    const t = Math.max(trimRef.current.start, Math.min(trimRef.current.end, xToTime(x, w)))
     setCur(t)
     if (audioElRef.current) audioElRef.current.currentTime = t
   }
+
+  const onWaveMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (handleDragRef.current) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const hs = handleDrawX(trimRef.current.start, rect.width)
+    const he = handleDrawX(trimRef.current.end, rect.width)
+    const near = Math.abs(x - hs.x) <= HANDLE_GRAB_PX || Math.abs(x - he.x) <= HANDLE_GRAB_PX
+    e.currentTarget.style.cursor = near ? 'ew-resize' : 'pointer'
+  }
+
+  // Shift+scroll → zoom around the cursor; plain scroll → pan when zoomed in.
+  // Native listener so preventDefault actually blocks page scroll.
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const onWheel = (e: WheelEvent) => {
+      const dur = duration
+      if (!dur) return
+      const v = viewRef.current
+      const span = Math.max(1e-6, v.t1 - v.t0)
+      if (e.shiftKey) {
+        e.preventDefault()
+        const rect = canvas.getBoundingClientRect()
+        const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+        const anchor = v.t0 + frac * span
+        const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX
+        const factor = delta > 0 ? 1.3 : 1 / 1.3
+        const minSpan = Math.min(0.25, dur)
+        const newSpan = Math.max(minSpan, Math.min(dur, span * factor))
+        let t0 = anchor - frac * newSpan
+        let t1 = t0 + newSpan
+        if (t0 < 0) {
+          t1 -= t0
+          t0 = 0
+        }
+        if (t1 > dur) {
+          t0 -= t1 - dur
+          t1 = dur
+        }
+        setView({ t0: Math.max(0, t0), t1: Math.min(dur, t1) })
+      } else if (span < dur - 1e-3) {
+        e.preventDefault()
+        const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX
+        let dt = delta * span * 0.0015
+        dt = Math.max(-v.t0, Math.min(dur - v.t1, dt))
+        setView({ t0: v.t0 + dt, t1: v.t1 + dt })
+      }
+    }
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+    return () => canvas.removeEventListener('wheel', onWheel)
+  }, [duration])
 
   const download = async () => {
     const buf = bufferRef.current
@@ -416,41 +603,18 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
       <canvas
         ref={canvasRef}
         className="waveform"
-        onClick={seek}
+        onMouseDown={onWaveMouseDown}
+        onMouseMove={onWaveMouseMove}
         style={{ width: '100%', height: waveHeight, marginTop: 10, cursor: 'pointer', borderRadius: 6 }}
       />
+      <div className="hint" style={{ marginTop: 4, opacity: 0.7 }}>
+        Drag the <span style={{ color: '#34d399' }}>green</span>/<span style={{ color: '#ef4444' }}>red</span> edges to
+        trim · shift+scroll to zoom
+      </div>
 
       <audio ref={audioElRef} src={url} preload="auto" crossOrigin="anonymous" style={{ display: 'none' }} />
 
       <div className="row wrap" style={{ gap: 16, marginTop: 10 }}>
-        <div style={{ flex: 1, minWidth: 180 }}>
-          <div className="hint" style={{ marginBottom: 2 }}>
-            Trim start · {fmt(start)}
-          </div>
-          <input
-            type="range"
-            min={0}
-            max={duration || 0}
-            step={0.05}
-            value={start}
-            onChange={(ev) => setStart(Math.min(parseFloat(ev.target.value), end - 0.1))}
-            style={{ width: '100%' }}
-          />
-        </div>
-        <div style={{ flex: 1, minWidth: 180 }}>
-          <div className="hint" style={{ marginBottom: 2 }}>
-            Trim end · {fmt(end)}
-          </div>
-          <input
-            type="range"
-            min={0}
-            max={duration || 0}
-            step={0.05}
-            value={end}
-            onChange={(ev) => setEnd(Math.max(parseFloat(ev.target.value), start + 0.1))}
-            style={{ width: '100%' }}
-          />
-        </div>
         <div style={{ flex: 1, minWidth: 180 }}>
           <div className="hint" style={{ marginBottom: 2 }}>
             Output gain · {gainDb > 0 ? '+' : ''}

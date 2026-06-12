@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import type { GenParams, GenerateBody, Job, MultitrackSession, Provider, SpeakerConfig, Voice } from '../api'
+import type { GenParams, GenerateBody, Job, MultitrackSegment, MultitrackSession, Provider, SpeakerConfig, Voice } from '../api'
 import { AudioPlayer } from './AudioPlayer'
 import { MultitrackEditor } from './MultitrackEditor'
+import { PerformanceCapture, type PerfCaptureState } from './PerformanceCapture'
 import { SpeakerCard } from './SpeakerCard'
 import { Collapsible, Slider, Toggle } from './ui'
 import { blurTag, focusTag } from '../tagInject'
@@ -57,6 +58,7 @@ export function Studio({
   onSelectProvider,
   onReloadProviders,
   onGenerate,
+  onPerformGenerate,
   onGenerateScript,
   onLucky,
   onRegenSegment,
@@ -81,10 +83,20 @@ export function Studio({
   onSetInpaint,
   onSetPreserveNonvocal,
   onPromoteChannel,
+  onMergeSegments,
+  onCollapseTrack,
   onUndo,
+  playCue,
+  onSetPerformance,
+  onRenderPerformance,
+  onRegenAndWait,
+  onInsertAndRender,
+  onClearPerformance,
+  onTranscribeClip,
   onFinalize,
   notify,
 }: {
+  playCue: { nonce: number; index?: number; channel?: string; at?: number } | null
   voices: Voice[]
   job: Job | null
   scriptBusy: boolean
@@ -97,6 +109,7 @@ export function Studio({
   onSelectProvider: (id: string) => void
   onReloadProviders: () => void
   onGenerate: (body: GenerateBody, title: string, multitrack?: boolean) => void
+  onPerformGenerate: (body: GenerateBody, perf: PerfCaptureState) => void
   onGenerateScript: (prompt: string, numSpeakers: number, speakers: SpeakerConfig[], existing: string) => Promise<{ title: string; script: string } | null>
   onLucky: (body: GenerateBody, title: string, multitrack?: boolean) => void
   onRegenSegment: (index: number, text?: string) => void
@@ -106,7 +119,7 @@ export function Studio({
   onEnsureSession: (speakers: Record<string, SpeakerConfig>, params: GenParams) => void
   onAddSpeaker: (cfg: SpeakerConfig) => void
   onUpdateSpeaker: (pos: string, cfg: SpeakerConfig) => void
-  onRemoveSpeaker: (pos: string) => void
+  onRemoveSpeaker: (pos: string) => Promise<MultitrackSession | null> | void
   onDeleteSegment: (index: number, ripple: boolean) => void
   onSplitSegment: (index: number, atS: number) => void
   onDeleteSpace: (startS: number, amount: number) => void
@@ -121,12 +134,39 @@ export function Studio({
   onSetInpaint: (index: number, enabled: boolean) => Promise<void>
   onSetPreserveNonvocal: (index: number, enabled: boolean) => Promise<void>
   onPromoteChannel: (pos: string, name: string) => Promise<MultitrackSession | null>
+  onMergeSegments: (indices: number[]) => Promise<void>
+  onCollapseTrack: (pos: string) => Promise<void>
   onUndo: () => void
+  onSetPerformance: (
+    index: number,
+    wav: Blob | null,
+    params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
+  ) => Promise<void>
+  onRenderPerformance: (
+    index: number,
+    wav: Blob | null,
+    params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
+  ) => Promise<MultitrackSegment | null>
+  onRegenAndWait: (index: number, text?: string) => Promise<MultitrackSegment | null>
+  onInsertAndRender: (
+    speakerId: string,
+    text: string,
+    startS: number,
+    perf: {
+      wav: Blob | null
+      params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string }
+    } | null,
+  ) => Promise<MultitrackSegment | null>
+  onClearPerformance: (index: number) => Promise<void>
+  onTranscribeClip: (wav: Blob) => Promise<string>
   onFinalize: () => void
   notify: (m: string, k?: 'info' | 'error' | 'success') => void
 }) {
-  const [mode, setMode] = useState<'single' | 'multi'>('single')
-  const [speakers, setSpeakers] = useState<SpeakerConfig[]>([defaultSpeaker(), defaultSpeaker()])
+  // ADR Studio (multitrack) is home: one speaker, one track, ready to act.
+  const [mode, setMode] = useState<'single' | 'multi'>('multi')
+  const [speakers, setSpeakers] = useState<SpeakerConfig[]>([defaultSpeaker()])
+  // Voice Clone tab: optional recorded take that guides the render (V2V).
+  const [perfState, setPerfState] = useState<PerfCaptureState | null>(null)
   const [script, setScript] = useState('')
   const [title, setTitle] = useState('')
   const [aiPrompt, setAiPrompt] = useState('')
@@ -242,6 +282,17 @@ export function Studio({
     return s
   }
 
+  // Delete a track straight from the editor pin. Removal renumbers generative
+  // speakers on the backend, so shrink the roster to match (audio channels live
+  // outside the 1..N namespace and leave the roster untouched).
+  const handleRemoveTrack = async (pos: string) => {
+    const s = await onRemoveSpeaker(pos)
+    if (s) {
+      const genCount = s.tracks.filter((t) => t.kind !== 'audio').length
+      setSpeakers((prev) => (prev.length > genCount ? prev.slice(0, Math.max(1, genCount)) : prev))
+    }
+  }
+
   const addSpeaker = () => {
     const cfg = defaultSpeaker()
     setSpeakers((prev) => [...prev, cfg])
@@ -291,7 +342,8 @@ export function Studio({
       body.script = res.script
       body.text = mode === 'single' ? res.script : null
       body.title = res.title
-      onLucky(body, res.title, useMultitrack)
+      if (mode === 'single' && perfState) onPerformGenerate(body, perfState)
+      else onLucky(body, res.title, useMultitrack)
     }
   }
 
@@ -309,11 +361,11 @@ export function Studio({
       <Collapsible className="card" title="🎤 Speakers">
         <div className="flex-between" style={{ marginBottom: 12 }}>
           <div className="segment">
-            <button className={mode === 'single' ? 'active' : ''} onClick={() => setMode('single')}>
-              Single voice
-            </button>
             <button className={mode === 'multi' ? 'active' : ''} onClick={() => setMode('multi')}>
-              Multi-speaker
+              🎬 ADR Studio
+            </button>
+            <button className={mode === 'single' ? 'active' : ''} onClick={() => setMode('single')}>
+              🎤 Voice Clone
             </button>
           </div>
           {mode === 'multi' && (
@@ -343,6 +395,13 @@ export function Studio({
           )}
         </div>
       </Collapsible>
+
+      {/* Voice Clone: optional performance-guided render */}
+      {mode === 'single' && (
+        <Collapsible className="card" title="🎭 Vocal performance (optional)">
+          <PerformanceCapture onState={setPerfState} onWhisperText={(t) => setScript(t)} notify={notify} />
+        </Collapsible>
+      )}
 
       {/* AI prompt */}
       <Collapsible className="card" title="✨ Smart Script">
@@ -449,9 +508,14 @@ export function Studio({
           <button
             className="btn primary"
             disabled={running || !script.trim()}
-            onClick={() => onGenerate(buildBody(), title || 'Untitled Scene', useMultitrack)}
+            onClick={() => {
+              const body = buildBody()
+              if (mode === 'single' && perfState) onPerformGenerate(body, perfState)
+              else onGenerate(body, title || 'Untitled Scene', useMultitrack)
+            }}
           >
-            {running ? <span className="spinner" /> : '🎙'} Generate audio
+            {running ? <span className="spinner" /> : '🎙'}{' '}
+            {mode === 'single' && perfState ? 'Render performance' : 'Generate audio'}
           </button>
         </div>
 
@@ -497,7 +561,7 @@ export function Studio({
       </Collapsible>
 
       {/* Progress / output */}
-      {running && !session && (
+      {running && (mode === 'single' || !session) && (
         <div className="progress-box">
           <div className="row">
             <span className="spinner" />
@@ -510,6 +574,8 @@ export function Studio({
                 ? `De-reverbing voice ${prog.speaker}…`
                 : prog?.stage === 'generating'
                 ? `Generating line ${prog.line}/${prog.total}`
+                : prog?.stage === 'performing'
+                ? 'Transferring your performance…'
                 : prog?.stage === 'leveling'
                 ? 'Matching loudness…'
                 : 'Working…'}
@@ -557,7 +623,17 @@ export function Studio({
             onSetInpaint={onSetInpaint}
             onSetPreserveNonvocal={onSetPreserveNonvocal}
             onPromoteChannel={handlePromote}
+            onRemoveTrack={handleRemoveTrack}
+            onMergeSegments={onMergeSegments}
+            onCollapseTrack={onCollapseTrack}
             onUndo={onUndo}
+            playCue={playCue}
+            onSetPerformance={onSetPerformance}
+            onRenderPerformance={onRenderPerformance}
+            onRegenAndWait={onRegenAndWait}
+            onInsertAndRender={onInsertAndRender}
+            onClearPerformance={onClearPerformance}
+            onTranscribeClip={onTranscribeClip}
             regenIndex={regenIndex}
             busy={running}
             onFinalize={onFinalize}

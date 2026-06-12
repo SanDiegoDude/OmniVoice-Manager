@@ -135,14 +135,17 @@ def make_multitrack_job(
 
 
 def make_regen_job(
-    model_manager, sid: str, index: int, text: str | None = None
+    model_manager, sid: str, index: int, text: str | None = None, plain: bool = False
 ) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
-    """Regenerate a single segment of a session and re-stitch the mix."""
-    payload = sessions.regen_payload(sid, index, text=text)
+    """Regenerate a single segment of a session and re-stitch the mix.
+
+    With ``plain`` the render ignores any attached vocal performance and uses
+    the channel voice only (Capture Performance toggled off in the UI)."""
+    payload = sessions.regen_payload(sid, index, text=text, plain=plain)
 
     def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
         result = model_manager.generate(payload, progress_cb=progress_cb)
-        session = sessions.apply_regen(sid, index, result)
+        session = sessions.apply_regen(sid, index, result, perform_rendered=not plain)
         return {"session": session, "session_id": sid, "regenerated_index": index}
 
     return job
@@ -198,8 +201,16 @@ def finalize_session(sid: str) -> Dict[str, Any]:
     return {"title": info["title"], **saved}
 
 
-def make_generation_job(model_manager, req: GenerateRequest, title: str) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
+def make_generation_job(
+    model_manager,
+    req: GenerateRequest,
+    title: str,
+    perform: Dict[str, Any] | None = None,
+) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
     payload = build_generation_payload(req)
+    if perform is not None:
+        # Standalone V2V (Voice Clone tab): the single line rides the take.
+        payload["lines"][0]["perform"] = perform
     num_speakers = req.num_speakers if req.multi_speaker else 1
 
     def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:

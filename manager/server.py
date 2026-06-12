@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import re
 import time
+import json
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -54,6 +55,7 @@ from .schemas import (
     EmptySessionRequest,
     GenerateRequest,
     InpaintRequest,
+    MergeSegmentsRequest,
     InsertSegmentRequest,
     LoadModelRequest,
     PromoteChannelRequest,
@@ -354,6 +356,48 @@ def generate(req: GenerateRequest):
     return {"job_id": job_id}
 
 
+@app.post("/api/generate-perform")
+async def generate_perform(file: UploadFile = File(...), payload: str = Form(...)):
+    """One-shot performance-guided generation (Voice Clone tab): render the text
+    in the configured voice, riding the uploaded take's timing and delivery."""
+    from .audio_utils import time_stretch
+
+    data = json.loads(payload)
+    perf_cfg = data.pop("perform", None) or {}
+    req = GenerateRequest(**data)
+    title = req.title or "Untitled Take"
+
+    raw = await file.read()
+    tmp = TMP_DIR / f"vperf_{uuid.uuid4().hex}.bin"
+    tmp.write_bytes(raw)
+    try:
+        wav = load_audio(tmp, sr=24000)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Could not read take audio: {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    gain = float(perf_cfg.get("gain_db", 0.0) or 0.0)
+    if abs(gain) > 1e-3:
+        wav = np.clip(wav * (10.0 ** (gain / 20.0)), -1.0, 1.0).astype(np.float32)
+    speed = float(perf_cfg.get("speed", 1.0) or 1.0)
+    if abs(speed - 1.0) > 1e-3:
+        wav = time_stretch(wav, speed)
+    perform = {
+        "waveform": wav,
+        "sample_rate": 24000,
+        "mode": str(perf_cfg.get("mode", "character")),
+        "strength": int(perf_cfg.get("strength", 3)),
+        "seed": perf_cfg.get("seed"),
+    }
+    try:
+        job_fn = service.make_generation_job(model_manager, req, title, perform=perform)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(400, str(e))
+    job_id = job_manager.submit(job_fn, meta={"title": title})
+    return {"job_id": job_id}
+
+
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str):
     job = job_manager.get(job_id)
@@ -601,6 +645,108 @@ def multitrack_inpaint_preserve(sid: str, index: int, req: InpaintRequest):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/multitrack/{sid}/segment/{index}/performance")
+async def multitrack_set_performance(
+    sid: str,
+    index: int,
+    file: UploadFile | None = File(None),
+    gain_db: float = Form(0.0),
+    speed: float = Form(1.0),
+    mode: str = Form("character"),
+    strength: int = Form(3),
+    text: str = Form(""),
+):
+    """Attach a recorded vocal performance to a segment (V2V mode). With a file
+    the take is (re)stored; without one, only the params update."""
+    wav = None
+    in_sr = None
+    if file is not None:
+        import librosa
+
+        data = await file.read()
+        tmp = TMP_DIR / f"perform_{uuid.uuid4().hex}.bin"
+        tmp.write_bytes(data)
+        try:
+            wav, in_sr = librosa.load(str(tmp), sr=None, mono=True)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"Could not read audio: {e}")
+        finally:
+            tmp.unlink(missing_ok=True)
+        if len(wav) < 2400:  # < 0.1 s — junk recording
+            raise HTTPException(400, "Recording is too short.")
+    try:
+        return sessions.set_performance(
+            sid, index, wav, int(in_sr) if in_sr else None,
+            gain_db=gain_db, speed=speed, mode=mode, strength=strength,
+            text=text or None,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/multitrack/{sid}/segment/{index}/performance")
+def multitrack_clear_performance(sid: str, index: int):
+    """Detach a segment's vocal performance (back to plain TTS regen)."""
+    try:
+        return sessions.clear_performance(sid, index)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/process-clip")
+async def process_clip(
+    file: UploadFile = File(...),
+    isolate: bool = Form(False),
+    dereverb: bool = Form(False),
+    dereverb_method: str = Form("roformer"),
+):
+    """Clean an arbitrary clip (vocal isolation / dereverb) and return the
+    processed WAV — used by the performance modal's input-cleanup toggles."""
+    import librosa
+
+    data = await file.read()
+    tmp = TMP_DIR / f"pclip_{uuid.uuid4().hex}.bin"
+    tmp.write_bytes(data)
+    try:
+        wav, in_sr = librosa.load(str(tmp), sr=None, mono=True)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Could not read audio: {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+    sr = int(in_sr)
+    if isolate:
+        wav = np.asarray(model_manager.isolate({"waveform": wav, "sample_rate": sr})["waveform"], dtype=np.float32)
+    if dereverb:
+        res = model_manager.dereverb(
+            {"waveform": wav, "sample_rate": sr, "method": dereverb_method}
+        )
+        wav = np.asarray(res["waveform"], dtype=np.float32)
+    out = TMP_DIR / f"pclip_{uuid.uuid4().hex}.wav"
+    save_wav(out, np.asarray(wav, dtype=np.float32), sr)
+    return FileResponse(str(out), media_type="audio/wav", filename="processed.wav")
+
+
+@app.post("/api/transcribe-clip")
+async def transcribe_clip(file: UploadFile = File(...)):
+    """Whisper-transcribe an arbitrary uploaded clip (e.g. a take being edited
+    in the performance modal, before it's saved)."""
+    import librosa
+
+    data = await file.read()
+    tmp = TMP_DIR / f"tclip_{uuid.uuid4().hex}.bin"
+    tmp.write_bytes(data)
+    try:
+        wav, in_sr = librosa.load(str(tmp), sr=None, mono=True)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Could not read audio: {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+    res = model_manager.transcribe({"waveform": wav, "sample_rate": int(in_sr)})
+    return {"text": (res.get("text") or "").strip()}
+
+
 @app.post("/api/multitrack/{sid}/speaker/{pos}/promote")
 def multitrack_promote(sid: str, pos: str, req: PromoteChannelRequest | None = None):
     """Promote an uploaded AUDIO channel into a new generative clone speaker:
@@ -664,7 +810,9 @@ def multitrack_segment_clip(sid: str, index: int, dl: int = 0):
 @app.post("/api/multitrack/{sid}/segment/{index}/regenerate")
 def multitrack_regen(sid: str, index: int, req: Optional[RegenSegmentRequest] = None):
     try:
-        job_fn = service.make_regen_job(model_manager, sid, index, text=req.text if req else None)
+        job_fn = service.make_regen_job(
+            model_manager, sid, index, text=req.text if req else None, plain=bool(req and req.plain)
+        )
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(404, str(e))
     job_id = job_manager.submit(job_fn, meta={"multitrack": True, "regen": index})
@@ -685,11 +833,33 @@ def multitrack_edit(sid: str, index: int, req: EditSegmentRequest):
 
 @app.post("/api/multitrack/{sid}/speaker/{pos}/channel")
 def multitrack_set_channel(sid: str, pos: str, req: SetChannelRequest):
-    """Set a channel's custom name and/or output gain."""
+    """Set a channel's custom name, output gain and/or mute state."""
     try:
-        return sessions.set_channel(sid, pos, name=req.name, gain_db=req.gain_db)
+        return sessions.set_channel(sid, pos, name=req.name, gain_db=req.gain_db, muted=req.muted)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/speaker/{pos}/collapse")
+def multitrack_collapse_track(sid: str, pos: str):
+    """Flatten an entire track into one continuous segment."""
+    try:
+        return sessions.collapse_track(sid, pos)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/multitrack/{sid}/merge")
+def multitrack_merge_segments(sid: str, req: MergeSegmentsRequest):
+    """Flatten 2+ selected segments on one track into a single clip."""
+    try:
+        return sessions.merge_segments(sid, req.indices)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/multitrack/{sid}/speaker/{pos}/regenerate")
@@ -911,10 +1081,50 @@ def _mount_spa() -> None:
 _mount_spa()
 
 
+def _ensure_ssl_cert() -> tuple[str, str]:
+    """Create (once) and reuse a self-signed cert so the UI can be served over
+    HTTPS. Browsers only expose microphone capture (getUserMedia) on secure
+    origins — plain http:// over the LAN hides the whole API."""
+    import socket
+    import subprocess
+
+    d = DATA_DIR / "ssl"
+    d.mkdir(parents=True, exist_ok=True)
+    crt, key = d / "server.crt", d / "server.key"
+    if not (crt.exists() and key.exists()):
+        host = socket.gethostname()
+        san = {f"DNS:{host}", "DNS:localhost", "IP:127.0.0.1"}
+        try:
+            for ip in socket.gethostbyname_ex(host)[2]:
+                san.add(f"IP:{ip}")
+        except OSError:
+            pass
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-sha256",
+                "-days", "3650", "-nodes",
+                "-keyout", str(key), "-out", str(crt),
+                "-subj", f"/CN={host}",
+                "-addext", f"subjectAltName={','.join(sorted(san))}",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        print(f"Generated self-signed TLS cert: {crt}", flush=True)
+    return str(crt), str(key)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="omnivoice-manager")
     parser.add_argument("--host", default=settings.host)
     parser.add_argument("--port", type=int, default=settings.port)
+    parser.add_argument(
+        "--ssl",
+        action="store_true",
+        help="Serve over HTTPS with a self-signed cert (required for mic recording "
+        "when the UI is opened from another machine — browsers only allow "
+        "getUserMedia on secure origins).",
+    )
     parser.add_argument("--model", default=settings.model_id)
     parser.add_argument("--device", default=settings.device)
     parser.add_argument("--lod", action="store_true", help="Load model on demand (free VRAM after each job).")
@@ -947,8 +1157,13 @@ def main() -> int:
 
     import uvicorn
 
-    print(f"OmniVoice Manager on http://{settings.host}:{settings.port}  (LOD={settings.load_on_demand})", flush=True)
-    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
+    ssl_kw = {}
+    if args.ssl:
+        crt, key = _ensure_ssl_cert()
+        ssl_kw = {"ssl_certfile": crt, "ssl_keyfile": key}
+    scheme = "https" if args.ssl else "http"
+    print(f"OmniVoice Manager on {scheme}://{settings.host}:{settings.port}  (LOD={settings.load_on_demand})", flush=True)
+    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info", **ssl_kw)
     return 0
 
 

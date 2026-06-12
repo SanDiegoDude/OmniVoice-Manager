@@ -51,6 +51,9 @@ class RegenSegmentRequest(BaseModel):
     # Optional edited dialogue for the segment; if set, it replaces the stored
     # line before regenerating (and is persisted to the session).
     text: Optional[str] = None
+    # Ignore any attached vocal performance and render plain TTS with the
+    # channel voice (Capture Performance toggled off).
+    plain: bool = False
 
 
 class EditSegmentRequest(BaseModel):
@@ -63,9 +66,15 @@ class EditSegmentRequest(BaseModel):
 
 
 class SetChannelRequest(BaseModel):
-    """Channel-level (track) controls: custom name and/or output gain."""
+    """Channel-level (track) controls: custom name, output gain and/or mute."""
     name: Optional[str] = None
     gain_db: Optional[float] = None
+    muted: Optional[bool] = None
+
+
+class MergeSegmentsRequest(BaseModel):
+    """Flatten 2+ segments on the same track into one continuous clip."""
+    indices: List[int]
 
 
 class InpaintRequest(BaseModel):

@@ -8,7 +8,9 @@ A modern, browser-based studio and JSON API for [OmniVoice](https://github.com/k
 
 https://github.com/user-attachments/assets/69f211b9-c8ae-49dd-a050-cddcd7ee8bdf
 
-OmniVoice generates a single utterance per call. The Manager wraps it with everything needed to turn that primitive into finished audio: a full **multitrack timeline editor**, multi-speaker dialogue stitching, reference-audio cleanup, perceptual loudness matching, an AI scriptwriter, a rich audio editor, and a clean API for automation.
+OmniVoice generates a single utterance per call. The Manager wraps it with everything needed to turn that primitive into finished audio: a full **multitrack timeline editor (ADR Studio)**, **vocal performance transfer** (act a line yourself, hear it in a cloned voice — timing, emphasis, and emotion preserved), multi-speaker dialogue stitching, reference-audio cleanup, perceptual loudness matching, an AI scriptwriter, a rich audio editor, and a clean API for automation.
+
+**📚 Full feature documentation lives in [`docs/`](docs/README.md):** [ADR Studio](docs/adr-studio.md) · [Performance Transfer](docs/performance-transfer.md) · [Voice Clone](docs/voice-clone.md)
 
 ---
 
@@ -16,6 +18,17 @@ OmniVoice generates a single utterance per call. The Manager wraps it with every
 
 ### A real studio UI (React + Vite + TypeScript)
 A fast single-page app served directly by the backend — no Gradio, no page reloads, no awkward component churn. Live job progress, persistent history, and a voice library are all first-class.
+
+### Performance Transfer — direct the voice with your own (V2V)
+Text gives you a *reading*; a performance gives you a *performance*. Record (or upload) yourself acting a line and the Manager re-renders it in the target voice by seeding OmniVoice's masked-diffusion token grid with your take — no fine-tuning, no separate conversion model.
+
+- **🎭 Character swap** — the target voice reads your line with *its own* mannerisms and delivery (your timing survives). **🎤 Voice swap** — your exact delivery and cadence in their timbre. Each with a 1–5 strength dial.
+- **Record Dialog** — double-click any track and speak a brand-new line straight into the timeline; Auto-Whisper transcribes it, one button renders it.
+- **⟳ Redub chains** — layer passes (e.g. a gentle voice round, then a character round) with a walk-back **dub trail** of every intermediate take.
+- **A/B & Split L/R inspection** — hear your take against the render back-to-back or simultaneously in stereo (take left, render right), and export either comparison as a WAV.
+- In-modal rendering with auto-play, DAW-style trim handles, take cleanup (isolate / de-reverb / auto-leveling), and per-clip persistence — saved performances even ride through channel-wide re-casts.
+
+→ [Full guide](docs/performance-transfer.md)
 
 ### Multi-speaker dialogue, beyond the base model
 OmniVoice synthesizes one voice at a time. The Manager parses `Speaker N:` scripts, assigns a distinct voice (cloned, designed, or auto) to each speaker, generates line by line, and stitches everything into one continuous track — with no hard cap on speaker count. Add or remove speakers dynamically (N+).
@@ -29,10 +42,13 @@ This is the heart of the Manager. Instead of one baked render, every scene is ke
 - **Compose from scratch** — the moment you pick Multi-speaker you get a blank timeline. Build a whole scene by hand one clip at a time, or generate from a script and refine.
 - **Auto-slice by sentence & Whisper align** — split a monologue into one clip per sentence using word-level timestamps, or align a clip's displayed text to its actual audio — no regenerate.
 - **Vocal Inpaint (per-segment ADR)** — lock a clip's own audio as a temporary, timeline-local voice clone, then rewrite the line in that exact voice. Per-segment automated dialogue replacement. Optional **Preserve non-vocal** keeps the clip's original background (music / room / noise) isolated at lock time and mixes it back under each regenerated take, trimmed to follow the new voice's length.
-- **Uploaded audio channels** — drop in a soundtrack / SFX / recording as its own non-generative layer with independent gain, then **promote** it into a full clone voice channel (auto-transcribed, with a matching speaker added) when you want to put words in its mouth.
+- **Uploaded audio channels** — drop in a soundtrack / SFX / recording as its own non-generative layer with independent gain, then **⭐ promote** it into a full clone voice channel (auto-transcribed, with a matching speaker added) when you want to put words in its mouth.
+- **Merge, collapse, mute** — shift-click clips on a track and merge them into one (gaps become silence); flatten an entire lane into a single re-sliceable clip; or mute a lane in the mix without touching it.
 - **Tag library** — hot-clickable OmniVoice non-verbal cues (`[laughter]`, `[whisper]`, …) injected at the cursor in any dialogue field.
-- **Zoom, pan, follow-playhead, spacebar transport, single-step undo**, and a vertical resize to grow the rows + waveform — it feels like an editor, not a form.
+- **Zoom, pan, follow-playhead, spacebar transport, single-step undo**, magnetic selection edges, and a vertical resize to grow the rows + waveform — it feels like an editor, not a form.
 - **Finalize** stitches the timeline to a single, loudness-matched, true-peak-limited track and saves it to history.
+
+→ [Full guide](docs/adr-studio.md)
 
 ### Professional loudness matching
 Multi-voice mixes usually suffer from one speaker booming while another whispers. The Manager applies **perceptual LUFS loudness matching** (ITU-R BS.1770 / EBU R128, K-weighted) across every segment so all speakers sit at the same perceived volume, then runs a single **true-peak limiter** on the final mix to prevent clipping. This is the same approach broadcast engineers use — not a crude per-clip gain bump.
@@ -155,6 +171,7 @@ Run the backend directly for more control:
 | `--lod` | Load the model on demand and free VRAM after each job |
 | `--eager` | Load the model at startup |
 | `--preload-asr` | Preload Whisper (otherwise it loads only when transcribing a reference) |
+| `--ssl` | Serve self-signed HTTPS — required for mic recording from other machines (browsers only expose `getUserMedia` on secure origins) |
 
 LOD and Low VRAM mode can also be toggled live from the top bar in the UI.
 
@@ -162,11 +179,12 @@ LOD and Low VRAM mode can also be toggled live from the top bar in the UI.
 
 ## Using the UI
 
-- **Studio** — write or AI-generate a script, configure speakers (clone / design / auto), set generation and loudness options, and generate. Watch per-stage progress and edit the result in the player. **Sync dialogue from Editor** pulls the timeline's current lines back into the script box (in timeline order) without re-running Whisper.
-- **Multitrack editor** (multi-speaker) — the timeline described above: regenerate / move / trim / speed / gain individual clips, split / duplicate / delete, insert or remove empty time, layer overlapping dialogue, auto-slice, Vocal Inpaint, add uploaded audio channels and promote them to voices, then **Finalize** to commit and save. Single-step **Undo** covers any edit.
+- **🎬 ADR Studio** (default tab) — write or AI-generate a script, configure speakers (clone / design / auto), set generation and loudness options, and generate straight into the timeline: regenerate / move / trim / speed / gain individual clips, split / duplicate / delete, insert or remove empty time, layer overlapping dialogue, auto-slice, Vocal Inpaint, record dialogue or vocal performances straight into clips, add uploaded audio channels and promote them to voices, then **Finalize** to commit and save. Single-step **Undo** covers any edit. **Sync dialogue from Editor** pulls the timeline's current lines back into the script box (in timeline order) without re-running Whisper.
+- **🎤 Voice Clone** — single-voice takes from text or a recorded performance (inline capture panel), with the same AI scriptwriter.
 - **Voice Lab** — upload or pick a reference, manually trim it, preview isolation / de-reverb / normalization, and save (or overwrite) the cleaned voice in your library.
 - **Tag library** — a hot-clickable list of OmniVoice's supported bracket cues that inject at your cursor.
 - **History & Outputs** — replay, download, or fully restore any past generation.
+- **Mobile-friendly** — the voice library and history collapse to edge tabs on desktop and slide-over drawers on phones; swipe-back navigation is disabled so a stray edge gesture can't nuke a session.
 
 ---
 
@@ -181,7 +199,9 @@ All endpoints are JSON over HTTP. Selected routes:
 | `GET /api/script/providers` · `POST /api/script/reload` | List / hot-reload AI providers |
 | `POST /api/script` | Generate or refine a `Speaker N:` script from a prompt |
 | `POST /api/generate` | Synthesize from a script (queued; returns a job id) |
+| `POST /api/generate-perform` | One-shot performance transfer: upload a take + params, render in a target voice |
 | `POST /api/generate/script-and-speak` | Smart Script **and** synthesis in one call |
+| `POST /api/process-clip` · `POST /api/transcribe-clip` | Isolate/de-reverb or Whisper any uploaded clip |
 | `GET /api/jobs/{job_id}` | Poll job status / result |
 | `GET /api/voices` · `POST /api/voices/upload` · `POST /api/voices/process` | Voice library + Voice Lab |
 | `GET /api/outputs` · `GET /api/history` | Browse results and history |
@@ -195,7 +215,9 @@ All endpoints are JSON over HTTP. Selected routes:
 | `POST …/segment/{i}/regenerate` · `…/edit` · `…/text` | Regenerate, move/trim/speed/gain, or align a clip's text |
 | `POST …/segment/{i}/split` · `…/duplicate` · `…/delete` · `…/auto-slice` · `…/inpaint` · `…/inpaint-preserve` | Clip operations + Vocal Inpaint (and non-vocal bed) |
 | `POST …/delete-space` · `…/add-space` · `…/reflow` · `…/insert` | Timeline structure + global speed/gap |
-| `POST …/upload-channel` · `…/speaker/{pos}/promote` · `…/speaker/{pos}/regenerate` | Audio channels, promote-to-voice, re-cast a channel |
+| `POST …/upload-channel` · `…/speaker/{pos}/promote` · `…/speaker/{pos}/regenerate` | Audio channels, promote-to-voice, re-cast a channel (honors per-clip performances) |
+| `POST·DELETE …/segment/{i}/performance` | Attach / detach a vocal performance (multipart take + mode/strength/gain/speed) |
+| `POST …/merge` · `…/speaker/{pos}/collapse` | Merge selected clips, collapse a track to one clip |
 | `POST …/segment/{i}/transcribe` · `…/{sid}/undo` · `…/{sid}/finalize` | Whisper a clip, single-step undo, commit to history |
 
 Generation is asynchronous: submit to `/api/generate` (or `/api/multitrack/generate`), then poll `/api/jobs/{job_id}` until `status` is `done`. Most timeline edits are synchronous and return the updated session.
