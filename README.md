@@ -130,8 +130,8 @@ Have these on your PATH before you start:
 The same commands work on Linux and Windows:
 
 ```bash
-git clone <your-repo-url> OmniVoice
-cd OmniVoice
+git clone https://github.com/SanDiegoDude/OmniVoice-Manager
+cd OmniVoice-Manager
 
 # Python environment + dependencies.
 # Keep "--python 3.10" as written, regardless of which Python (if any) you have
