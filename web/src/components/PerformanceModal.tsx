@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MultitrackSegment } from '../api'
+import { api } from '../api'
 import { blobToWav } from '../audio-encode'
 import { AudioPlayer } from './AudioPlayer'
 import ToolModal from './ToolModal'
 
 type Mode = 'character' | 'voice'
+type PerfParams = { gain_db: number; speed: number; mode: Mode; strength: number; text?: string }
 
 const STRENGTH_HINT: Record<Mode, string[]> = {
   character: [
@@ -23,21 +25,22 @@ const STRENGTH_HINT: Record<Mode, string[]> = {
   ],
 }
 
-/** Record / upload / edit a vocal performance for a segment, then save it as
- * the segment's V2V source. The clone voice gets painted over YOUR read. */
+/** Record / upload / edit a vocal performance for a segment, render it in
+ * place, then save it as the segment's V2V source + output trim/gain. */
 export default function PerformanceModal({
   seg,
   withMic,
   onSave,
+  onRender,
+  onApplyOutput,
   onWhisper,
   onClose,
 }: {
   seg: MultitrackSegment
   withMic: boolean
-  onSave: (
-    wav: Blob | null,
-    params: { gain_db: number; speed: number; mode: Mode; strength: number; text?: string },
-  ) => Promise<void>
+  onSave: (wav: Blob | null, params: PerfParams) => Promise<void>
+  onRender: (wav: Blob | null, params: PerfParams) => Promise<MultitrackSegment | null>
+  onApplyOutput: (fields: { trim_start_s?: number; trim_end_s?: number; gain_db?: number }) => void
   onWhisper: (wav: Blob) => Promise<string>
   onClose: () => void
 }) {
@@ -53,13 +56,24 @@ export default function PerformanceModal({
   const [mode, setMode] = useState<Mode>(existing?.mode ?? 'character')
   const [strength, setStrength] = useState(existing?.strength ?? 3)
   const [text, setText] = useState(seg.text)
-  const [busy, setBusy] = useState<'whisper' | 'save' | null>(null)
+  const [cleanIsolate, setCleanIsolate] = useState(false)
+  const [cleanDereverb, setCleanDereverb] = useState(false)
+  const [processing, setProcessing] = useState(false)
+  const [busy, setBusy] = useState<'whisper' | 'save' | 'render' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Rendered output preview (trim/gain here apply to the segment on save).
+  const [output, setOutput] = useState<{ url: string } | null>(null)
+  const outDraftRef = useRef<{ trimStart: number; trimEnd: number; gain: number } | null>(null)
 
   const recRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const timerRef = useRef<number | null>(null)
   const urlRef = useRef<string | null>(null)
+  // The take before cleanup, so isolate/dereverb toggles are non-destructive.
+  const rawRef = useRef<Blob | null>(null)
+  // True once params/take changed after the last render/save (so Save knows
+  // whether it still needs to push params and re-arm the clip).
+  const dirtyRef = useRef(false)
 
   // getUserMedia only exists on secure origins (https:// or localhost). Plain
   // http:// over the LAN hides the whole API — explain instead of erroring.
@@ -74,24 +88,82 @@ export default function PerformanceModal({
     [],
   )
 
-  const adoptBlob = useCallback(async (raw: Blob) => {
-    setError(null)
-    try {
-      const { wav } = await blobToWav(raw)
-      if (urlRef.current) URL.revokeObjectURL(urlRef.current)
-      const url = URL.createObjectURL(wav)
-      urlRef.current = url
-      setTake({ blob: wav, url })
-    } catch (e) {
-      setError(`Could not decode audio: ${e instanceof Error ? e.message : e}`)
-    }
+  const markDirty = () => {
+    dirtyRef.current = true
+  }
+
+  const setTakeBlob = useCallback((wav: Blob) => {
+    if (urlRef.current) URL.revokeObjectURL(urlRef.current)
+    const url = URL.createObjectURL(wav)
+    urlRef.current = url
+    setTake({ blob: wav, url })
+    dirtyRef.current = true
   }, [])
+
+  const applyCleanup = useCallback(
+    async (base: Blob, isolate: boolean, dereverb: boolean) => {
+      if (!isolate && !dereverb) {
+        setTakeBlob(base)
+        return
+      }
+      setProcessing(true)
+      setError(null)
+      try {
+        const processed = await api.processClip(base, { isolate, dereverb })
+        setTakeBlob(processed)
+      } catch (e) {
+        setError(`Cleanup failed: ${e instanceof Error ? e.message : e}`)
+      } finally {
+        setProcessing(false)
+      }
+    },
+    [setTakeBlob],
+  )
+
+  const adoptBlob = useCallback(
+    async (raw: Blob) => {
+      setError(null)
+      try {
+        // Decode + peak-normalize: browser captures are often very quiet.
+        const { wav } = await blobToWav(raw, 0.9)
+        rawRef.current = wav
+        await applyCleanup(wav, cleanIsolate, cleanDereverb)
+      } catch (e) {
+        setError(`Could not decode audio: ${e instanceof Error ? e.message : e}`)
+      }
+    },
+    [applyCleanup, cleanIsolate, cleanDereverb],
+  )
+
+  // Make sure we have the raw take as a blob (re-fetch a previously saved one).
+  const ensureRaw = async (): Promise<Blob | null> => {
+    if (rawRef.current) return rawRef.current
+    if (take?.url) {
+      const res = await fetch(take.url)
+      const { wav } = await blobToWav(await res.blob(), 0.9)
+      rawRef.current = wav
+      return wav
+    }
+    return null
+  }
+
+  const toggleCleanup = async (kind: 'isolate' | 'dereverb', value: boolean) => {
+    const iso = kind === 'isolate' ? value : cleanIsolate
+    const der = kind === 'dereverb' ? value : cleanDereverb
+    if (kind === 'isolate') setCleanIsolate(value)
+    else setCleanDereverb(value)
+    const base = await ensureRaw()
+    if (base) await applyCleanup(base, iso, der)
+  }
 
   const startRecord = async () => {
     setError(null)
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        // AGC on — without it browser captures are far quieter than e.g. Zoom.
+        // Echo cancel / noise suppression stay off to keep the read natural;
+        // the isolate/dereverb toggles below do heavier cleanup on demand.
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true },
       })
       const rec = new MediaRecorder(stream)
       chunksRef.current = []
@@ -134,6 +206,14 @@ export default function PerformanceModal({
     return null
   }
 
+  const params = (): PerfParams => ({
+    gain_db: gain,
+    speed,
+    mode,
+    strength,
+    text: text.trim() && text.trim() !== seg.text ? text.trim() : undefined,
+  })
+
   const whisper = async () => {
     setBusy('whisper')
     setError(null)
@@ -149,17 +229,36 @@ export default function PerformanceModal({
     }
   }
 
+  const render = async () => {
+    setBusy('render')
+    setError(null)
+    try {
+      const newSeg = await onRender(take?.blob ?? null, params())
+      if (!newSeg) throw new Error('Render returned no segment')
+      dirtyRef.current = false
+      const url = newSeg.url + (newSeg.url.includes('?') ? '&' : '?') + `cb=${Date.now()}`
+      outDraftRef.current = null
+      setOutput({ url })
+    } catch (e) {
+      setError(`Render failed: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const save = async () => {
     setBusy('save')
     setError(null)
     try {
-      await onSave(take?.blob ?? null, {
-        gain_db: gain,
-        speed,
-        mode,
-        strength,
-        text: text.trim() && text.trim() !== seg.text ? text.trim() : undefined,
-      })
+      // Push params/take only if they changed since the last render — saving
+      // identical params would re-arm the clip even though the render is fresh.
+      if (dirtyRef.current || !output) {
+        await onSave(take?.blob ?? null, params())
+      }
+      const d = outDraftRef.current
+      if (output && d) {
+        onApplyOutput({ trim_start_s: d.trimStart, trim_end_s: d.trimEnd, gain_db: d.gain })
+      }
       onClose()
     } catch (e) {
       setError(`Save failed: ${e instanceof Error ? e.message : e}`)
@@ -168,20 +267,31 @@ export default function PerformanceModal({
   }
 
   const hasTake = take != null
+  const working = busy != null || processing
   return (
     <ToolModal
       open
       title={<span>🎙 Vocal performance — clip {seg.index}</span>}
       onClose={onClose}
       actions={
-        <button className="btn sm primary" disabled={!hasTake || recording || busy != null} onClick={save}>
-          {busy === 'save' ? <span className="spinner sm" /> : '💾'} Save
-        </button>
+        <>
+          <button
+            className="btn sm perf-glow"
+            disabled={!hasTake || recording || working}
+            title="Run the voice transfer now and hear the result without leaving the modal"
+            onClick={render}
+          >
+            {busy === 'render' ? <span className="spinner sm" /> : '⚡'} Render
+          </button>
+          <button className="btn sm primary" disabled={!hasTake || recording || working} onClick={save}>
+            {busy === 'save' ? <span className="spinner sm" /> : '💾'} Save
+          </button>
+        </>
       }
     >
       <div className="hint" style={{ marginBottom: 10 }}>
         Act the line yourself — timing, pauses, emphasis, emotion. The clip's voice is painted
-        over <em>your</em> performance on the next regenerate.
+        over <em>your</em> performance. <strong>⚡ Render</strong> runs it right here so you can dial in the sliders.
       </div>
 
       {withMic && !micSupported && (
@@ -221,6 +331,29 @@ export default function PerformanceModal({
           </label>
         )}
         {recording && <span className="rec-dot" aria-label="recording" />}
+        {hasTake && !recording && (
+          <>
+            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={cleanIsolate}
+                disabled={processing}
+                onChange={(e) => void toggleCleanup('isolate', e.target.checked)}
+              />
+              Isolate vocals
+            </label>
+            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={cleanDereverb}
+                disabled={processing}
+                onChange={(e) => void toggleCleanup('dereverb', e.target.checked)}
+              />
+              Dereverb (de-boom)
+            </label>
+            {processing && <span className="spinner sm" aria-label="processing" />}
+          </>
+        )}
       </div>
 
       {hasTake && !recording && (
@@ -232,7 +365,10 @@ export default function PerformanceModal({
             showDownload={false}
             initialGain={gain}
             playbackRate={previewSpeed}
-            onGainChange={setGain}
+            onGainChange={(g) => {
+              setGain(g)
+              markDirty()
+            }}
           />
           <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
             <span style={{ minWidth: 130 }}>Take speed · {speed.toFixed(2)}×</span>
@@ -243,13 +379,17 @@ export default function PerformanceModal({
               step={0.05}
               value={speed}
               style={{ flex: 1 }}
-              onChange={(e) => setSpeed(parseFloat(e.target.value))}
+              onChange={(e) => {
+                setSpeed(parseFloat(e.target.value))
+                markDirty()
+              }}
               onMouseUp={() => setPreviewSpeed(speed)}
               onTouchEnd={() => setPreviewSpeed(speed)}
             />
           </label>
           <div className="hint" style={{ opacity: 0.8 }}>
-            dB boost via the player's dB control · speed &amp; gain are baked into the take at render time.
+            Takes are auto-leveled on capture · dB boost via the player's dB control · speed &amp; gain are baked in at
+            render time.
           </div>
         </div>
       )}
@@ -260,14 +400,20 @@ export default function PerformanceModal({
         <button
           className={`btn sm${mode === 'character' ? ' on' : ''}`}
           title="The voice's OWN mannerisms and delivery take over your read (timing preserved)"
-          onClick={() => setMode('character')}
+          onClick={() => {
+            setMode('character')
+            markDirty()
+          }}
         >
           🎭 Character swap
         </button>
         <button
           className={`btn sm${mode === 'voice' ? ' on' : ''}`}
           title="Pure timbre swap: YOUR exact delivery and cadence, their voice"
-          onClick={() => setMode('voice')}
+          onClick={() => {
+            setMode('voice')
+            markDirty()
+          }}
         >
           🎤 Voice swap
         </button>
@@ -281,7 +427,10 @@ export default function PerformanceModal({
           step={1}
           value={strength}
           style={{ flex: 1 }}
-          onChange={(e) => setStrength(parseInt(e.target.value, 10))}
+          onChange={(e) => {
+            setStrength(parseInt(e.target.value, 10))
+            markDirty()
+          }}
         />
       </label>
       <div className="hint" style={{ opacity: 0.8 }}>{STRENGTH_HINT[mode][strength - 1]}</div>
@@ -292,13 +441,20 @@ export default function PerformanceModal({
         <div className="row" style={{ gap: 6 }}>
           <button
             className="btn sm"
-            disabled={!hasTake || recording || busy != null}
+            disabled={!hasTake || recording || working}
             title="Transcribe the take with Whisper (if you changed the line in the moment)"
             onClick={whisper}
           >
             {busy === 'whisper' ? <span className="spinner sm" /> : '🎤'} Whisper
           </button>
-          <button className="btn sm ghost" onClick={() => setText(seg.text)} title="Revert to the segment's text">
+          <button
+            className="btn sm ghost"
+            onClick={() => {
+              setText(seg.text)
+              markDirty()
+            }}
+            title="Revert to the segment's text"
+          >
             ↺ Revert
           </button>
         </div>
@@ -307,13 +463,42 @@ export default function PerformanceModal({
         className="input"
         rows={2}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value)
+          markDirty()
+        }}
         placeholder="Dialogue for this performance…"
       />
 
+      {/* Rendered output: trim + gain here apply to the segment on save */}
+      {output && (
+        <div style={{ marginTop: 14, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+          <div className="hint" style={{ marginBottom: 4 }}>
+            <strong>Rendered output</strong> — trim &amp; gain below apply to the clip on the track when you Save.
+          </div>
+          <AudioPlayer
+            key={output.url}
+            url={output.url}
+            autoPlay
+            showDownload={false}
+            onTrimChange={(s, e) => {
+              outDraftRef.current = { trimStart: s, trimEnd: e, gain: outDraftRef.current?.gain ?? 0 }
+            }}
+            onGainChange={(g) => {
+              outDraftRef.current = {
+                trimStart: outDraftRef.current?.trimStart ?? 0,
+                trimEnd: outDraftRef.current?.trimEnd ?? 0,
+                gain: g,
+              }
+            }}
+          />
+        </div>
+      )}
+
       {error && <div className="hint" style={{ color: 'var(--bad, #e66)', marginTop: 8 }}>{error}</div>}
       <div className="hint" style={{ marginTop: 10, opacity: 0.75 }}>
-        Saving arms the clip (gold) — hit <strong>↻ Regenerate</strong> on it to render the transfer.
+        <strong>⚡ Render</strong> runs the transfer now (clip updates on the track too) · <strong>💾 Save</strong>{' '}
+        stores the take + settings{output ? ' and applies the output trim/gain' : ' and arms the clip (gold) for the next regenerate'}.
       </div>
     </ToolModal>
   )

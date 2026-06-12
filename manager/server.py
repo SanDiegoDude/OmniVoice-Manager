@@ -652,6 +652,39 @@ def multitrack_clear_performance(sid: str, index: int):
         raise HTTPException(404, str(e))
 
 
+@app.post("/api/process-clip")
+async def process_clip(
+    file: UploadFile = File(...),
+    isolate: bool = Form(False),
+    dereverb: bool = Form(False),
+    dereverb_method: str = Form("roformer"),
+):
+    """Clean an arbitrary clip (vocal isolation / dereverb) and return the
+    processed WAV — used by the performance modal's input-cleanup toggles."""
+    import librosa
+
+    data = await file.read()
+    tmp = TMP_DIR / f"pclip_{uuid.uuid4().hex}.bin"
+    tmp.write_bytes(data)
+    try:
+        wav, in_sr = librosa.load(str(tmp), sr=None, mono=True)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Could not read audio: {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+    sr = int(in_sr)
+    if isolate:
+        wav = np.asarray(model_manager.isolate({"waveform": wav, "sample_rate": sr})["waveform"], dtype=np.float32)
+    if dereverb:
+        res = model_manager.dereverb(
+            {"waveform": wav, "sample_rate": sr, "method": dereverb_method}
+        )
+        wav = np.asarray(res["waveform"], dtype=np.float32)
+    out = TMP_DIR / f"pclip_{uuid.uuid4().hex}.wav"
+    save_wav(out, np.asarray(wav, dtype=np.float32), sr)
+    return FileResponse(str(out), media_type="audio/wav", filename="processed.wav")
+
+
 @app.post("/api/transcribe-clip")
 async def transcribe_clip(file: UploadFile = File(...)):
     """Whisper-transcribe an arbitrary uploaded clip (e.g. a take being edited

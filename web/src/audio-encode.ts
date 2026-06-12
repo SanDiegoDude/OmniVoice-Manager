@@ -2,13 +2,32 @@
  * (mic webm/opus, uploaded mp3/wav/…) into a mono 16-bit PCM WAV blob, so the
  * server never has to deal with container formats. */
 
-export async function blobToWav(blob: Blob): Promise<{ wav: Blob; duration: number }> {
+export async function blobToWav(blob: Blob, normalizePeak = 0): Promise<{ wav: Blob; duration: number }> {
   const ctx = new AudioContext()
   try {
     const buf = await ctx.decodeAudioData(await blob.arrayBuffer())
+    if (normalizePeak > 0) normalizeBuffer(buf, normalizePeak)
     return { wav: audioBufferToWav(buf), duration: buf.duration }
   } finally {
     void ctx.close()
+  }
+}
+
+/** Peak-normalize in place (quiet mic takes come out at healthy levels). */
+function normalizeBuffer(buf: AudioBuffer, targetPeak: number) {
+  let peak = 0
+  for (let c = 0; c < buf.numberOfChannels; c++) {
+    const ch = buf.getChannelData(c)
+    for (let i = 0; i < ch.length; i++) {
+      const v = Math.abs(ch[i])
+      if (v > peak) peak = v
+    }
+  }
+  if (peak < 1e-5 || peak >= targetPeak) return
+  const g = targetPeak / peak
+  for (let c = 0; c < buf.numberOfChannels; c++) {
+    const ch = buf.getChannelData(c)
+    for (let i = 0; i < ch.length; i++) ch[i] *= g
   }
 }
 

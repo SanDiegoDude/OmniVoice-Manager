@@ -317,6 +317,19 @@ export const api = {
   },
   clearPerformance: (sid: string, index: number) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/performance`, { method: 'DELETE' }),
+  async processClip(
+    wav: Blob,
+    opts: { isolate: boolean; dereverb: boolean; dereverb_method?: string },
+  ): Promise<Blob> {
+    const fd = new FormData()
+    fd.append('file', wav, 'clip.wav')
+    fd.append('isolate', String(opts.isolate))
+    fd.append('dereverb', String(opts.dereverb))
+    fd.append('dereverb_method', opts.dereverb_method || 'roformer')
+    const res = await fetch('/api/process-clip', { method: 'POST', body: fd })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Processing failed')
+    return res.blob()
+  },
   async transcribeClip(wav: Blob): Promise<string> {
     const fd = new FormData()
     fd.append('file', wav, 'clip.wav')

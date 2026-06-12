@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { GenParams, GenerateBody, Job, MultitrackSession, Provider, SpeakerConfig, Voice } from '../api'
+import type { GenParams, GenerateBody, Job, MultitrackSegment, MultitrackSession, Provider, SpeakerConfig, Voice } from '../api'
 import { AudioPlayer } from './AudioPlayer'
 import { MultitrackEditor } from './MultitrackEditor'
 import { SpeakerCard } from './SpeakerCard'
@@ -85,6 +85,7 @@ export function Studio({
   onCollapseTrack,
   onUndo,
   onSetPerformance,
+  onRenderPerformance,
   onClearPerformance,
   onTranscribeClip,
   onFinalize,
@@ -134,6 +135,11 @@ export function Studio({
     wav: Blob | null,
     params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
   ) => Promise<void>
+  onRenderPerformance: (
+    index: number,
+    wav: Blob | null,
+    params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
+  ) => Promise<MultitrackSegment | null>
   onClearPerformance: (index: number) => Promise<void>
   onTranscribeClip: (wav: Blob) => Promise<string>
   onFinalize: () => void
@@ -587,6 +593,7 @@ export function Studio({
             onCollapseTrack={onCollapseTrack}
             onUndo={onUndo}
             onSetPerformance={onSetPerformance}
+            onRenderPerformance={onRenderPerformance}
             onClearPerformance={onClearPerformance}
             onTranscribeClip={onTranscribeClip}
             regenIndex={regenIndex}

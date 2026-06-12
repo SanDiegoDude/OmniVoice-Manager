@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
-import type { GenParams, GenerateBody, HistoryEntry, Job, MultitrackSession, OutputFile, Provider, SpeakerConfig, SystemInfo, Voice, VoiceNode } from './api'
+import type { GenParams, GenerateBody, HistoryEntry, Job, MultitrackSegment, MultitrackSession, OutputFile, Provider, SpeakerConfig, SystemInfo, Voice, VoiceNode } from './api'
 import { SidePanel } from './components/SidePanel'
 import { Studio, type Injected } from './components/Studio'
 import { TopBar } from './components/TopBar'
@@ -377,6 +377,40 @@ export default function App() {
     setSession(s)
     notify('Performance saved — hit ↻ Regenerate on the clip to render it', 'success')
   }
+  // In-modal render: save the performance, fire the regen job, poll it to
+  // completion ourselves (the global job poller stays free), and hand the
+  // refreshed segment back so the modal can preview the output.
+  const renderPerformance = async (
+    index: number,
+    wav: Blob | null,
+    params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
+  ): Promise<MultitrackSegment | null> => {
+    if (!session) return null
+    const sid = session.id
+    const s = await api.setPerformance(sid, index, wav, params)
+    setSession(s)
+    const { job_id } = await api.regenSegment(sid, index)
+    setRegenIndex(index)
+    try {
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 700))
+        const j = await api.job(job_id)
+        if (j.status === 'error') throw new Error(j.error || 'Render failed')
+        if (j.status === 'done') {
+          const ns = j.result?.session as MultitrackSession | undefined
+          if (!ns) return null
+          setSession(ns)
+          for (const t of ns.tracks) {
+            const seg = t.segments.find((sg) => sg.index === index)
+            if (seg) return seg
+          }
+          return null
+        }
+      }
+    } finally {
+      setRegenIndex(null)
+    }
+  }
   const clearPerformance = async (index: number) => {
     if (!session) return
     try {
@@ -643,6 +677,7 @@ export default function App() {
           onCollapseTrack={collapseTrack}
           onUndo={undoSession}
           onSetPerformance={setPerformance}
+          onRenderPerformance={renderPerformance}
           onClearPerformance={clearPerformance}
           onTranscribeClip={transcribeClip}
           onDeleteSpace={deleteSpace}

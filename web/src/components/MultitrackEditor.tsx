@@ -71,6 +71,7 @@ export function MultitrackEditor({
   onCollapseTrack,
   onUndo,
   onSetPerformance,
+  onRenderPerformance,
   onClearPerformance,
   onTranscribeClip,
   regenIndex,
@@ -106,6 +107,11 @@ export function MultitrackEditor({
     wav: Blob | null,
     params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
   ) => Promise<void>
+  onRenderPerformance: (
+    index: number,
+    wav: Blob | null,
+    params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
+  ) => Promise<MultitrackSegment | null>
   onClearPerformance: (index: number) => Promise<void>
   onTranscribeClip: (wav: Blob) => Promise<string>
   regenIndex: number | null
@@ -1175,6 +1181,8 @@ export function MultitrackEditor({
             seg={seg}
             withMic={perfModal.mic}
             onSave={(wav, params) => onSetPerformance(seg.index, wav, params)}
+            onRender={(wav, params) => onRenderPerformance(seg.index, wav, params)}
+            onApplyOutput={(fields) => onEditSegment(seg.index, fields)}
             onWhisper={onTranscribeClip}
             onClose={() => setPerfModal(null)}
           />

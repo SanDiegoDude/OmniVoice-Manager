@@ -313,6 +313,14 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 }
 .btn.perf-glow { border-color: #f5c542; box-shadow: 0 0 8px rgba(245, 197, 66, 0.55); animation: perfPulse 1.6s ease-in-out infinite; }
 
+/* Selected-state buttons (mode toggles, locked tools) */
+.btn.on {
+  border-color: var(--accent);
+  background: rgba(109, 139, 255, 0.18);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  color: #fff;
+}
+
 /* Recording indicator */
 .rec-dot { width: 10px; height: 10px; border-radius: 50%; background: #ef4444; display: inline-block; animation: recBlink 1s ease-in-out infinite; }
 @keyframes recBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
