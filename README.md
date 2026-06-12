@@ -104,9 +104,9 @@ All GPU work runs in a dedicated child process. This isolates the CUDA context, 
 
 ## Requirements
 
-Linux and Windows are both supported.
+Linux, Windows, and macOS (Apple Silicon) are supported.
 
-- An NVIDIA GPU with CUDA (CPU works but is slow)
+- An NVIDIA GPU with CUDA, or an Apple Silicon Mac with MPS (CPU works but is slow)
 - Python 3.10+
 - Node.js 18+ (only to build the web UI)
 - [`uv`](https://github.com/astral-sh/uv) for Python dependency management
@@ -116,7 +116,7 @@ Linux and Windows are both supported.
 
 ## Installation
 
-The same commands work on Linux and Windows:
+The same commands work on Linux, Windows, and macOS:
 
 ```bash
 git clone <your-repo-url> OmniVoice
@@ -132,7 +132,7 @@ uv sync --extra dereverb
 cd web && npm install && npm run build && cd ..
 ```
 
-(`uv sync` automatically pulls the CUDA build of PyTorch on both Linux and Windows.)
+(`uv sync` automatically pulls the CUDA build of PyTorch on Linux and Windows, and the standard PyPI build — with Metal/MPS support — on macOS.)
 
 Model weights for OmniVoice, the vocal isolation checkpoint, and (when used) Whisper are downloaded automatically on first use into `./models` and the Hugging Face cache.
 
@@ -176,7 +176,7 @@ Run the backend directly for more control:
 | --- | --- |
 | `--port` / `--host` | Bind address (default `8200` / `0.0.0.0`) |
 | `--model` | Model id (default `k2-fsa/OmniVoice`) |
-| `--device` | e.g. `cuda:0` |
+| `--device` | `auto` (default; picks CUDA > MPS > CPU) or pin e.g. `cuda:0` / `mps` / `cpu` |
 | `--lod` | Load the model on demand and free VRAM after each job |
 | `--eager` | Load the model at startup |
 | `--preload-asr` | Preload Whisper (otherwise it loads only when transcribing a reference) |

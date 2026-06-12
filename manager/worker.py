@@ -73,6 +73,22 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
                 os._exit(0)
         except Exception:  # noqa: BLE001
             pass
+    elif sys.platform == "darwin":
+        try:
+            import threading
+            import time as _time
+
+            # macOS has no prctl(PR_SET_PDEATHSIG); when the parent dies the
+            # child is re-parented to launchd (pid 1), so poll for that.
+            def _watch_parent_darwin():
+                while True:
+                    if os.getppid() == 1:
+                        os._exit(0)
+                    _time.sleep(2.0)
+
+            threading.Thread(target=_watch_parent_darwin, daemon=True).start()
+        except Exception:  # noqa: BLE001
+            pass
     else:
         try:
             import ctypes
@@ -86,6 +102,34 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
             pass
 
     import torch
+
+    from omnivoice.utils.common import get_best_device
+
+    def _resolve_device(requested: str) -> str:
+        req = (requested or "auto").strip().lower()
+        if req == "auto":
+            return get_best_device()
+        # Fall back gracefully when the pinned backend isn't available on this
+        # machine (e.g. a .env carried over from a CUDA box onto a Mac).
+        if req.startswith("cuda") and not torch.cuda.is_available():
+            return get_best_device()
+        if req.startswith("mps") and not torch.backends.mps.is_available():
+            return get_best_device()
+        return requested
+
+    cfg["device"] = _resolve_device(cfg.get("device", "auto"))
+    # fp16 on CPU is unsupported/slow for many ops; force fp32 there.
+    if cfg["device"] == "cpu":
+        cfg["dtype"] = "float32"
+
+    def _empty_device_cache() -> None:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            try:
+                torch.mps.empty_cache()
+            except Exception:  # noqa: BLE001
+                pass
 
     from omnivoice import OmniVoice
 
@@ -108,16 +152,14 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
         if _state["isolator"] is None:
             from manager.vocal_isolation import VocalIsolator
 
-            device = cfg["device"] if str(cfg["device"]).startswith("cuda") else cfg["device"]
-            _state["isolator"] = VocalIsolator(device=device, debug=cfg.get("debug", False))
+            _state["isolator"] = VocalIsolator(device=cfg["device"], debug=cfg.get("debug", False))
         return _state["isolator"]
 
     def get_dereverber():
         if _state["dereverber"] is None:
             from manager.vocal_isolation import VocalIsolator
 
-            device = cfg["device"] if str(cfg["device"]).startswith("cuda") else cfg["device"]
-            _state["dereverber"] = VocalIsolator.dereverber(device=device, debug=cfg.get("debug", False))
+            _state["dereverber"] = VocalIsolator.dereverber(device=cfg["device"], debug=cfg.get("debug", False))
         return _state["dereverber"]
 
     def get_dfn():
@@ -366,8 +408,7 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
                     except Exception:  # noqa: BLE001
                         pass
                     _state[key] = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            _empty_device_cache()
         except Exception:  # noqa: BLE001
             pass
 
@@ -385,7 +426,7 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
         "generate": handle_generate,
     }
 
-    res_q.put(("ready", None, {}))
+    res_q.put(("ready", None, {"device": cfg["device"], "dtype": cfg.get("dtype", "float16")}))
 
     while True:
         msg = req_q.get()
@@ -417,9 +458,6 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
                 except Exception:  # noqa: BLE001
                     pass
         _state["model"] = None
-        import torch
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        _empty_device_cache()
     except Exception:  # noqa: BLE001
         pass
