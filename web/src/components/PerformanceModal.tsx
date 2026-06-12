@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MultitrackSegment } from '../api'
 import { api } from '../api'
-import { blobToWav } from '../audio-encode'
+import { audioBufferToWavMulti, blobToWav } from '../audio-encode'
 import { AudioPlayer } from './AudioPlayer'
 import ToolModal from './ToolModal'
 
@@ -25,26 +25,45 @@ const STRENGTH_HINT: Record<Mode, string[]> = {
   ],
 }
 
-/** Record / upload / edit a vocal performance for a segment, render it in
- * place, then save it as the segment's V2V source + output trim/gain. */
+/** Universal dialogue modal: record/upload a take, Whisper it to text, render
+ * in place and hear it. With "Capture performance" ON the take drives a V2V
+ * transfer; OFF it's a plain TTS render of the dialogue. Also works in draft
+ * mode ("Record dialog") where the first render inserts a brand-new segment. */
 export default function PerformanceModal({
   seg,
+  draft,
+  defaultCapture,
   withMic,
   onSave,
   onRender,
+  onRenderPlain,
+  onInsertRender,
+  onSetText,
   onApplyOutput,
   onWhisper,
   onClose,
 }: {
-  seg: MultitrackSegment
+  seg: MultitrackSegment | null
+  draft: { speakerId: string; startS: number } | null
+  defaultCapture: boolean
   withMic: boolean
-  onSave: (wav: Blob | null, params: PerfParams) => Promise<void>
-  onRender: (wav: Blob | null, params: PerfParams) => Promise<MultitrackSegment | null>
-  onApplyOutput: (fields: { trim_start_s?: number; trim_end_s?: number; gain_db?: number }) => void
+  onSave: (index: number, wav: Blob | null, params: PerfParams) => Promise<void>
+  onRender: (index: number, wav: Blob | null, params: PerfParams) => Promise<MultitrackSegment | null>
+  onRenderPlain: (index: number, text: string) => Promise<MultitrackSegment | null>
+  onInsertRender: (
+    text: string,
+    perf: { wav: Blob | null; params: PerfParams } | null,
+  ) => Promise<MultitrackSegment | null>
+  onSetText: (index: number, text: string) => void
+  onApplyOutput: (index: number, fields: { trim_start_s?: number; trim_end_s?: number; gain_db?: number }) => void
   onWhisper: (wav: Blob) => Promise<string>
   onClose: () => void
 }) {
-  const existing = seg.perform || null
+  const existing = seg?.perform || null
+  // Draft mode starts with no segment; the first render inserts one and we
+  // keep targeting it from then on.
+  const [liveIndex, setLiveIndex] = useState<number | null>(seg?.index ?? null)
+  const [capture, setCapture] = useState(defaultCapture)
   const [take, setTake] = useState<{ blob: Blob | null; url: string } | null>(
     existing ? { blob: null, url: existing.url } : null,
   )
@@ -54,12 +73,16 @@ export default function PerformanceModal({
   const [speed, setSpeed] = useState(existing?.speed ?? 1)
   const [previewSpeed, setPreviewSpeed] = useState(existing?.speed ?? 1)
   const [mode, setMode] = useState<Mode>(existing?.mode ?? 'character')
-  const [strength, setStrength] = useState(existing?.strength ?? 3)
-  const [text, setText] = useState(seg.text)
+  // 4 is the sweet spot for character mode on most voices (the anneal25 gold standard).
+  const [strength, setStrength] = useState(existing?.strength ?? 4)
+  const [text, setText] = useState(seg?.text ?? '')
   // Cleanup defaults ON for fresh takes (raw mic input without it sounds bad);
   // re-editing a saved take starts off so we don't double-process it.
   const [cleanIsolate, setCleanIsolate] = useState(!existing)
   const [cleanDereverb, setCleanDereverb] = useState(!existing)
+  const [autoWhisper, setAutoWhisper] = useState(true)
+  const autoWhisperRef = useRef(true)
+  autoWhisperRef.current = autoWhisper
   const [processing, setProcessing] = useState(false)
   const [busy, setBusy] = useState<'whisper' | 'save' | 'render' | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -72,6 +95,7 @@ export default function PerformanceModal({
   // A/B + split inspection playback.
   const [abPlaying, setAbPlaying] = useState<null | 'ab' | 'split'>(null)
   const abCtxRef = useRef<AudioContext | null>(null)
+  const [abSaving, setAbSaving] = useState<null | 'ab' | 'split'>(null)
 
   const recRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
@@ -82,6 +106,7 @@ export default function PerformanceModal({
   // True once params/take changed after the last render/save (so Save knows
   // whether it still needs to push params and re-arm the clip).
   const dirtyRef = useRef(false)
+  const textDirtyRef = useRef(false)
 
   // getUserMedia only exists on secure origins (https:// or localhost). Plain
   // http:// over the LAN hides the whole API — explain instead of erroring.
@@ -110,18 +135,21 @@ export default function PerformanceModal({
   }, [])
 
   const applyCleanup = useCallback(
-    async (base: Blob, isolate: boolean, dereverb: boolean) => {
+    async (base: Blob, isolate: boolean, dereverb: boolean): Promise<Blob> => {
       if (!isolate && !dereverb) {
         setTakeBlob(base)
-        return
+        return base
       }
       setProcessing(true)
       setError(null)
       try {
         const processed = await api.processClip(base, { isolate, dereverb })
         setTakeBlob(processed)
+        return processed
       } catch (e) {
         setError(`Cleanup failed: ${e instanceof Error ? e.message : e}`)
+        setTakeBlob(base)
+        return base
       } finally {
         setProcessing(false)
       }
@@ -129,19 +157,40 @@ export default function PerformanceModal({
     [setTakeBlob],
   )
 
+  const whisperBlob = useCallback(
+    async (blob: Blob) => {
+      setBusy('whisper')
+      setError(null)
+      try {
+        const t = await onWhisper(blob)
+        if (t) {
+          setText(t)
+          textDirtyRef.current = true
+          dirtyRef.current = true
+        }
+      } catch (e) {
+        setError(`Whisper failed: ${e instanceof Error ? e.message : e}`)
+      } finally {
+        setBusy(null)
+      }
+    },
+    [onWhisper],
+  )
+
   const adoptBlob = useCallback(
-    async (raw: Blob) => {
+    async (raw: Blob, fromRecording = false) => {
       setError(null)
       try {
         // Decode + peak-normalize: browser captures are often very quiet.
         const { wav } = await blobToWav(raw, 0.9)
         rawRef.current = wav
-        await applyCleanup(wav, cleanIsolate, cleanDereverb)
+        const finalTake = await applyCleanup(wav, cleanIsolate, cleanDereverb)
+        if (fromRecording && autoWhisperRef.current) await whisperBlob(finalTake)
       } catch (e) {
         setError(`Could not decode audio: ${e instanceof Error ? e.message : e}`)
       }
     },
-    [applyCleanup, cleanIsolate, cleanDereverb],
+    [applyCleanup, cleanIsolate, cleanDereverb, whisperBlob],
   )
 
   // Make sure we have the raw take as a blob (re-fetch a previously saved one).
@@ -181,7 +230,7 @@ export default function PerformanceModal({
       }
       rec.onstop = () => {
         stream.getTracks().forEach((t) => t.stop())
-        void adoptBlob(new Blob(chunksRef.current, { type: rec.mimeType || 'audio/webm' }))
+        void adoptBlob(new Blob(chunksRef.current, { type: rec.mimeType || 'audio/webm' }), true)
       }
       recRef.current = rec
       rec.start()
@@ -220,22 +269,12 @@ export default function PerformanceModal({
     speed,
     mode,
     strength,
-    text: text.trim() && text.trim() !== seg.text ? text.trim() : undefined,
+    text: text.trim() && text.trim() !== (seg?.text ?? '') ? text.trim() : undefined,
   })
 
   const whisper = async () => {
-    setBusy('whisper')
-    setError(null)
-    try {
-      const b = await takeBlob()
-      if (!b) return
-      const t = await onWhisper(b)
-      if (t) setText(t)
-    } catch (e) {
-      setError(`Whisper failed: ${e instanceof Error ? e.message : e}`)
-    } finally {
-      setBusy(null)
-    }
+    const b = await takeBlob()
+    if (b) await whisperBlob(b)
   }
 
   const render = async () => {
@@ -243,16 +282,28 @@ export default function PerformanceModal({
     setError(null)
     stopAb()
     try {
-      const newSeg = await onRender(take?.blob ?? null, params())
+      const txt = text.trim()
+      if (!txt) throw new Error('Dialogue text is required — Whisper the take or type the line')
+      let newSeg: MultitrackSegment | null = null
+      if (liveIndex == null) {
+        // Draft (Record Dialog): the first render inserts the segment.
+        newSeg = await onInsertRender(txt, capture ? { wav: take?.blob ?? null, params: params() } : null)
+        if (newSeg) setLiveIndex(newSeg.index)
+      } else if (capture) {
+        newSeg = await onRender(liveIndex, take?.blob ?? null, params())
+      } else {
+        newSeg = await onRenderPlain(liveIndex, txt)
+      }
       if (!newSeg) throw new Error('Render returned no segment')
       dirtyRef.current = false
+      textDirtyRef.current = false
       const url = newSeg.url + (newSeg.url.includes('?') ? '&' : '?') + `cb=${Date.now()}`
-      // Copy the take's trim lines onto the output (scaled by take speed, since
-      // speed is baked into the render). Not locked — adjust freely after.
-      const tt = takeTrimRef.current
+      // Capture mode transfers timing, so the take's trim lines map onto the
+      // output (scaled by take speed). Plain TTS has its own timing — no copy.
       let trimStart: number | undefined
       let trimEnd: number | undefined
-      if (tt && (tt.start > 0.01 || tt.end < tt.dur - 0.01)) {
+      const tt = takeTrimRef.current
+      if (capture && tt && (tt.start > 0.01 || tt.end < tt.dur - 0.01)) {
         const spd = speed || 1
         trimStart = tt.start / spd
         trimEnd = tt.end / spd
@@ -273,12 +324,25 @@ export default function PerformanceModal({
     setAbPlaying(null)
   }
 
+  const comparisonPieces = async (decode: (src: Blob | string) => Promise<AudioBuffer>) => {
+    if (!output) return null
+    const takeSrc = take?.blob ?? take?.url
+    if (!takeSrc) return null
+    const [bufA, bufB] = await Promise.all([decode(takeSrc), decode(output.url)])
+    const tt = takeTrimRef.current
+    const aStart = tt?.start ?? 0
+    const aDur = Math.max(0.05, (tt?.end ?? bufA.duration) - aStart)
+    const od = outDraftRef.current
+    const bStart = od?.trimStart ?? 0
+    const bDur = Math.max(0.05, (od?.trimEnd ?? bufB.duration) - bStart)
+    return { bufA, bufB, aStart, aDur, bStart, bDur, aGain: gain, bGain: od?.gain ?? 0, spd: speed || 1 }
+  }
+
   const playAb = async (kind: 'ab' | 'split') => {
     if (abPlaying) {
       stopAb()
       return
     }
-    if (!output) return
     setError(null)
     try {
       const ctx = new AudioContext()
@@ -287,17 +351,9 @@ export default function PerformanceModal({
         const arr = typeof src === 'string' ? await (await fetch(src)).arrayBuffer() : await src.arrayBuffer()
         return ctx.decodeAudioData(arr)
       }
-      const takeSrc = take?.blob ?? take?.url
-      if (!takeSrc) throw new Error('No take loaded')
-      const [bufA, bufB] = await Promise.all([decode(takeSrc), decode(output.url)])
+      const p = await comparisonPieces(decode)
+      if (!p) throw new Error('No take loaded')
       if (abCtxRef.current !== ctx) return // stopped while decoding
-
-      const tt = takeTrimRef.current
-      const aStart = tt?.start ?? 0
-      const aDur = Math.max(0.05, (tt?.end ?? bufA.duration) - aStart)
-      const od = outDraftRef.current
-      const bStart = od?.trimStart ?? 0
-      const bDur = Math.max(0.05, (od?.trimEnd ?? bufB.duration) - bStart)
 
       const mk = (buf: AudioBuffer, gDb: number, pan: number, rate: number) => {
         const src = ctx.createBufferSource()
@@ -305,32 +361,31 @@ export default function PerformanceModal({
         src.playbackRate.value = rate
         const g = ctx.createGain()
         g.gain.value = Math.pow(10, gDb / 20)
-        const p = ctx.createStereoPanner()
-        p.pan.value = pan
+        const pn = ctx.createStereoPanner()
+        pn.pan.value = pan
         src.connect(g)
-        g.connect(p)
-        p.connect(ctx.destination)
+        g.connect(pn)
+        pn.connect(ctx.destination)
         return src
       }
-      const spd = speed || 1
       if (kind === 'ab') {
         // Take (trimmed, at render speed/gain) then the render, back-to-back.
-        const a = mk(bufA, gain, 0, spd)
-        const b = mk(bufB, outDraftRef.current?.gain ?? 0, 0, 1)
+        const a = mk(p.bufA, p.aGain, 0, p.spd)
+        const b = mk(p.bufB, p.bGain, 0, 1)
         const t0 = ctx.currentTime + 0.05
-        a.start(t0, aStart, aDur)
-        b.start(t0 + aDur / spd + 0.25, bStart, bDur)
+        a.start(t0, p.aStart, p.aDur)
+        b.start(t0 + p.aDur / p.spd + 0.25, p.bStart, p.bDur)
         b.onended = () => {
           if (abCtxRef.current === ctx) stopAb()
         }
       } else {
         // Simultaneous: take hard-left, render hard-right.
-        const a = mk(bufA, gain, -1, spd)
-        const b = mk(bufB, outDraftRef.current?.gain ?? 0, 1, 1)
+        const a = mk(p.bufA, p.aGain, -1, p.spd)
+        const b = mk(p.bufB, p.bGain, 1, 1)
         const t0 = ctx.currentTime + 0.05
-        a.start(t0, aStart, aDur)
-        b.start(t0, bStart, bDur)
-        const longer = aDur / spd >= bDur ? a : b
+        a.start(t0, p.aStart, p.aDur)
+        b.start(t0, p.bStart, p.bDur)
+        const longer = p.aDur / p.spd >= p.bDur ? a : b
         longer.onended = () => {
           if (abCtxRef.current === ctx) stopAb()
         }
@@ -342,18 +397,82 @@ export default function PerformanceModal({
     }
   }
 
+  // Offline-render the same composition to a WAV download. A/B is mono; the
+  // split export is true stereo (take left, render right).
+  const downloadAb = async (kind: 'ab' | 'split') => {
+    setAbSaving(kind)
+    setError(null)
+    const dctx = new AudioContext()
+    try {
+      const decode = async (src: Blob | string) => {
+        const arr = typeof src === 'string' ? await (await fetch(src)).arrayBuffer() : await src.arrayBuffer()
+        return dctx.decodeAudioData(arr)
+      }
+      const p = await comparisonPieces(decode)
+      if (!p) throw new Error('No take loaded')
+      const sr = p.bufB.sampleRate
+      const total =
+        kind === 'ab' ? p.aDur / p.spd + 0.25 + p.bDur : Math.max(p.aDur / p.spd, p.bDur)
+      const off = new OfflineAudioContext(kind === 'split' ? 2 : 1, Math.ceil((total + 0.1) * sr), sr)
+      const mk = (buf: AudioBuffer, gDb: number, pan: number, rate: number) => {
+        const src = off.createBufferSource()
+        src.buffer = buf
+        src.playbackRate.value = rate
+        const g = off.createGain()
+        g.gain.value = Math.pow(10, gDb / 20)
+        src.connect(g)
+        if (kind === 'split') {
+          const pn = off.createStereoPanner()
+          pn.pan.value = pan
+          g.connect(pn)
+          pn.connect(off.destination)
+        } else {
+          g.connect(off.destination)
+        }
+        return src
+      }
+      const a = mk(p.bufA, p.aGain, -1, p.spd)
+      const b = mk(p.bufB, p.bGain, 1, 1)
+      a.start(0, p.aStart, p.aDur)
+      b.start(kind === 'ab' ? p.aDur / p.spd + 0.25 : 0, p.bStart, p.bDur)
+      const rendered = await off.startRendering()
+      const blob = audioBufferToWavMulti(rendered)
+      const aEl = document.createElement('a')
+      aEl.href = URL.createObjectURL(blob)
+      const base = `clip${liveIndex ?? 'new'}_${kind === 'ab' ? 'a-b' : 'split_LR'}`
+      aEl.download = `${base}.wav`
+      aEl.click()
+      setTimeout(() => URL.revokeObjectURL(aEl.href), 2000)
+    } catch (e) {
+      setError(`Comparison export failed: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      void dctx.close()
+      setAbSaving(null)
+    }
+  }
+
   const save = async () => {
     setBusy('save')
     setError(null)
     try {
-      // Push params/take only if they changed since the last render — saving
-      // identical params would re-arm the clip even though the render is fresh.
-      if (dirtyRef.current || !output) {
-        await onSave(take?.blob ?? null, params())
-      }
-      const d = outDraftRef.current
-      if (output && d) {
-        onApplyOutput({ trim_start_s: d.trimStart, trim_end_s: d.trimEnd, gain_db: d.gain })
+      const txt = text.trim()
+      if (liveIndex == null) {
+        // Draft that was never rendered: Save runs the insert so it's not a no-op.
+        if (!txt) throw new Error('Dialogue text is required')
+        const ns = await onInsertRender(txt, capture && take ? { wav: take.blob, params: params() } : null)
+        if (!ns) throw new Error('Insert failed')
+      } else {
+        if (capture && take) {
+          // Push params/take only if they changed since the last render — saving
+          // identical params would re-arm the clip even though the render is fresh.
+          if (dirtyRef.current || !output) await onSave(liveIndex, take.blob, params())
+        } else if (!capture && textDirtyRef.current && txt) {
+          onSetText(liveIndex, txt)
+        }
+        const d = outDraftRef.current
+        if (output && d) {
+          onApplyOutput(liveIndex, { trim_start_s: d.trimStart, trim_end_s: d.trimEnd, gain_db: d.gain })
+        }
       }
       onClose()
     } catch (e) {
@@ -364,30 +483,68 @@ export default function PerformanceModal({
 
   const hasTake = take != null
   const working = busy != null || processing
+  const canRender = !recording && !working && !!text.trim() && (!capture || hasTake)
+  const canSave = !recording && !working && (liveIndex != null ? (capture ? hasTake : true) : !!text.trim())
   return (
     <ToolModal
       open
-      title={<span>🎙 Vocal performance — clip {seg.index}</span>}
+      title={
+        <span>
+          🎙 {seg ? `Vocal performance — clip ${seg.index}` : draft ? `Record dialog — speaker ${draft.speakerId} @ ${draft.startS.toFixed(1)}s` : 'Record dialog'}
+        </span>
+      }
       onClose={onClose}
       actions={
         <>
           <button
-            className="btn sm perf-glow"
-            disabled={!hasTake || recording || working}
-            title="Run the voice transfer now and hear the result without leaving the modal"
+            className={`btn sm${capture ? ' perf-glow' : ''}`}
+            disabled={!canRender}
+            title={
+              liveIndex == null
+                ? 'Insert the new clip on the track and render it now'
+                : capture
+                ? 'Run the voice transfer now and hear the result without leaving the modal'
+                : 'Re-render the dialogue (plain TTS) and hear it here'
+            }
             onClick={render}
           >
             {busy === 'render' ? <span className="spinner sm" /> : '⚡'} Render
           </button>
-          <button className="btn sm primary" disabled={!hasTake || recording || working} onClick={save}>
+          <button className="btn sm primary" disabled={!canSave} onClick={save}>
             {busy === 'save' ? <span className="spinner sm" /> : '💾'} Save
           </button>
         </>
       }
     >
-      <div className="hint" style={{ marginBottom: 10 }}>
-        Act the line yourself — timing, pauses, emphasis, emotion. The clip's voice is painted
-        over <em>your</em> performance. <strong>⚡ Render</strong> runs it right here so you can dial in the sliders.
+      <div className="flex-between" style={{ marginBottom: 10, gap: 10 }}>
+        <span className="hint" style={{ flex: 1 }}>
+          {capture ? (
+            <>
+              Act the line yourself — timing, pauses, emphasis, emotion. The clip's voice is painted over{' '}
+              <em>your</em> performance.
+            </>
+          ) : (
+            <>
+              Speak (or type) the line, Whisper fills the dialogue, <strong>⚡ Render</strong> speaks it in the
+              track's voice. Want your delivery transferred too? Flip on <strong>Capture performance</strong>.
+            </>
+          )}
+        </span>
+        <label
+          className="hint"
+          style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', whiteSpace: 'nowrap' }}
+          title="ON: your take drives timing & delivery (V2V transfer). OFF: the recording is just dictation for the dialogue text."
+        >
+          <input
+            type="checkbox"
+            checked={capture}
+            onChange={(e) => {
+              setCapture(e.target.checked)
+              markDirty()
+            }}
+          />
+          🎭 Capture performance
+        </label>
       </div>
 
       {withMic && !micSupported && (
@@ -427,6 +584,16 @@ export default function PerformanceModal({
           </label>
         )}
         {recording && <span className="rec-dot" aria-label="recording" />}
+        {!recording && (
+          <label
+            className="hint"
+            style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}
+            title="Transcribe automatically when a recording stops (uncheck for long takes you'd rather Whisper manually)"
+          >
+            <input type="checkbox" checked={autoWhisper} onChange={(e) => setAutoWhisper(e.target.checked)} />
+            Auto-Whisper
+          </label>
+        )}
         {hasTake && !recording && (
           <>
             <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
@@ -452,14 +619,14 @@ export default function PerformanceModal({
         )}
       </div>
 
-      {hasTake && !recording && (
+      {capture && hasTake && !recording && (
         <div style={{ marginTop: 10 }}>
           <AudioPlayer
             key={take.url}
             url={take.url}
             autoPlay={false}
             showDownload
-            filename={`clip${seg.index}_performance_take.wav`}
+            filename={`clip${liveIndex ?? 'new'}_performance_take.wav`}
             initialGain={gain}
             playbackRate={previewSpeed}
             onTrimChange={(s, e, dur) => {
@@ -491,49 +658,49 @@ export default function PerformanceModal({
             Takes are auto-leveled on capture · dB boost via the player's dB control · speed &amp; gain are baked in at
             render time.
           </div>
+
+          {/* V2V mode + strength */}
+          <div className="row" style={{ gap: 8, marginTop: 14, alignItems: 'center' }}>
+            <span className="hint" style={{ minWidth: 50 }}>Mode</span>
+            <button
+              className={`btn sm${mode === 'character' ? ' on' : ''}`}
+              title="The voice's OWN mannerisms and delivery take over your read (timing preserved)"
+              onClick={() => {
+                setMode('character')
+                markDirty()
+              }}
+            >
+              🎭 Character swap
+            </button>
+            <button
+              className={`btn sm${mode === 'voice' ? ' on' : ''}`}
+              title="Pure timbre swap: YOUR exact delivery and cadence, their voice"
+              onClick={() => {
+                setMode('voice')
+                markDirty()
+              }}
+            >
+              🎤 Voice swap
+            </button>
+          </div>
+          <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
+            <span style={{ minWidth: 130 }}>Strength · {strength}</span>
+            <input
+              type="range"
+              min={1}
+              max={5}
+              step={1}
+              value={strength}
+              style={{ flex: 1 }}
+              onChange={(e) => {
+                setStrength(parseInt(e.target.value, 10))
+                markDirty()
+              }}
+            />
+          </label>
+          <div className="hint" style={{ opacity: 0.8 }}>{STRENGTH_HINT[mode][strength - 1]}</div>
         </div>
       )}
-
-      {/* V2V mode + strength */}
-      <div className="row" style={{ gap: 8, marginTop: 14, alignItems: 'center' }}>
-        <span className="hint" style={{ minWidth: 50 }}>Mode</span>
-        <button
-          className={`btn sm${mode === 'character' ? ' on' : ''}`}
-          title="The voice's OWN mannerisms and delivery take over your read (timing preserved)"
-          onClick={() => {
-            setMode('character')
-            markDirty()
-          }}
-        >
-          🎭 Character swap
-        </button>
-        <button
-          className={`btn sm${mode === 'voice' ? ' on' : ''}`}
-          title="Pure timbre swap: YOUR exact delivery and cadence, their voice"
-          onClick={() => {
-            setMode('voice')
-            markDirty()
-          }}
-        >
-          🎤 Voice swap
-        </button>
-      </div>
-      <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
-        <span style={{ minWidth: 130 }}>Strength · {strength}</span>
-        <input
-          type="range"
-          min={1}
-          max={5}
-          step={1}
-          value={strength}
-          style={{ flex: 1 }}
-          onChange={(e) => {
-            setStrength(parseInt(e.target.value, 10))
-            markDirty()
-          }}
-        />
-      </label>
-      <div className="hint" style={{ opacity: 0.8 }}>{STRENGTH_HINT[mode][strength - 1]}</div>
 
       {/* Dialogue + Whisper */}
       <div className="flex-between" style={{ marginTop: 14, marginBottom: 4 }}>
@@ -550,8 +717,9 @@ export default function PerformanceModal({
           <button
             className="btn sm ghost"
             onClick={() => {
-              setText(seg.text)
+              setText(seg?.text ?? '')
               markDirty()
+              textDirtyRef.current = true
             }}
             title="Revert to the segment's text"
           >
@@ -566,8 +734,9 @@ export default function PerformanceModal({
         onChange={(e) => {
           setText(e.target.value)
           markDirty()
+          textDirtyRef.current = true
         }}
-        placeholder="Dialogue for this performance…"
+        placeholder="Dialogue for this clip…"
       />
 
       {/* Rendered output: trim + gain here apply to the segment on save */}
@@ -575,31 +744,50 @@ export default function PerformanceModal({
         <div style={{ marginTop: 14, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
           <div className="flex-between" style={{ marginBottom: 4 }}>
             <span className="hint">
-              <strong>Rendered output</strong> — trim &amp; gain apply to the clip on Save (trim copied from the take).
+              <strong>Rendered output</strong> — trim &amp; gain apply to the clip on Save
+              {capture ? ' (trim copied from the take)' : ''}.
             </span>
-            <div className="row" style={{ gap: 6 }}>
-              <button
-                className={`btn sm${abPlaying === 'ab' ? ' on' : ''}`}
-                title="Play your take, then the render, back-to-back (both trimmed)"
-                onClick={() => void playAb('ab')}
-              >
-                {abPlaying === 'ab' ? '■ Stop' : '▶ A/B'}
-              </button>
-              <button
-                className={`btn sm${abPlaying === 'split' ? ' on' : ''}`}
-                title="Play both at once — take in the left ear, render in the right"
-                onClick={() => void playAb('split')}
-              >
-                {abPlaying === 'split' ? '■ Stop' : '▶ Split L/R'}
-              </button>
-            </div>
+            {hasTake && (
+              <div className="row" style={{ gap: 6 }}>
+                <button
+                  className={`btn sm${abPlaying === 'ab' ? ' on' : ''}`}
+                  title="Play your take, then the render, back-to-back (both trimmed)"
+                  onClick={() => void playAb('ab')}
+                >
+                  {abPlaying === 'ab' ? '■ Stop' : '▶ A/B'}
+                </button>
+                <button
+                  className="btn sm ghost"
+                  disabled={abSaving != null}
+                  title="Download the A/B comparison as one WAV"
+                  onClick={() => void downloadAb('ab')}
+                >
+                  {abSaving === 'ab' ? <span className="spinner sm" /> : '⬇'}
+                </button>
+                <button
+                  className={`btn sm${abPlaying === 'split' ? ' on' : ''}`}
+                  title="Play both at once — take in the left ear, render in the right"
+                  onClick={() => void playAb('split')}
+                >
+                  {abPlaying === 'split' ? '■ Stop' : '▶ Split L/R'}
+                </button>
+                <button
+                  className="btn sm ghost"
+                  disabled={abSaving != null}
+                  title="Download the stereo split (take left, render right) as one WAV — the adherence demo"
+                  onClick={() => void downloadAb('split')}
+                >
+                  {abSaving === 'split' ? <span className="spinner sm" /> : '⬇'}
+                </button>
+              </div>
+            )}
           </div>
           <AudioPlayer
             key={output.url}
             url={output.url}
             autoPlay
             showDownload
-            filename={`clip${seg.index}_performance_render.wav`}
+            filename={`clip${liveIndex ?? 'new'}_performance_render.wav`}
             initialStart={output.trimStart}
             initialEnd={output.trimEnd}
             onTrimChange={(s, e) => {
@@ -618,8 +806,17 @@ export default function PerformanceModal({
 
       {error && <div className="hint" style={{ color: 'var(--bad, #e66)', marginTop: 8 }}>{error}</div>}
       <div className="hint" style={{ marginTop: 10, opacity: 0.75 }}>
-        <strong>⚡ Render</strong> runs the transfer now (clip updates on the track too) · <strong>💾 Save</strong>{' '}
-        stores the take + settings{output ? ' and applies the output trim/gain' : ' and arms the clip (gold) for the next regenerate'}.
+        <strong>⚡ Render</strong>{' '}
+        {liveIndex == null
+          ? 'inserts the new clip on the track and renders it'
+          : 'runs it now (clip updates on the track too)'}{' '}
+        · <strong>💾 Save</strong>{' '}
+        {capture
+          ? output
+            ? 'stores the take + settings and applies the output trim/gain'
+            : 'stores the take + settings and arms the clip (gold) for the next regenerate'
+          : 'keeps the dialogue text' + (output ? ' and applies the output trim/gain' : '')}
+        .
       </div>
     </ToolModal>
   )

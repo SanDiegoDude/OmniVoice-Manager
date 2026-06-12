@@ -73,6 +73,8 @@ export function MultitrackEditor({
   playCue,
   onSetPerformance,
   onRenderPerformance,
+  onRegenAndWait,
+  onInsertAndRender,
   onClearPerformance,
   onTranscribeClip,
   regenIndex,
@@ -114,6 +116,16 @@ export function MultitrackEditor({
     wav: Blob | null,
     params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
   ) => Promise<MultitrackSegment | null>
+  onRegenAndWait: (index: number, text?: string) => Promise<MultitrackSegment | null>
+  onInsertAndRender: (
+    speakerId: string,
+    text: string,
+    startS: number,
+    perf: {
+      wav: Blob | null
+      params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string }
+    } | null,
+  ) => Promise<MultitrackSegment | null>
   onClearPerformance: (index: number) => Promise<void>
   onTranscribeClip: (wav: Blob) => Promise<string>
   regenIndex: number | null
@@ -136,7 +148,11 @@ export function MultitrackEditor({
   const [trimDraft, setTrimDraft] = useState<TrimDraft>({ trimStart: 0, trimEnd: 0, speed: 1, gain: 0 })
   const [trimText, setTrimText] = useState('')
   const [transcribing, setTranscribing] = useState<number | 'trim' | null>(null)
-  const [perfModal, setPerfModal] = useState<{ index: number; mic: boolean } | null>(null)
+  const [perfModal, setPerfModal] = useState<
+    | { index: number; mic: boolean; capture: boolean }
+    | { draft: { speakerId: string; startS: number }; mic: boolean; capture: boolean }
+    | null
+  >(null)
   const [slicing, setSlicing] = useState<number | null>(null)
   const [inpainting, setInpainting] = useState<number | null>(null)
   const [promoting, setPromoting] = useState<string | null>(null)
@@ -979,6 +995,19 @@ export function MultitrackEditor({
                 </button>
                 <button
                   className="btn sm"
+                  disabled={insertAudio}
+                  title={insertAudio ? 'Uploaded audio tracks are not generative' : 'Speak the line, Whisper transcribes it, render it here in this track\u2019s voice'}
+                  onClick={() => {
+                    const speakerId = insert.speakerId
+                    const startS = insert.start_s
+                    setInsert(null)
+                    setPerfModal({ draft: { speakerId, startS }, mic: true, capture: false })
+                  }}
+                >
+                  🎙 Record dialog…
+                </button>
+                <button
+                  className="btn sm"
                   onClick={() => {
                     const a = insert.start_s
                     setInsert(null)
@@ -1093,14 +1122,14 @@ export function MultitrackEditor({
                       <button
                         className="btn sm"
                         title="Act the line yourself and paint this clip's voice over YOUR performance (timing, emphasis, emotion preserved)"
-                        onClick={() => { setPerfModal({ index: seg.index, mic: true }); setSegMenu(null) }}
+                        onClick={() => { setPerfModal({ index: seg.index, mic: true, capture: true }); setSegMenu(null) }}
                       >
                         🎙 Record vocal performance…
                       </button>
                       <button
                         className="btn sm"
                         title="Import a recorded performance from a file"
-                        onClick={() => { setPerfModal({ index: seg.index, mic: false }); setSegMenu(null) }}
+                        onClick={() => { setPerfModal({ index: seg.index, mic: false, capture: true }); setSegMenu(null) }}
                       >
                         📁 Import vocal performance…
                       </button>
@@ -1109,7 +1138,7 @@ export function MultitrackEditor({
                     <>
                       <button
                         className="btn sm on"
-                        onClick={() => { setPerfModal({ index: seg.index, mic: true }); setSegMenu(null) }}
+                        onClick={() => { setPerfModal({ index: seg.index, mic: true, capture: true }); setSegMenu(null) }}
                       >
                         🎙 Edit performance ({seg.perform.mode === 'voice' ? 'voice' : 'character'} · {seg.perform.strength})
                       </button>
@@ -1193,17 +1222,26 @@ export function MultitrackEditor({
         </ToolModal>
       )}
 
-      {/* Vocal performance tool modal */}
+      {/* Vocal performance / record-dialog tool modal */}
       {perfModal && (() => {
-        const seg = flatSegs.find((s) => s.index === perfModal.index)
-        if (!seg) return null
+        const segIndex = 'index' in perfModal ? perfModal.index : null
+        const seg = segIndex != null ? flatSegs.find((s) => s.index === segIndex) ?? null : null
+        if (segIndex != null && !seg) return null
+        const draft = 'draft' in perfModal ? perfModal.draft : null
         return (
           <PerformanceModal
             seg={seg}
+            draft={draft}
+            defaultCapture={perfModal.capture}
             withMic={perfModal.mic}
-            onSave={(wav, params) => onSetPerformance(seg.index, wav, params)}
-            onRender={(wav, params) => onRenderPerformance(seg.index, wav, params)}
-            onApplyOutput={(fields) => onEditSegment(seg.index, fields)}
+            onSave={(i, wav, params) => onSetPerformance(i, wav, params)}
+            onRender={(i, wav, params) => onRenderPerformance(i, wav, params)}
+            onRenderPlain={(i, text) => onRegenAndWait(i, text)}
+            onInsertRender={(text, perf) =>
+              draft ? onInsertAndRender(draft.speakerId, text, draft.startS, perf) : Promise.resolve(null)
+            }
+            onSetText={(i, text) => onSetText(i, text)}
+            onApplyOutput={(i, fields) => onEditSegment(i, fields)}
             onWhisper={onTranscribeClip}
             onClose={() => setPerfModal(null)}
           />

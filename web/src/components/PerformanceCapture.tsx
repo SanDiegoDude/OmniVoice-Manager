@@ -49,11 +49,15 @@ export function PerformanceCapture({
   const [speed, setSpeed] = useState(1)
   const [previewSpeed, setPreviewSpeed] = useState(1)
   const [mode, setMode] = useState<Mode>('character')
-  const [strength, setStrength] = useState(3)
+  // 4 is the sweet spot for character mode on most voices (the anneal25 gold standard).
+  const [strength, setStrength] = useState(4)
   const [cleanIsolate, setCleanIsolate] = useState(true)
   const [cleanDereverb, setCleanDereverb] = useState(true)
   const [processing, setProcessing] = useState(false)
   const [whispering, setWhispering] = useState(false)
+  const [autoWhisper, setAutoWhisper] = useState(true)
+  const autoWhisperRef = useRef(true)
+  autoWhisperRef.current = autoWhisper
 
   const recRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
@@ -86,17 +90,20 @@ export function PerformanceCapture({
   }, [])
 
   const applyCleanup = useCallback(
-    async (base: Blob, isolate: boolean, dereverb: boolean) => {
+    async (base: Blob, isolate: boolean, dereverb: boolean): Promise<Blob> => {
       if (!isolate && !dereverb) {
         setTakeBlob(base)
-        return
+        return base
       }
       setProcessing(true)
       try {
-        setTakeBlob(await api.processClip(base, { isolate, dereverb }))
+        const processed = await api.processClip(base, { isolate, dereverb })
+        setTakeBlob(processed)
+        return processed
       } catch (e) {
         notify(`Cleanup failed: ${e instanceof Error ? e.message : e}`, 'error')
         setTakeBlob(base)
+        return base
       } finally {
         setProcessing(false)
       }
@@ -104,17 +111,33 @@ export function PerformanceCapture({
     [setTakeBlob, notify],
   )
 
+  const whisperBlob = useCallback(
+    async (blob: Blob) => {
+      setWhispering(true)
+      try {
+        const t = await api.transcribeClip(blob)
+        if (t) onWhisperText(t)
+      } catch (e) {
+        notify(`Whisper failed: ${e instanceof Error ? e.message : e}`, 'error')
+      } finally {
+        setWhispering(false)
+      }
+    },
+    [onWhisperText, notify],
+  )
+
   const adoptBlob = useCallback(
-    async (raw: Blob) => {
+    async (raw: Blob, fromRecording = false) => {
       try {
         const { wav } = await blobToWav(raw, 0.9)
         rawRef.current = wav
-        await applyCleanup(wav, cleanIsolate, cleanDereverb)
+        const finalTake = await applyCleanup(wav, cleanIsolate, cleanDereverb)
+        if (fromRecording && autoWhisperRef.current) await whisperBlob(finalTake)
       } catch (e) {
         notify(`Could not decode audio: ${e instanceof Error ? e.message : e}`, 'error')
       }
     },
-    [applyCleanup, cleanIsolate, cleanDereverb, notify],
+    [applyCleanup, cleanIsolate, cleanDereverb, whisperBlob, notify],
   )
 
   const toggleCleanup = async (kind: 'isolate' | 'dereverb', value: boolean) => {
@@ -137,7 +160,7 @@ export function PerformanceCapture({
       }
       rec.onstop = () => {
         stream.getTracks().forEach((t) => t.stop())
-        void adoptBlob(new Blob(chunksRef.current, { type: rec.mimeType || 'audio/webm' }))
+        void adoptBlob(new Blob(chunksRef.current, { type: rec.mimeType || 'audio/webm' }), true)
       }
       recRef.current = rec
       rec.start()
@@ -164,17 +187,8 @@ export function PerformanceCapture({
     setTake(null)
   }
 
-  const whisper = async () => {
-    if (!take) return
-    setWhispering(true)
-    try {
-      const t = await api.transcribeClip(take.blob)
-      if (t) onWhisperText(t)
-    } catch (e) {
-      notify(`Whisper failed: ${e instanceof Error ? e.message : e}`, 'error')
-    } finally {
-      setWhispering(false)
-    }
+  const whisper = () => {
+    if (take) void whisperBlob(take.blob)
   }
 
   return (
@@ -218,6 +232,16 @@ export function PerformanceCapture({
           </label>
         )}
         {recording && <span className="rec-dot" aria-label="recording" />}
+        {!recording && (
+          <label
+            className="hint"
+            style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}
+            title="Transcribe automatically when a recording stops (uncheck for long takes you'd rather Whisper manually)"
+          >
+            <input type="checkbox" checked={autoWhisper} onChange={(e) => setAutoWhisper(e.target.checked)} />
+            Auto-Whisper
+          </label>
+        )}
         {take && !recording && (
           <>
             <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>

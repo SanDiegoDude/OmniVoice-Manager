@@ -26,10 +26,11 @@ import numpy as np
 import torch
 
 # UI weight (1..5) -> knob value, calibrated by ear (see ROADMAP P1-P3 notes).
-# NOTE: release direction is inverted vs. the original guess — in practice a
-# LATE release (high value) gives the character the most takeover, so 5 maps
-# to the highest release point and 1 to the lowest.
-CHARACTER_RELEASE = {1: 0.10, 2: 0.25, 3: 0.40, 4: 0.60, 5: 0.80}
+# Direction re-confirmed by listening across many voices: early release (low
+# value) = more character takeover. 4 (0.25, the "anneal25" gold standard) is
+# the sweet spot for most voices and the UI default; a few rare samples land
+# best at 1's light touch.
+CHARACTER_RELEASE = {1: 0.80, 2: 0.60, 3: 0.40, 4: 0.25, 5: 0.10}
 VOICE_STRIDE = {1: 1, 2: 2, 3: 3, 4: 4, 5: 6}
 
 

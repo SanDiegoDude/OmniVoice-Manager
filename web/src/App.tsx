@@ -136,6 +136,20 @@ export default function App() {
     return () => clearInterval(iv)
   }, [refreshInfo, refreshVoices, refreshHistory, refreshOutputs, refreshProviders])
 
+  // Backstop for swipe-back / accidental close: confirm before leaving while a
+  // scene has content (overscroll-behavior kills the gesture itself; this
+  // catches actual navigation like back-button or tab close).
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if ((sessionRef.current?.segment_count ?? 0) > 0) {
+        e.preventDefault()
+        e.returnValue = ''
+      }
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [])
+
   // Poll the active job.
   useEffect(() => {
     if (!job || job.status === 'done' || job.status === 'error') return
@@ -421,9 +435,26 @@ export default function App() {
     setSession(s)
     notify('Performance saved — hit ↻ Regenerate on the clip to render it', 'success')
   }
+  // Poll a job to completion outside the global poller (used by the in-modal
+  // render flows, so the global job state stays free for the main UI).
+  const waitJob = async (job_id: string): Promise<Job> => {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 700))
+      const j = await api.job(job_id)
+      if (j.status === 'error') throw new Error(j.error || 'Render failed')
+      if (j.status === 'done') return j
+    }
+  }
+  const segInSession = (s: MultitrackSession, index: number): MultitrackSegment | null => {
+    for (const t of s.tracks) {
+      const seg = t.segments.find((sg) => sg.index === index)
+      if (seg) return seg
+    }
+    return null
+  }
+
   // In-modal render: save the performance, fire the regen job, poll it to
-  // completion ourselves (the global job poller stays free), and hand the
-  // refreshed segment back so the modal can preview the output.
+  // completion, and hand the refreshed segment back for output preview.
   const renderPerformance = async (
     index: number,
     wav: Blob | null,
@@ -436,24 +467,68 @@ export default function App() {
     const { job_id } = await api.regenSegment(sid, index)
     setRegenIndex(index)
     try {
-      for (;;) {
-        await new Promise((r) => setTimeout(r, 700))
-        const j = await api.job(job_id)
-        if (j.status === 'error') throw new Error(j.error || 'Render failed')
-        if (j.status === 'done') {
-          const ns = j.result?.session as MultitrackSession | undefined
-          if (!ns) return null
-          setSession(ns)
-          for (const t of ns.tracks) {
-            const seg = t.segments.find((sg) => sg.index === index)
-            if (seg) return seg
-          }
-          return null
-        }
-      }
+      const j = await waitJob(job_id)
+      const ns = j.result?.session as MultitrackSession | undefined
+      if (!ns) return null
+      setSession(ns)
+      return segInSession(ns, index)
     } finally {
       setRegenIndex(null)
     }
+  }
+
+  // In-modal plain TTS render of an existing segment (capture-performance off).
+  const regenSegmentAndWait = async (index: number, text?: string): Promise<MultitrackSegment | null> => {
+    if (!session) return null
+    const { job_id } = await api.regenSegment(session.id, index, text)
+    setRegenIndex(index)
+    try {
+      const j = await waitJob(job_id)
+      const ns = j.result?.session as MultitrackSession | undefined
+      if (!ns) return null
+      setSession(ns)
+      return segInSession(ns, index)
+    } finally {
+      setRegenIndex(null)
+    }
+  }
+
+  // Record Dialog first render: insert a fresh segment (TTS), then optionally
+  // run the performance transfer on top of it. Returns the final segment.
+  const insertAndRender = async (
+    speakerId: string,
+    text: string,
+    startS: number,
+    perf: {
+      wav: Blob | null
+      params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string }
+    } | null,
+  ): Promise<MultitrackSegment | null> => {
+    if (!session) return null
+    const sid = session.id
+    const { job_id } = await api.insertSegment(sid, { speaker_id: speakerId, text, start_s: startS, ripple: false })
+    const j = await waitJob(job_id)
+    let ns = j.result?.session as MultitrackSession | undefined
+    const index = j.result?.inserted_index as number | undefined
+    if (!ns || index === undefined) return null
+    setSession(ns)
+    if (perf) {
+      const s2 = await api.setPerformance(sid, index, perf.wav, perf.params)
+      setSession(s2)
+      const r = await api.regenSegment(sid, index)
+      setRegenIndex(index)
+      try {
+        const j2 = await waitJob(r.job_id)
+        const ns2 = j2.result?.session as MultitrackSession | undefined
+        if (ns2) {
+          setSession(ns2)
+          ns = ns2
+        }
+      } finally {
+        setRegenIndex(null)
+      }
+    }
+    return segInSession(ns, index)
   }
   const clearPerformance = async (index: number) => {
     if (!session) return
@@ -724,6 +799,8 @@ export default function App() {
           playCue={playCue}
           onSetPerformance={setPerformance}
           onRenderPerformance={renderPerformance}
+          onRegenAndWait={regenSegmentAndWait}
+          onInsertAndRender={insertAndRender}
           onClearPerformance={clearPerformance}
           onTranscribeClip={transcribeClip}
           onDeleteSpace={deleteSpace}

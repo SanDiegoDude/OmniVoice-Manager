@@ -89,6 +89,8 @@ export function Studio({
   playCue,
   onSetPerformance,
   onRenderPerformance,
+  onRegenAndWait,
+  onInsertAndRender,
   onClearPerformance,
   onTranscribeClip,
   onFinalize,
@@ -144,6 +146,16 @@ export function Studio({
     index: number,
     wav: Blob | null,
     params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
+  ) => Promise<MultitrackSegment | null>
+  onRegenAndWait: (index: number, text?: string) => Promise<MultitrackSegment | null>
+  onInsertAndRender: (
+    speakerId: string,
+    text: string,
+    startS: number,
+    perf: {
+      wav: Blob | null
+      params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string }
+    } | null,
   ) => Promise<MultitrackSegment | null>
   onClearPerformance: (index: number) => Promise<void>
   onTranscribeClip: (wav: Blob) => Promise<string>
@@ -618,6 +630,8 @@ export function Studio({
             playCue={playCue}
             onSetPerformance={onSetPerformance}
             onRenderPerformance={onRenderPerformance}
+            onRegenAndWait={onRegenAndWait}
+            onInsertAndRender={onInsertAndRender}
             onClearPerformance={onClearPerformance}
             onTranscribeClip={onTranscribeClip}
             regenIndex={regenIndex}
