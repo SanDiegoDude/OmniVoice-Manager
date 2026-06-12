@@ -105,6 +105,10 @@ export interface MultitrackSegment {
   trim_end_s: number
   speed: number
   gain_db: number
+  fade_in_s: number
+  fade_out_s: number
+  /** Audio-content revision (file mtime) — stable cache key for waveform peaks. */
+  rev: number
   inpaint?: boolean
   has_bed?: boolean
   preserve_nonvocal?: boolean
@@ -260,12 +264,26 @@ export const api = {
   editSegment: (
     sid: string,
     index: number,
-    fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number },
+    fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number; gain_db?: number; fade_in_s?: number; fade_out_s?: number },
   ) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/edit`, {
       method: 'POST',
       body: JSON.stringify(fields),
     }),
+  moveSegment: (sid: string, index: number, speaker_id: string, start_s?: number) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/move`, {
+      method: 'POST',
+      body: JSON.stringify({ speaker_id, start_s }),
+    }),
+  reorderTracks: (sid: string, order: string[]) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/track-order`, {
+      method: 'POST',
+      body: JSON.stringify({ order }),
+    }),
+  segmentPeaks: (sid: string, index: number, n = 800) =>
+    jfetch<{ index: number; peaks: number[]; raw_duration_s: number }>(
+      `/api/multitrack/${sid}/segment/${index}/peaks?n=${n}`,
+    ),
   reflowSession: (sid: string, fields: { gap_ms?: number; speed?: number }) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/reflow`, { method: 'POST', body: JSON.stringify(fields) }),
   insertSegment: (sid: string, body: { speaker_id: string; text: string; start_s: number; ripple: boolean }) =>

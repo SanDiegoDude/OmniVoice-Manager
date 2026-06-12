@@ -63,6 +63,19 @@ class EditSegmentRequest(BaseModel):
     trim_end_s: Optional[float] = None
     speed: Optional[float] = None
     gain_db: Optional[float] = None
+    fade_in_s: Optional[float] = None
+    fade_out_s: Optional[float] = None
+
+
+class MoveSegmentRequest(BaseModel):
+    """Re-home a clip onto another track (audio untouched)."""
+    speaker_id: str
+    start_s: Optional[float] = None
+
+
+class TrackOrderRequest(BaseModel):
+    """New top-to-bottom track order (every current track id exactly once)."""
+    order: List[str]
 
 
 class SetChannelRequest(BaseModel):

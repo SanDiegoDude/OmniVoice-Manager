@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MultitrackSegment } from '../api'
 import { api } from '../api'
 import { audioBufferToWavMulti, blobToWav } from '../audio-encode'
-import { AudioPlayer } from './AudioPlayer'
+import { AudioPlayer, type AudioPlayerHandle } from './AudioPlayer'
 import ToolModal from './ToolModal'
 
 type Mode = 'character' | 'voice'
@@ -45,6 +45,7 @@ export default function PerformanceModal({
   onSetText,
   onApplyOutput,
   onWhisper,
+  onVoiceSaved,
   onClose,
 }: {
   seg: MultitrackSegment | null
@@ -61,6 +62,7 @@ export default function PerformanceModal({
   onSetText: (index: number, text: string) => void
   onApplyOutput: (index: number, fields: { trim_start_s?: number; trim_end_s?: number; gain_db?: number }) => void
   onWhisper: (wav: Blob) => Promise<string>
+  onVoiceSaved?: () => void
   onClose: () => void
 }) {
   const existing = seg?.perform || null
@@ -110,6 +112,12 @@ export default function PerformanceModal({
   const nextVerRef = useRef(1)
   // One-step undo for an accidental × on a redub chip.
   const [trash, setTrash] = useState<{ ver: DubVersion; pos: number } | null>(null)
+  // Export to the Voice Lab library (sub-modal with save options).
+  const [saveVoiceOpen, setSaveVoiceOpen] = useState(false)
+  // Spacebar (scoped to this modal) drives the rendered output player when one
+  // exists, otherwise the take player — never the main timeline underneath.
+  const takePlayerRef = useRef<AudioPlayerHandle>(null)
+  const outPlayerRef = useRef<AudioPlayerHandle>(null)
 
   const recRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
@@ -598,8 +606,17 @@ export default function PerformanceModal({
         </span>
       }
       onClose={onClose}
+      onSpace={() => (outPlayerRef.current ?? takePlayerRef.current)?.toggle()}
       actions={
         <>
+          <button
+            className="btn sm ghost"
+            disabled={!hasTake && !output}
+            title="Save the take (your voice) or the rendered output into the Voice Lab library"
+            onClick={() => setSaveVoiceOpen(true)}
+          >
+            📚 Save voice…
+          </button>
           <button
             className={`btn sm${capture ? ' perf-glow' : ''}`}
             disabled={!canRender}
@@ -769,6 +786,7 @@ export default function PerformanceModal({
             </div>
           )}
           <AudioPlayer
+            ref={takePlayerRef}
             key={take.url}
             url={take.url}
             autoPlay={false}
@@ -941,6 +959,7 @@ export default function PerformanceModal({
             )}
           </div>
           <AudioPlayer
+            ref={outPlayerRef}
             key={output.url}
             url={output.url}
             autoPlay
@@ -976,6 +995,160 @@ export default function PerformanceModal({
           : 'keeps the dialogue text' + (output ? ' and applies the output trim/gain' : '')}
         .
       </div>
+
+      {saveVoiceOpen && (
+        <SaveVoiceModal
+          take={take}
+          output={output}
+          defaultName={seg ? `clip${seg.index}_voice` : 'performance_voice'}
+          onSaved={onVoiceSaved}
+          onClose={() => setSaveVoiceOpen(false)}
+        />
+      )}
+    </ToolModal>
+  )
+}
+
+/** Sub-modal: export the take (your voice) or the rendered output straight into
+ * the Voice Lab library, with the same cleanup options the Lab offers. */
+function SaveVoiceModal({
+  take,
+  output,
+  defaultName,
+  onSaved,
+  onClose,
+}: {
+  take: { blob: Blob | null; url: string } | null
+  output: { url: string } | null
+  defaultName: string
+  onSaved?: () => void
+  onClose: () => void
+}) {
+  const [source, setSource] = useState<'output' | 'take'>(output ? 'output' : 'take')
+  const [name, setName] = useState(defaultName)
+  const [isolate, setIsolate] = useState(false)
+  const [normalize, setNormalize] = useState(true)
+  const [trim, setTrim] = useState(true)
+  const [dereverb, setDereverb] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [done, setDone] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const save = async () => {
+    const nm = name.trim()
+    if (!nm) {
+      setError('Give the voice a name (folders work too, e.g. "Cast/Alice")')
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      const src = source === 'output' ? output : take
+      if (!src) throw new Error('No audio to save')
+      const blob = source === 'take' && take?.blob ? take.blob : await (await fetch(src.url)).blob()
+      const up = await api.uploadVoice(new File([blob], 'voice.wav', { type: blob.type || 'audio/wav' }))
+      const saved = await api.processVoice({
+        source: up.upload_id,
+        is_upload: true,
+        isolate,
+        normalize,
+        trim,
+        dereverb,
+        gain_db: 0,
+        save_as: nm,
+      })
+      onSaved?.()
+      setDone(saved.name || nm)
+    } catch (e) {
+      setError(`Save failed: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <ToolModal
+      open
+      width={480}
+      title={<span>📚 Save voice to library</span>}
+      onClose={onClose}
+      actions={
+        done ? undefined : (
+          <button className="btn sm primary" disabled={busy} onClick={save}>
+            {busy ? <span className="spinner sm" /> : '💾'} Save voice
+          </button>
+        )
+      }
+    >
+      {done ? (
+        <div>
+          <div style={{ fontSize: 14, marginBottom: 8 }}>
+            ✅ Saved <strong>{done}</strong> to the voice library.
+          </div>
+          <div className="hint">It's available right away in the Voices panel and every speaker picker.</div>
+          <div className="row" style={{ marginTop: 12 }}>
+            <button className="btn sm primary" onClick={onClose}>Done</button>
+          </div>
+        </div>
+      ) : (
+        <>
+          {output && take && (
+            <div className="row" style={{ gap: 8, marginBottom: 12 }}>
+              <span className="hint" style={{ minWidth: 50 }}>Source</span>
+              <button
+                className={`btn sm${source === 'output' ? ' on' : ''}`}
+                title="The rendered output — the character's voice performing the line"
+                onClick={() => setSource('output')}
+              >
+                ⚡ Rendered output
+              </button>
+              <button
+                className={`btn sm${source === 'take' ? ' on' : ''}`}
+                title="Your raw take — your own voice"
+                onClick={() => setSource('take')}
+              >
+                🎬 Take (your voice)
+              </button>
+            </div>
+          )}
+          <label className="field">
+            <span>Voice name (use “/” for folders, e.g. Cast/Alice)</span>
+            <input
+              className="input"
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void save()
+              }}
+              placeholder="e.g. Cast/Alice"
+            />
+          </label>
+          <div className="row wrap" style={{ gap: 14, marginTop: 4 }}>
+            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+              <input type="checkbox" checked={isolate} onChange={(e) => setIsolate(e.target.checked)} />
+              Isolate vocals
+            </label>
+            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+              <input type="checkbox" checked={normalize} onChange={(e) => setNormalize(e.target.checked)} />
+              Normalize
+            </label>
+            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+              <input type="checkbox" checked={trim} onChange={(e) => setTrim(e.target.checked)} />
+              Trim silence
+            </label>
+            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+              <input type="checkbox" checked={dereverb} onChange={(e) => setDereverb(e.target.checked)} />
+              Dereverb
+            </label>
+          </div>
+          <div className="hint" style={{ marginTop: 10, opacity: 0.8 }}>
+            The audio is processed and saved like a Voice Lab import — it lands in the library immediately,
+            ready to cast on any speaker.
+          </div>
+          {error && <div className="hint" style={{ color: 'var(--bad, #e66)', marginTop: 8 }}>{error}</div>}
+        </>
+      )}
     </ToolModal>
   )
 }

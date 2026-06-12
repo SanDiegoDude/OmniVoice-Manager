@@ -617,12 +617,36 @@ export default function App() {
     }
   }
 
-  const editSegment = async (index: number, fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number; gain_db?: number }) => {
+  const editSegment = async (index: number, fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number; gain_db?: number; fade_in_s?: number; fade_out_s?: number }) => {
     if (!session) return
     try {
       setSession(await api.editSegment(session.id, index, fields))
     } catch (e) {
       notify(String(e), 'error')
+    }
+  }
+
+  const moveSegment = async (index: number, speakerId: string, startS: number) => {
+    if (!session) return
+    try {
+      const s = await api.moveSegment(session.id, index, speakerId, startS)
+      setSession(s)
+      const name = s.tracks.find((t) => t.speaker_id === speakerId)?.name ?? speakerId
+      notify(`Clip moved to “${name}” — hit ↻ Regenerate to render it in that voice`, 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+
+  const reorderTracks = async (order: string[]): Promise<MultitrackSession | null> => {
+    if (!session) return null
+    try {
+      const s = await api.reorderTracks(session.id, order)
+      setSession(s)
+      return s
+    } catch (e) {
+      notify(String(e), 'error')
+      return null
     }
   }
 
@@ -796,6 +820,9 @@ export default function App() {
           onPromoteChannel={promoteChannel}
           onMergeSegments={mergeSegments}
           onCollapseTrack={collapseTrack}
+          onMoveSegment={moveSegment}
+          onReorderTracks={reorderTracks}
+          onVoiceSaved={refreshVoices}
           onUndo={undoSession}
           playCue={playCue}
           onSetPerformance={setPerformance}

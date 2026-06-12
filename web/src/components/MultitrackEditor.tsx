@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { api } from '../api'
 import type { MultitrackSegment, MultitrackSession, MultitrackTrack } from '../api'
 import { AudioPlayer, type AudioPlayerHandle } from './AudioPlayer'
 import { Toggle } from './ui'
@@ -22,11 +23,26 @@ function hueFor(id: string): number {
 }
 const snap = (t: number) => Math.max(0, Math.round(t * 10) / 10)
 
-type Drag = { index: number; cur: number } | null
+type Drag = { index: number; cur: number; lane: number } | null
 type Sel = { a: number; b: number; mode: 'del' | 'add' } | null
 type SegMenu = { index: number; x: number; y: number } | null
+// Live, uncommitted values while a segment tool-handle is being dragged
+// (trim edges, fade corners, the dB line). Committed on mouseup.
+type SegTool = {
+  index: number
+  trimStart?: number
+  trimEnd?: number
+  start?: number
+  fadeIn?: number
+  fadeOut?: number
+  gain?: number
+} | null
 type Pending =
-  | { kind: 'seg'; index: number; origStart: number; startX: number }
+  | { kind: 'seg'; index: number; origStart: number; fromLane: number; startX: number; startY: number }
+  | { kind: 'seg-l'; index: number; origTrimStart: number; origStart: number; speed: number; trimEnd: number; startX: number }
+  | { kind: 'seg-r'; index: number; origTrimEnd: number; trimStart: number; rawDur: number; speed: number; startX: number }
+  | { kind: 'fade'; index: number; side: 'in' | 'out'; orig: number; eff: number; startX: number }
+  | { kind: 'seg-gain'; index: number; orig: number; pxRange: number; startX: number; startY: number }
   | { kind: 'ghost'; origStart: number; startX: number }
   | { kind: 'select'; origStart: number; startX: number }
   | { kind: 'sel-move' | 'sel-l' | 'sel-r'; origA: number; origB: number; startX: number }
@@ -69,6 +85,9 @@ export function MultitrackEditor({
   onRemoveTrack,
   onMergeSegments,
   onCollapseTrack,
+  onMoveSegment,
+  onReorderTracks,
+  onVoiceSaved,
   onUndo,
   playCue,
   onSetPerformance,
@@ -85,7 +104,7 @@ export function MultitrackEditor({
   session: MultitrackSession
   playCue: { nonce: number; index?: number; channel?: string; at?: number } | null
   onRegen: (index: number, text?: string) => void
-  onEditSegment: (index: number, fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number; gain_db?: number }) => void
+  onEditSegment: (index: number, fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number; gain_db?: number; fade_in_s?: number; fade_out_s?: number }) => void
   onReflow: (fields: { gap_ms?: number; speed?: number }) => void
   onInsertSegment: (speakerId: string, text: string, startS: number, ripple: boolean) => void
   onDeleteSegment: (index: number, ripple: boolean) => void
@@ -105,6 +124,9 @@ export function MultitrackEditor({
   onRemoveTrack: (pos: string) => Promise<void>
   onMergeSegments: (indices: number[]) => Promise<void>
   onCollapseTrack: (pos: string) => Promise<void>
+  onMoveSegment: (index: number, speakerId: string, startS: number) => void
+  onReorderTracks: (order: string[]) => void
+  onVoiceSaved?: () => void
   onUndo: () => void
   onSetPerformance: (
     index: number,
@@ -144,6 +166,16 @@ export function MultitrackEditor({
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
   const [editText, setEditText] = useState('')
   const [drag, setDrag] = useState<Drag>(null)
+  const [tool, setTool] = useState<SegTool>(null)
+  const toolRef = useRef<SegTool>(null)
+  const updateTool = useCallback((t: SegTool) => {
+    toolRef.current = t
+    setTool(t)
+  }, [])
+  // Vertical track drag (reorder lanes): source row + current insertion slot.
+  const [trackDrag, setTrackDrag] = useState<{ from: number; slot: number } | null>(null)
+  const trackDragRef = useRef<{ from: number; slot: number } | null>(null)
+  const labelsRef = useRef<HTMLDivElement | null>(null)
   const [trimIndex, setTrimIndex] = useState<number | null>(null)
   const [trimDraft, setTrimDraft] = useState<TrimDraft>({ trimStart: 0, trimEnd: 0, speed: 1, gain: 0 })
   const [trimText, setTrimText] = useState('')
@@ -218,13 +250,14 @@ export function MultitrackEditor({
 
   const segAudioRef = useRef<HTMLAudioElement | null>(null)
   const playerRef = useRef<AudioPlayerHandle>(null)
+  const trimPlayerRef = useRef<AudioPlayerHandle>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
   const headPosRef = useRef(0)
   const mixRef = useRef(session.mix_url)
   const uploadInputRef = useRef<HTMLInputElement>(null)
   const pendingRef = useRef<Pending | null>(null)
-  const dragRef = useRef<{ index: number; cur: number } | null>(null)
+  const dragRef = useRef<{ index: number; cur: number; lane: number } | null>(null)
   const selRef = useRef<Sel>(null)
   const activeRef = useRef(false)
   const suppressClickRef = useRef(false)
@@ -357,20 +390,48 @@ export function MultitrackEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playCue])
 
-  // Global drag listeners: segment move, insert-ghost move, delete-space select,
-  // and red-bar move/resize.
+  // Global drag listeners: segment move (incl. lifting onto another track),
+  // trim-edge / fade-corner / dB-line tool drags, insert-ghost move,
+  // delete-space select, and red-bar move/resize.
   useEffect(() => {
+    const laneAt = (clientY: number) => {
+      const rect = contentRef.current?.getBoundingClientRect()
+      if (!rect) return 0
+      return Math.max(0, Math.min(session.tracks.length - 1, Math.floor((clientY - rect.top - RULER_H) / rowH)))
+    }
     const onMove = (e: MouseEvent) => {
       const p = pendingRef.current
       if (!p) return
       const dx = e.clientX - p.startX
-      if (!activeRef.current && Math.abs(dx) < 4) return
+      const dy = 'startY' in p ? e.clientY - p.startY : 0
+      if (!activeRef.current && Math.abs(dx) < 4 && Math.abs(dy) < 4) return
       activeRef.current = true
       const dt = dx / pxPerSec
       if (p.kind === 'seg') {
         const cur = snap(p.origStart + dt)
-        dragRef.current = { index: p.index, cur }
-        setDrag({ index: p.index, cur })
+        const lane = laneAt(e.clientY)
+        dragRef.current = { index: p.index, cur, lane }
+        setDrag({ index: p.index, cur, lane })
+      } else if (p.kind === 'seg-l') {
+        // Drag the left edge: trim the head; the clip's remaining audio keeps
+        // its place on the timeline (start moves with the edge), like a DAW.
+        const ts = Math.max(0, Math.min(p.origTrimStart + dt * p.speed, p.trimEnd - 0.05 * p.speed))
+        updateTool({
+          index: p.index,
+          trimStart: Math.round(ts * 1000) / 1000,
+          start: Math.max(0, Math.round((p.origStart + (ts - p.origTrimStart) / p.speed) * 1000) / 1000),
+        })
+      } else if (p.kind === 'seg-r') {
+        const te = Math.max(p.trimStart + 0.05 * p.speed, Math.min(p.origTrimEnd + dt * p.speed, p.rawDur))
+        updateTool({ index: p.index, trimEnd: Math.round(te * 1000) / 1000 })
+      } else if (p.kind === 'fade') {
+        const v = Math.max(0, Math.min(p.side === 'in' ? p.orig + dt : p.orig - dt, p.eff))
+        const r = Math.round(v * 100) / 100
+        updateTool(p.side === 'in' ? { index: p.index, fadeIn: r } : { index: p.index, fadeOut: r })
+      } else if (p.kind === 'seg-gain') {
+        // Vertical dB line: full row height spans ±18 dB around the leveled baseline.
+        const g = Math.max(-18, Math.min(18, p.orig - dy * (36 / p.pxRange)))
+        updateTool({ index: p.index, gain: Math.round(g * 10) / 10 })
       } else if (p.kind === 'ghost') {
         setInsert((i) => (i ? { ...i, start_s: snap(p.origStart + dt) } : i))
       } else if (p.kind === 'select') {
@@ -392,7 +453,30 @@ export function MultitrackEditor({
       const p = pendingRef.current
       if (activeRef.current) {
         if (p?.kind === 'seg' && dragRef.current) {
-          onEditSegment(dragRef.current.index, { start_s: dragRef.current.cur })
+          const d = dragRef.current
+          if (d.lane !== p.fromLane) {
+            // Dropped on another track: re-home the clip (audio unchanged —
+            // regenerate to render it in the new track's voice).
+            const dst = session.tracks[d.lane]
+            const src = session.tracks[p.fromLane]
+            if (dst && src && (dst.kind === 'audio') === (src.kind === 'audio')) {
+              onMoveSegment(d.index, dst.speaker_id, d.cur)
+            }
+          } else {
+            onEditSegment(d.index, { start_s: d.cur })
+          }
+        } else if (p?.kind === 'seg-l') {
+          const t = toolRef.current
+          if (t && t.trimStart != null) onEditSegment(p.index, { trim_start_s: t.trimStart, start_s: t.start })
+        } else if (p?.kind === 'seg-r') {
+          const t = toolRef.current
+          if (t && t.trimEnd != null) onEditSegment(p.index, { trim_end_s: t.trimEnd })
+        } else if (p?.kind === 'fade') {
+          const t = toolRef.current
+          if (t) onEditSegment(p.index, p.side === 'in' ? { fade_in_s: t.fadeIn } : { fade_out_s: t.fadeOut })
+        } else if (p?.kind === 'seg-gain') {
+          const t = toolRef.current
+          if (t && t.gain != null) onEditSegment(p.index, { gain_db: t.gain })
         } else if (p?.kind === 'select') {
           const s = selRef.current
           if (!s || Math.abs(s.b - s.a) < 0.05) updateSel(null)
@@ -404,6 +488,7 @@ export function MultitrackEditor({
       dragRef.current = null
       activeRef.current = false
       setDrag(null)
+      updateTool(null)
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
@@ -411,14 +496,16 @@ export function MultitrackEditor({
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
-  }, [pxPerSec, onEditSegment, updateSel, magnet])
+  }, [pxPerSec, rowH, session, onEditSegment, onMoveSegment, updateSel, updateTool, magnet])
 
-  // Spacebar = play/pause (unless typing).
+  // Spacebar = play/pause (unless typing, and never while a tool modal is open —
+  // modals own the spacebar for their own players).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable))
         return
+      if (document.querySelector('.modal-overlay, .modal-backdrop')) return
       if (e.code === 'Space') {
         e.preventDefault()
         playerRef.current?.toggle()
@@ -516,8 +603,15 @@ export function MultitrackEditor({
       return
     }
     const tgt = e.target as HTMLElement
-    if (tgt.closest('.mtk-seg-bar, .mtk-seg-text, .mtk-seg-edit')) return
-    pendingRef.current = { kind: 'seg', index: seg.index, origStart: seg.start_s, startX: e.clientX }
+    if (tgt.closest('.mtk-seg-bar, .mtk-seg-text, .mtk-seg-edit, .mtk-trim-h, .mtk-fade-h, .mtk-gain-line')) return
+    pendingRef.current = {
+      kind: 'seg',
+      index: seg.index,
+      origStart: seg.start_s,
+      fromLane: laneIndexOf(seg.speaker_id),
+      startX: e.clientX,
+      startY: e.clientY,
+    }
   }
 
   // Middle-button = pan the timeline like a canvas; left-drag on empty = select.
@@ -585,6 +679,48 @@ export function MultitrackEditor({
 
   const laneIndexOf = (sid: string) => session.tracks.findIndex((t) => t.speaker_id === sid)
 
+  // Vertical drag on a track label's grip → reorder lanes. Purely organizational
+  // (the mix is additive so nothing re-renders) — generative speakers renumber so
+  // top-to-bottom always reads Speaker 1..N.
+  const startTrackDrag = useCallback(
+    (e: React.MouseEvent, from: number) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const slotAt = (clientY: number) => {
+        const rect = labelsRef.current?.getBoundingClientRect()
+        if (!rect) return from
+        return Math.max(0, Math.min(session.tracks.length, Math.round((clientY - rect.top - RULER_H) / rowH)))
+      }
+      const st = { from, slot: from }
+      trackDragRef.current = st
+      setTrackDrag(st)
+      const onMove = (ev: MouseEvent) => {
+        const slot = slotAt(ev.clientY)
+        if (trackDragRef.current && trackDragRef.current.slot !== slot) {
+          trackDragRef.current = { from, slot }
+          setTrackDrag({ from, slot })
+        }
+      }
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+        const s = trackDragRef.current
+        trackDragRef.current = null
+        setTrackDrag(null)
+        if (!s) return
+        const at = s.slot > s.from ? s.slot - 1 : s.slot
+        if (at === s.from) return
+        const ids = session.tracks.map((t) => t.speaker_id)
+        const [moved] = ids.splice(s.from, 1)
+        ids.splice(at, 0, moved)
+        onReorderTracks(ids)
+      }
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+    },
+    [session, rowH, onReorderTracks],
+  )
+
   const startEdit = (index: number, current: string) => {
     setEditingIndex(index)
     setEditText(current)
@@ -601,8 +737,9 @@ export function MultitrackEditor({
     return marks
   }, [total, pxPerSec])
 
+  const working = !!busy || regenIndex != null || finalizing
   return (
-    <div className="mtk">
+    <div className={`mtk${working ? ' working' : ''}`}>
       <div className="flex-between" style={{ marginBottom: 10 }}>
         <div>
           <div className="section-title" style={{ margin: 0 }}>
@@ -661,7 +798,11 @@ export function MultitrackEditor({
         <div className="row" style={{ gap: 4 }}>
           <button className="btn sm ghost" onClick={() => seekTo(0)} title="Start">⏮</button>
           <button className="btn sm ghost" onClick={prevSeg} title="Previous segment">◀</button>
-          <button className="btn sm" onClick={() => playerRef.current?.toggle()} title="Play / pause (space)">
+          <button
+            className={`btn sm playbtn ${head.playing ? 'live' : head.cur > 0.02 ? 'stopped' : 'idle'}`}
+            onClick={() => playerRef.current?.toggle()}
+            title="Play / pause (space)"
+          >
             {head.playing ? '⏸' : '▶'}
           </button>
           <button className="btn sm ghost" onClick={nextSeg} title="Next segment">▶</button>
@@ -702,15 +843,17 @@ export function MultitrackEditor({
       />
 
       <div className="mtk-grid" style={{ marginTop: 12 }}>
-        <div className="mtk-labels" style={{ width: LABEL_W }}>
+        <div className="mtk-labels" style={{ width: LABEL_W, position: 'relative' }} ref={labelsRef}>
           <div className="mtk-corner" style={{ height: RULER_H }} />
-          {session.tracks.map((t) => (
+          {session.tracks.map((t, ti) => (
             <ChannelLabel
               key={t.speaker_id}
               track={t}
               rowH={rowH}
               busy={!!busy || regenIndex != null}
               promoting={promoting === t.speaker_id}
+              dragging={trackDrag?.from === ti}
+              onGrip={(e) => startTrackDrag(e, ti)}
               onSetChannel={onSetChannel}
               onRegenChannel={onRegenChannel}
               onPromote={async (pos, name) => { setPromoting(pos); try { await onPromoteChannel(pos, name) } finally { setPromoting(null) } }}
@@ -718,6 +861,9 @@ export function MultitrackEditor({
               onRemove={onRemoveTrack}
             />
           ))}
+          {trackDrag && (
+            <div className="mtk-track-drop" style={{ top: RULER_H + trackDrag.slot * rowH - 1 }} />
+          )}
         </div>
 
         <div className="mtk-scroll" ref={scrollRef} onWheel={onWheelZoom}>
@@ -728,7 +874,7 @@ export function MultitrackEditor({
               ))}
             </div>
 
-            {session.tracks.map((t) => {
+            {session.tracks.map((t, ti) => {
               const hue = hueFor(t.speaker_id)
               const laneAudio = t.kind === 'audio'
               return (
@@ -755,9 +901,25 @@ export function MultitrackEditor({
                   title="Double-click an empty spot to add a segment"
                 >
                   {t.segments.map((seg) => {
-                    const live = drag && drag.index === seg.index ? drag.cur : seg.start_s
+                    // Live (uncommitted) tool-drag overrides: trim edges, fades, gain.
+                    const segTool = tool && tool.index === seg.index ? tool : null
+                    const trimS = segTool?.trimStart ?? seg.trim_start_s
+                    const trimE = segTool?.trimEnd ?? seg.trim_end_s
+                    const spd = seg.speed || 1
+                    const liveDur =
+                      segTool && (segTool.trimStart != null || segTool.trimEnd != null)
+                        ? Math.max(0.05, (trimE - trimS) / spd)
+                        : seg.duration_s
+                    // Dragging onto ANOTHER lane: the clip stays put (dimmed) and a
+                    // ghost rides the cursor on the target lane instead.
+                    const lifting = drag && drag.index === seg.index && drag.lane !== ti
+                    const live =
+                      drag && drag.index === seg.index && !lifting ? drag.cur : segTool?.start ?? seg.start_s
                     const left = live * pxPerSec
-                    const width = Math.max(MIN_SEG_PX, seg.duration_s * pxPerSec)
+                    const width = Math.max(MIN_SEG_PX, liveDur * pxPerSec)
+                    const fadeIn = segTool?.fadeIn ?? seg.fade_in_s
+                    const fadeOut = segTool?.fadeOut ?? seg.fade_out_s
+                    const gain = segTool?.gain ?? seg.gain_db
                     // Collapse inline controls into the ⋯ menu as the clip shrinks.
                     const tier = width >= 232 ? 4 : width >= 172 ? 3 : width >= 120 ? 2 : width >= 70 ? 1 : 0
                     const isPlaying = playingSeg === seg.index
@@ -769,14 +931,26 @@ export function MultitrackEditor({
                     return (
                       <div
                         key={seg.index}
-                        className={`mtk-seg${isRegen ? ' regen' : ''}${dirty ? ' dirty' : ''}${isTrimming ? ' trimming' : ''}${seg.inpaint ? ' inpaint' : ''}${seg.perform ? ' perform' : ''}${seg.perform?.dirty ? ' perform-dirty' : ''}${selSegs.has(seg.index) ? ' selected' : ''}${drag && drag.index === seg.index ? ' dragging' : ''}`}
+                        className={`mtk-seg${isRegen ? ' regen' : ''}${dirty ? ' dirty' : ''}${isTrimming ? ' trimming' : ''}${seg.inpaint ? ' inpaint' : ''}${seg.perform ? ' perform' : ''}${seg.perform?.dirty ? ' perform-dirty' : ''}${selSegs.has(seg.index) ? ' selected' : ''}${drag && drag.index === seg.index ? ' dragging' : ''}${lifting ? ' lifting' : ''}`}
                         style={{ left, width, background: `hsl(${hue} 45% 22%)`, borderColor: dirty ? 'var(--warn)' : `hsl(${hue} 60% 45%)` }}
-                        title={`${text}\n(drag to move)`}
+                        title={`${text}\n(drag to move · pull up/down to another track)`}
                         onMouseDown={(e) => startSegDrag(e, seg)}
                       >
+                        <SegWave
+                          sid={session.id}
+                          seg={seg}
+                          width={width}
+                          height={rowH - 14}
+                          trimStart={trimS}
+                          trimEnd={trimE}
+                          fadeIn={fadeIn}
+                          fadeOut={fadeOut}
+                          gainDb={gain}
+                          hue={hue}
+                        />
                         <div className="mtk-seg-bar" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
                           {tier >= 1 && (
-                            <button className={`mtk-ic${isPlaying ? ' on' : ''}`} onClick={() => playSeg(seg)} title={isPlaying ? 'Stop' : 'Play'}>
+                            <button className={`mtk-ic${isPlaying ? ' play-on' : ''}`} onClick={() => playSeg(seg)} title={isPlaying ? 'Stop' : 'Play'}>
                               {isPlaying ? '■' : '▶'}
                             </button>
                           )}
@@ -824,6 +998,106 @@ export function MultitrackEditor({
                           <div className="mtk-seg-text" onClick={(e) => e.stopPropagation()} onDoubleClick={() => startEdit(seg.index, text)} title="Double-click to edit">
                             {dirty ? '✎ ' : ''}
                             {text}
+                          </div>
+                        )}
+                        {/* DAW handles: trim edges, fade corners, dB line */}
+                        {width >= 36 && !isEditing && (
+                          <>
+                            <div
+                              className="mtk-trim-h l"
+                              title="Drag to trim the clip start"
+                              onMouseDown={(e) => {
+                                if (e.button !== 0) return
+                                e.stopPropagation()
+                                pendingRef.current = {
+                                  kind: 'seg-l',
+                                  index: seg.index,
+                                  origTrimStart: seg.trim_start_s,
+                                  origStart: seg.start_s,
+                                  speed: spd,
+                                  trimEnd: seg.trim_end_s,
+                                  startX: e.clientX,
+                                }
+                              }}
+                            />
+                            <div
+                              className="mtk-trim-h r"
+                              title="Drag to trim the clip end"
+                              onMouseDown={(e) => {
+                                if (e.button !== 0) return
+                                e.stopPropagation()
+                                pendingRef.current = {
+                                  kind: 'seg-r',
+                                  index: seg.index,
+                                  origTrimEnd: seg.trim_end_s,
+                                  trimStart: seg.trim_start_s,
+                                  rawDur: seg.raw_duration_s,
+                                  speed: spd,
+                                  startX: e.clientX,
+                                }
+                              }}
+                            />
+                          </>
+                        )}
+                        {width >= 56 && !isEditing && (
+                          <>
+                            <div
+                              className={`mtk-fade-h in${fadeIn > 0.01 ? ' set' : ''}`}
+                              style={{ left: Math.min(Math.max(0, fadeIn * pxPerSec - 5), width - 14) }}
+                              title={`Fade in · ${fadeIn.toFixed(2)}s — drag right to lengthen`}
+                              onMouseDown={(e) => {
+                                if (e.button !== 0) return
+                                e.stopPropagation()
+                                pendingRef.current = {
+                                  kind: 'fade',
+                                  index: seg.index,
+                                  side: 'in',
+                                  orig: seg.fade_in_s,
+                                  eff: seg.duration_s,
+                                  startX: e.clientX,
+                                }
+                              }}
+                            />
+                            <div
+                              className={`mtk-fade-h out${fadeOut > 0.01 ? ' set' : ''}`}
+                              style={{ right: Math.min(Math.max(0, fadeOut * pxPerSec - 5), width - 14) }}
+                              title={`Fade out · ${fadeOut.toFixed(2)}s — drag left to lengthen`}
+                              onMouseDown={(e) => {
+                                if (e.button !== 0) return
+                                e.stopPropagation()
+                                pendingRef.current = {
+                                  kind: 'fade',
+                                  index: seg.index,
+                                  side: 'out',
+                                  orig: seg.fade_out_s,
+                                  eff: seg.duration_s,
+                                  startX: e.clientX,
+                                }
+                              }}
+                            />
+                          </>
+                        )}
+                        {rowH >= 56 && width >= 44 && !isEditing && (
+                          <div
+                            className={`mtk-gain-line${segTool?.gain != null ? ' active' : ''}${Math.abs(gain) > 0.05 ? ' set' : ''}`}
+                            style={{ top: `calc(50% - ${(gain * (rowH - 24)) / 36}px)` }}
+                            title={`Clip gain ${gain >= 0 ? '+' : ''}${gain.toFixed(1)} dB — drag up/down`}
+                            onMouseDown={(e) => {
+                              if (e.button !== 0) return
+                              e.stopPropagation()
+                              pendingRef.current = {
+                                kind: 'seg-gain',
+                                index: seg.index,
+                                orig: seg.gain_db || 0,
+                                pxRange: rowH - 24,
+                                startX: e.clientX,
+                                startY: e.clientY,
+                              }
+                            }}
+                          >
+                            {(segTool?.gain != null || Math.abs(gain) > 0.05) && (
+                              <span className="mtk-gain-tag">{gain >= 0 ? '+' : ''}{gain.toFixed(1)}dB</span>
+                            )}
                           </div>
                         )}
                       </div>
@@ -883,6 +1157,33 @@ export function MultitrackEditor({
                 )}
               </div>
             )}
+
+            {/* Lift-off ghost: a clip dragged onto another lane rides the cursor
+                until dropped — the audio stays as-is, regenerate to re-voice it. */}
+            {drag && (() => {
+              const seg = flatSegs.find((s) => s.index === drag.index)
+              if (!seg) return null
+              const fromLane = laneIndexOf(seg.speaker_id)
+              if (drag.lane === fromLane) return null
+              const dst = session.tracks[drag.lane]
+              const src = session.tracks[fromLane]
+              const valid = !!dst && !!src && (dst.kind === 'audio') === (src.kind === 'audio')
+              return (
+                <div
+                  className={`mtk-seg-ghost${valid ? '' : ' invalid'}`}
+                  style={{
+                    left: drag.cur * pxPerSec,
+                    top: RULER_H + drag.lane * rowH + 6,
+                    width: Math.max(MIN_SEG_PX, seg.duration_s * pxPerSec),
+                    height: rowH - 12,
+                  }}
+                >
+                  <span className="mtk-seg-ghost-tag">
+                    {valid ? `→ ${dst.name} @ ${drag.cur.toFixed(1)}s` : '⃠ incompatible track'}
+                  </span>
+                </div>
+              )
+            })()}
 
             {/* Segment-edge guides — shown while a selection is active so empty-space
                 wipes snap cleanly; the edge you're snapped to lights up. */}
@@ -1171,11 +1472,13 @@ export function MultitrackEditor({
           open
           title={<span>✂ Trim / speed — “{trimSeg.text.slice(0, 48)}”</span>}
           onClose={() => setTrimIndex(null)}
+          onSpace={() => trimPlayerRef.current?.toggle()}
           actions={
             <button className="btn sm primary" onClick={saveTrim}>💾 Save</button>
           }
         >
           <AudioPlayer
+            ref={trimPlayerRef}
             key={`trim-${trimSeg.index}-${trimSeg.url}`}
             url={trimSeg.url}
             autoPlay={false}
@@ -1243,13 +1546,17 @@ export function MultitrackEditor({
             onSetText={(i, text) => onSetText(i, text)}
             onApplyOutput={(i, fields) => onEditSegment(i, fields)}
             onWhisper={onTranscribeClip}
+            onVoiceSaved={onVoiceSaved}
             onClose={() => setPerfModal(null)}
           />
         )
       })()}
 
       <div className="hint" style={{ marginTop: 8 }}>
-        Drag a clip to move · <strong>shift+click</strong> clips to select &amp; <strong>Merge</strong> them ·
+        Drag a clip to move — <strong>pull it up/down</strong> to drop it on another track (regenerate to re-voice) ·
+        drag a clip's <strong>edges</strong> to trim, its <strong>top corners</strong> to fade in/out, the{' '}
+        <strong>center line</strong> up/down for clip gain · drag the <strong>⠿ grip</strong> on a track pin to
+        reorder tracks · <strong>shift+click</strong> clips to select &amp; <strong>Merge</strong> them ·
         <strong> shift+scroll</strong> to zoom · <strong>middle-drag</strong> to pan · ⋯ for all
         actions (play / regenerate / edit / trim / Whisper-align / download / split / duplicate / delete) · double-click an
         empty spot to <strong>add a line</strong>, <strong>add empty playtime</strong> or <strong>close a gap</strong> · drag
@@ -1265,6 +1572,8 @@ function ChannelLabel({
   rowH,
   busy,
   promoting,
+  dragging,
+  onGrip,
   onSetChannel,
   onRegenChannel,
   onPromote,
@@ -1275,6 +1584,8 @@ function ChannelLabel({
   rowH: number
   busy: boolean
   promoting: boolean
+  dragging?: boolean
+  onGrip?: (e: React.MouseEvent) => void
   onSetChannel: (pos: string, fields: { name?: string | null; gain_db?: number; muted?: boolean }) => void
   onRegenChannel: (pos: string) => void
   onPromote: (pos: string, name: string) => void
@@ -1311,7 +1622,7 @@ function ChannelLabel({
   }
   return (
     <div
-      className={`mtk-label${muted ? ' muted' : ''}`}
+      className={`mtk-label${muted ? ' muted' : ''}${dragging ? ' dragging' : ''}`}
       style={{ height: rowH, borderLeft: `3px solid hsl(${hueFor(track.speaker_id)} 70% 60%)` }}
       title={track.voice_name && track.voice_name !== track.name ? `Voice: ${track.voice_name}` : track.name}
     >
@@ -1325,6 +1636,11 @@ function ChannelLabel({
         </div>
       )}
       <div className="mtk-label-top">
+        {onGrip && (
+          <span className="mtk-grip" title="Drag to reorder tracks" onMouseDown={onGrip}>
+            ⠿
+          </span>
+        )}
         {editing ? (
           <input
             className="mtk-name-edit"
@@ -1403,4 +1719,115 @@ function ChannelLabel({
       </div>
     </div>
   )
+}
+
+// ---------------------------------------------------------------------------
+// In-clip waveform: amplitude peaks fetched once per audio revision (seg.rev),
+// drawn bottom-pinned — only the upper envelope, half the pixels for the same
+// information. Trim, gain and fades are applied at draw time, so live handle
+// drags re-render instantly without refetching.
+// ---------------------------------------------------------------------------
+const peaksCache = new Map<string, { peaks: number[]; rawDur: number }>()
+const PEAKS_CACHE_MAX = 500
+
+function SegWave({
+  sid,
+  seg,
+  width,
+  height,
+  trimStart,
+  trimEnd,
+  fadeIn,
+  fadeOut,
+  gainDb,
+  hue,
+}: {
+  sid: string
+  seg: MultitrackSegment
+  width: number
+  height: number
+  trimStart: number
+  trimEnd: number
+  fadeIn: number
+  fadeOut: number
+  gainDb: number
+  hue: number
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const key = `${sid}:${seg.index}:${seg.rev}`
+  const [data, setData] = useState<{ peaks: number[]; rawDur: number } | null>(() => peaksCache.get(key) ?? null)
+
+  useEffect(() => {
+    const hit = peaksCache.get(key)
+    if (hit) {
+      setData(hit)
+      return
+    }
+    let alive = true
+    api
+      .segmentPeaks(sid, seg.index)
+      .then((r) => {
+        if (!r.peaks.length || r.raw_duration_s <= 0) return
+        const d = { peaks: r.peaks, rawDur: r.raw_duration_s }
+        if (peaksCache.size > PEAKS_CACHE_MAX) peaksCache.clear()
+        peaksCache.set(key, d)
+        if (alive) setData(d)
+      })
+      .catch(() => {}) // background eye-candy — never surface an error
+    return () => {
+      alive = false
+    }
+  }, [key, sid, seg.index])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || !data) return
+    // Cap backing-store width: a 20s clip at max zoom would otherwise allocate a
+    // multi-MB canvas per segment. CSS stretches it; it's background texture.
+    const w = Math.max(1, Math.min(2048, Math.round(width)))
+    const h = Math.max(1, Math.round(height))
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.clearRect(0, 0, w, h)
+    const { peaks, rawDur } = data
+    const te = trimEnd || rawDur
+    const f0 = Math.max(0, Math.min(1, trimStart / rawDur))
+    const f1 = Math.max(f0, Math.min(1, te / rawDur))
+    const n = peaks.length
+    const gain = Math.pow(10, gainDb / 20)
+    const audDur = Math.max(0.01, (te - trimStart) / (seg.speed || 1))
+    const fiFrac = Math.max(0, Math.min(1, fadeIn / audDur))
+    const foFrac = Math.max(0, Math.min(1, fadeOut / audDur))
+    const bw = 2
+    const bars = Math.max(1, Math.floor(w / bw))
+    ctx.fillStyle = `hsla(${hue}, 75%, 64%, 0.45)`
+    for (let i = 0; i < bars; i++) {
+      const x = (i + 0.5) / bars
+      const idx = Math.min(n - 1, Math.floor((f0 + x * (f1 - f0)) * n))
+      let amp = Math.min(1, (peaks[idx] || 0) * gain)
+      if (fiFrac > 0 && x < fiFrac) amp *= x / fiFrac
+      if (foFrac > 0 && x > 1 - foFrac) amp *= (1 - x) / foFrac
+      const bh = Math.max(1, amp * h * 0.96)
+      ctx.fillRect(i * bw, h - bh, bw - 0.6, bh)
+    }
+    // Fade envelope lines (corner → top), the classic DAW read.
+    ctx.strokeStyle = 'rgba(255,255,255,0.45)'
+    ctx.lineWidth = 1
+    if (fiFrac > 0.004) {
+      ctx.beginPath()
+      ctx.moveTo(0, h)
+      ctx.lineTo(fiFrac * w, 0)
+      ctx.stroke()
+    }
+    if (foFrac > 0.004) {
+      ctx.beginPath()
+      ctx.moveTo(w, h)
+      ctx.lineTo(w - foFrac * w, 0)
+      ctx.stroke()
+    }
+  }, [data, width, height, trimStart, trimEnd, fadeIn, fadeOut, gainDb, hue, seg.speed])
+
+  return <canvas ref={canvasRef} className="mtk-seg-wave" aria-hidden />
 }

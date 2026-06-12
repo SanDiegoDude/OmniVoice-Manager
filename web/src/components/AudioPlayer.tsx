@@ -95,6 +95,9 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   const [end, setEnd] = useState(0)
   const [gainDb, setGainDb] = useState(0)
   const [playing, setPlaying] = useState(false)
+  // Has playback ever started (and then stopped)? Drives the three-state play
+  // button: resting green → playing green → stopped red.
+  const [started, setStarted] = useState(false)
   const [cur, setCur] = useState(0)
   const [downloading, setDownloading] = useState(false)
   // Visible window in seconds (zoom/pan). Trim times live in absolute seconds,
@@ -336,6 +339,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
     if (el.currentTime < start || el.currentTime >= end) el.currentTime = start
     await el.play().catch(() => {})
     setPlaying(true)
+    setStarted(true)
     rafRef.current = requestAnimationFrame(tick)
   }, [start, end, ensureGraph, tick, playbackRate])
 
@@ -418,6 +422,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
     setEnd(duration)
     setGainDb(0)
     setCur(0)
+    setStarted(false)
     setView({ t0: 0, t1: duration })
     if (audioElRef.current) audioElRef.current.currentTime = 0
   }
@@ -586,7 +591,11 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
           </div>
         </div>
         <div className="row" style={{ gap: 6 }}>
-          <button className={`btn sm ${playing ? 'stopbtn' : ''}`} onClick={playing ? stop : play}>
+          <button
+            className={`btn sm playbtn ${playing ? 'live' : started ? 'stopped' : 'idle'}`}
+            onClick={playing ? stop : play}
+            title={playing ? 'Stop' : 'Play'}
+          >
             {playing ? '■ Stop' : '▶ Play'}
           </button>
           <button className="btn sm ghost" onClick={reset} title="Reset trim & gain">

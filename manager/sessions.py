@@ -192,8 +192,28 @@ def _render_clip(d: Path, seg: Dict[str, Any], sr: int, level: bool, target: flo
     gain_db = float(seg.get("gain_db", 0.0) or 0.0) + float(extra_gain_db or 0.0)
     if clip.size and abs(gain_db) > 1e-3:
         clip = clip * float(10.0 ** (gain_db / 20.0))
+    clip = _apply_fades(clip, seg, sr)
     seg["duration_s"] = round(len(clip) / sr, 3) if clip.size else 0.0
     return clip.astype(np.float32)
+
+
+def _apply_fades(clip: np.ndarray, seg: Dict[str, Any], sr: int) -> np.ndarray:
+    """Linear fade-in/out envelopes over the rendered (post-trim/speed) clip.
+    Fade times are audible seconds; overlapping fades multiply, so a short clip
+    with long fades degrades gracefully into a triangle instead of clipping."""
+    fi = float(seg.get("fade_in_s", 0.0) or 0.0)
+    fo = float(seg.get("fade_out_s", 0.0) or 0.0)
+    if clip.size == 0 or (fi <= 1e-3 and fo <= 1e-3):
+        return clip
+    n = len(clip)
+    env = np.ones(n, dtype=np.float32)
+    nfi = min(n, int(fi * sr))
+    nfo = min(n, int(fo * sr))
+    if nfi > 1:
+        env[:nfi] *= np.linspace(0.0, 1.0, nfi, dtype=np.float32)
+    if nfo > 1:
+        env[n - nfo :] *= np.linspace(1.0, 0.0, nfo, dtype=np.float32)
+    return (clip * env).astype(np.float32)
 
 
 def _channel_of(session: Dict[str, Any], speaker_id: str) -> Dict[str, Any]:
@@ -262,6 +282,19 @@ def public(session: Dict[str, Any]) -> Dict[str, Any]:
         return (0, int(k)) if str(k).isdigit() else (1, int(k[1:]) if k[1:].isdigit() else 0)
 
     order: List[str] = sorted(all_ids, key=_ord)
+    # A user-arranged track order (drag / arrows) wins; ids it doesn't know about
+    # (e.g. a speaker added since) fall back to roster order at the end.
+    saved = [str(k) for k in session.get("track_order", []) if str(k) in all_ids]
+    if saved:
+        order = saved + [k for k in order if k not in saved]
+
+    def _rev(fn: str) -> int:
+        # Cheap content marker so the UI can cache per-clip waveform peaks across
+        # the cache-busted URLs public() hands out on every call.
+        try:
+            return int((_dir(sid) / fn).stat().st_mtime)
+        except OSError:
+            return 0
 
     tracks = []
     for spk_id in order:
@@ -278,6 +311,9 @@ def public(session: Dict[str, Any]) -> Dict[str, Any]:
                 "trim_end_s": round(float(s.get("trim_end_s", s.get("raw_duration_s", 0.0)) or 0.0), 3),
                 "speed": float(s.get("speed", 1.0) or 1.0),
                 "gain_db": float(s.get("gain_db", 0.0) or 0.0),
+                "fade_in_s": round(float(s.get("fade_in_s", 0.0) or 0.0), 3),
+                "fade_out_s": round(float(s.get("fade_out_s", 0.0) or 0.0), 3),
+                "rev": _rev(s["file"]),
                 "inpaint": bool(s.get("inpaint", False)),
                 "has_bed": bool(s.get("inpaint_bed")),
                 "preserve_nonvocal": bool(s.get("preserve_nonvocal", False)),
@@ -687,9 +723,98 @@ def set_segment(sid: str, index: int, **fields: Any) -> Dict[str, Any]:
             seg["speed"] = float(np.clip(float(fields["speed"]), 0.5, 2.0))
         if fields.get("gain_db") is not None:
             seg["gain_db"] = float(np.clip(float(fields["gain_db"]), -36.0, 36.0))
+        if fields.get("fade_in_s") is not None:
+            seg["fade_in_s"] = round(float(np.clip(float(fields["fade_in_s"]), 0.0, 30.0)), 3)
+        if fields.get("fade_out_s") is not None:
+            seg["fade_out_s"] = round(float(np.clip(float(fields["fade_out_s"]), 0.0, 30.0)), 3)
         _stitch(session)
         _write(session)
         return public(session)
+
+
+def move_segment(sid: str, index: int, speaker_id: str, start_s: Optional[float] = None) -> Dict[str, Any]:
+    """Re-home a segment onto another track (and optionally a new start). The
+    audio is untouched — the clip keeps its current take until the user chooses
+    to regenerate it in the new channel's voice."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
+        if seg is None:
+            raise FileNotFoundError(f"Segment {index} not found")
+        dst = session.get("speakers", {}).get(str(speaker_id))
+        if dst is None:
+            raise FileNotFoundError(f"Channel {speaker_id} not found")
+        src = _channel_of(session, seg["speaker_id"])
+        if (dst.get("kind") == "audio") != (src.get("kind") == "audio"):
+            raise ValueError("Clips can only move between tracks of the same kind")
+        seg["speaker_id"] = str(speaker_id)
+        if start_s is not None:
+            seg["start_s"] = round(max(0.0, float(start_s)), 3)
+        # Re-stitch: the destination channel's gain/mute may differ.
+        _stitch(session)
+        _write(session)
+        return public(session)
+
+
+def reorder_tracks(sid: str, order: List[str]) -> Dict[str, Any]:
+    """Reorder the timeline's tracks. Purely organizational — the mix is additive
+    so nothing is re-rendered. Generative speakers are renumbered so top-to-bottom
+    is always Speaker 1..N: configs, refs and segments are re-attributed together,
+    so every clip keeps its own voice, text and audio."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        req = [str(k) for k in order]
+        existing = set(session.get("speakers", {}))
+        if len(req) != len(existing) or set(req) != existing:
+            raise ValueError("Track order must list every track exactly once")
+        nums = [k for k in req if k.isdigit()]
+        ren = {old: str(i + 1) for i, old in enumerate(nums)}
+
+        def m(k: str) -> str:
+            return ren.get(str(k), str(k))
+
+        session["speakers"] = {
+            m(k): ({**v, "name": _speaker_name(m(k), v)} if str(k).isdigit() else v)
+            for k, v in session.get("speakers", {}).items()
+        }
+        session["refs"] = {m(k) if str(k).isdigit() else str(k): v for k, v in session.get("refs", {}).items()}
+        for s in session["segments"]:
+            s["speaker_id"] = m(str(s["speaker_id"]))
+        session["track_order"] = [m(k) for k in req]
+        _write(session)
+        return public(session)
+
+
+def segment_peaks(sid: str, index: int, n: int = 800) -> Dict[str, Any]:
+    """Coarse max-abs amplitude bins over a segment's FULL raw audio (pre-trim).
+    The UI slices the trim window out client-side, so one fetch survives any
+    amount of trim/fade/gain dragging."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
+        if seg is None:
+            raise FileNotFoundError(f"Segment {index} not found")
+        sr = int(session["sample_rate"])
+        raw = load_audio(_dir(sid) / seg["file"], sr=sr)
+        if raw.size == 0:
+            return {"index": int(index), "peaks": [], "raw_duration_s": 0.0}
+        n = max(16, min(int(n), 4000))
+        block = max(1, int(np.ceil(len(raw) / n)))
+        m = int(np.ceil(len(raw) / block))
+        a = np.abs(raw)
+        a = np.pad(a, (0, m * block - len(a)))
+        peaks = a.reshape(m, block).max(axis=1)
+        return {
+            "index": int(index),
+            "peaks": [round(float(x), 4) for x in peaks],
+            "raw_duration_s": round(len(raw) / sr, 3),
+        }
 
 
 def reflow(sid: str, gap_ms: Optional[int] = None, speed: Optional[float] = None) -> Dict[str, Any]:
@@ -761,6 +886,8 @@ def add_speaker(sid: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         nids = [int(k) for k in session.get("speakers", {}) if str(k).isdigit()]
         nid = str((max(nids) + 1) if nids else 1)
         session.setdefault("speakers", {})[nid] = {**cfg, "name": _speaker_name(nid, cfg)}
+        if session.get("track_order"):
+            session["track_order"].append(nid)
         _write(session)
         return public(session)
 
@@ -846,6 +973,8 @@ def add_audio_channel(sid: str, name: str, audio: np.ndarray, in_sr: int) -> Dic
             "custom_name": label,
             "gain_db": 0.0,
         }
+        if session.get("track_order"):
+            session["track_order"].append(pos)
         session["segments"].append(
             {
                 "index": nid,
@@ -993,6 +1122,12 @@ def remove_speaker(sid: str, pos: str) -> Dict[str, Any]:
             else:
                 new_refs[k] = fn
         session["refs"] = new_refs
+        if session.get("track_order"):
+            session["track_order"] = [
+                str(int(k) - 1) if is_num and str(k).isdigit() and int(k) > p else str(k)
+                for k in session["track_order"]
+                if str(k) != pos
+            ]
         _stitch(session)
         _write(session)
         return public(session)
@@ -1058,8 +1193,12 @@ def split_segment(sid: str, index: int, at_s: float) -> Dict[str, Any]:
             "trim_end_s": seg.get("trim_end_s", seg.get("raw_duration_s", 0.0)),
             "speed": sp,
             "start_s": round(start + offset_eff, 3),
+            # The outer fades follow their ends; the fresh cut itself is clean.
+            "fade_in_s": 0.0,
+            "fade_out_s": float(seg.get("fade_out_s", 0.0) or 0.0),
         }
         seg["trim_end_s"] = raw_cut
+        seg["fade_out_s"] = 0.0
         session["segments"].append(right)
         _stitch(session)
         _write(session)
@@ -1082,6 +1221,7 @@ def _bake_clip(d: Path, seg: Dict[str, Any], sr: int) -> np.ndarray:
     g = float(seg.get("gain_db", 0.0) or 0.0)
     if clip.size and abs(g) > 1e-3:
         clip = clip * float(10.0 ** (g / 20.0))
+    clip = _apply_fades(clip, seg, sr)
     return clip.astype(np.float32)
 
 
@@ -1529,6 +1669,9 @@ def promote_channel(sid: str, pos: str, prepped: np.ndarray, prepped_sr: int, la
                     s["text"] = t
         # Destroy the old external channel (its clips now live on the new speaker).
         session["speakers"].pop(str(pos), None)
+        if session.get("track_order"):
+            # The promoted speaker keeps the old channel's spot in the layout.
+            session["track_order"] = [new_pos if str(k) == str(pos) else str(k) for k in session["track_order"]]
         _stitch(session)
         _write(session)
         return public(session)

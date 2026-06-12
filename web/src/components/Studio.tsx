@@ -85,6 +85,9 @@ export function Studio({
   onPromoteChannel,
   onMergeSegments,
   onCollapseTrack,
+  onMoveSegment,
+  onReorderTracks,
+  onVoiceSaved,
   onUndo,
   playCue,
   onSetPerformance,
@@ -136,6 +139,9 @@ export function Studio({
   onPromoteChannel: (pos: string, name: string) => Promise<MultitrackSession | null>
   onMergeSegments: (indices: number[]) => Promise<void>
   onCollapseTrack: (pos: string) => Promise<void>
+  onMoveSegment: (index: number, speakerId: string, startS: number) => void
+  onReorderTracks: (order: string[]) => Promise<MultitrackSession | null>
+  onVoiceSaved?: () => void
   onUndo: () => void
   onSetPerformance: (
     index: number,
@@ -293,6 +299,39 @@ export function Studio({
     }
   }
 
+  // Reorder tracks (drag in the editor, or the ▲▼ arrows below). The backend
+  // renumbers generative speakers so top-to-bottom always reads Speaker 1..N —
+  // permute the local roster identically so Speaker N still maps to row N.
+  const handleReorderTracks = async (order: string[]) => {
+    const s = await onReorderTracks(order)
+    if (s) {
+      const numeric = order.filter((id) => /^\d+$/.test(id))
+      setSpeakers((prev) => numeric.map((id) => prev[parseInt(id, 10) - 1] ?? defaultSpeaker()))
+      setScript(scriptFromSession(s)) // "Speaker N:" labels follow the new order
+    }
+    return s
+  }
+
+  const moveSpeaker = (i: number, dir: -1 | 1) => {
+    const j = i + dir
+    if (j < 0 || j >= speakers.length) return
+    if (liveSync && session) {
+      const ids = session.tracks.map((t) => t.speaker_id)
+      const a = ids.indexOf(String(i + 1))
+      const b = ids.indexOf(String(j + 1))
+      if (a < 0 || b < 0) return
+      const next = [...ids]
+      ;[next[a], next[b]] = [next[b], next[a]]
+      void handleReorderTracks(next)
+    } else {
+      setSpeakers((prev) => {
+        const next = [...prev]
+        ;[next[i], next[j]] = [next[j], next[i]]
+        return next
+      })
+    }
+  }
+
   const addSpeaker = () => {
     const cfg = defaultSpeaker()
     setSpeakers((prev) => [...prev, cfg])
@@ -386,6 +425,8 @@ export function Studio({
               voices={voices}
               onChange={(c) => setSpeaker(i, c)}
               onRemove={mode === 'multi' && speakers.length > 1 ? () => removeSpeaker(i) : undefined}
+              onMoveUp={mode === 'multi' && speakers.length > 1 && i > 0 ? () => moveSpeaker(i, -1) : undefined}
+              onMoveDown={mode === 'multi' && speakers.length > 1 && i < activeSpeakers.length - 1 ? () => moveSpeaker(i, 1) : undefined}
             />
           ))}
           {mode === 'multi' && (
@@ -506,7 +547,7 @@ export function Studio({
             )}
           </div>
           <button
-            className="btn primary"
+            className={`btn primary${running ? ' busy-glow' : ''}`}
             disabled={running || !script.trim()}
             onClick={() => {
               const body = buildBody()
@@ -626,6 +667,9 @@ export function Studio({
             onRemoveTrack={handleRemoveTrack}
             onMergeSegments={onMergeSegments}
             onCollapseTrack={onCollapseTrack}
+            onMoveSegment={onMoveSegment}
+            onReorderTracks={(order) => void handleReorderTracks(order)}
+            onVoiceSaved={onVoiceSaved}
             onUndo={onUndo}
             playCue={playCue}
             onSetPerformance={onSetPerformance}

@@ -47,18 +47,32 @@ export function SpeakerCard({
   voices,
   onChange,
   onRemove,
+  onMoveUp,
+  onMoveDown,
 }: {
   index: number
   config: SpeakerConfig
   voices: Voice[]
   onChange: (c: SpeakerConfig) => void
   onRemove?: () => void
+  onMoveUp?: () => void
+  onMoveDown?: () => void
 }) {
   const set = (patch: Partial<SpeakerConfig>) => onChange({ ...config, ...patch })
 
   return (
     <div className="speaker-card">
       <div className="sc-head">
+        {(onMoveUp || onMoveDown) && (
+          <div className="sc-order">
+            <button className="sc-order-btn" disabled={!onMoveUp} onClick={onMoveUp} title="Move this speaker (and its track) up">
+              ▲
+            </button>
+            <button className="sc-order-btn" disabled={!onMoveDown} onClick={onMoveDown} title="Move this speaker (and its track) down">
+              ▼
+            </button>
+          </div>
+        )}
         <div className="speaker-badge">{index}</div>
         <div className="sc-voice">
           {config.mode === 'clone' ? config.voice ?? 'No voice selected' : config.mode === 'design' ? 'Designed voice' : 'Auto voice'}

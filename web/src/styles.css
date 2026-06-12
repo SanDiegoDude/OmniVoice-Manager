@@ -232,6 +232,12 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 .player audio { width: 100%; margin-top: 8px; }
 .player .waveform { background: var(--bg); border: 1px solid var(--border-soft); display: block; }
 .btn.stopbtn { background: var(--bad); border-color: transparent; color: white; font-weight: 600; }
+
+/* Three-state transport button: resting green → playing green → stopped red. */
+.btn.playbtn.idle { background: rgba(63, 208, 138, 0.14); border-color: rgba(63, 208, 138, 0.45); color: #6fe0aa; }
+.btn.playbtn.idle:hover { background: rgba(63, 208, 138, 0.24); border-color: var(--good); }
+.btn.playbtn.live { background: var(--good); border-color: var(--good); color: #04200f; font-weight: 600; box-shadow: 0 0 12px rgba(63, 208, 138, 0.55); }
+.btn.playbtn.stopped { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 600; }
 .player .ptitle { font-weight: 600; font-size: 13.5px; }
 .player .pmeta { color: var(--text-faint); font-size: 11.5px; }
 
@@ -273,6 +279,16 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 /* ── Multitrack editor ───────────────────────────────────────────── */
 .spinner.sm { width: 11px; height: 11px; border-width: 2px; }
 .mtk-grid { display: flex; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); overflow: hidden; background: var(--bg); }
+
+/* "It's working" — a slow shifting glow on the whole editor frame (and the
+   Generate button via .busy-glow) so activity reads from across the room. */
+@keyframes working-glow {
+  0% { box-shadow: 0 0 0 1px rgba(124, 156, 255, 0.25), 0 0 18px rgba(124, 156, 255, 0.10); }
+  50% { box-shadow: 0 0 0 1px rgba(155, 109, 255, 0.45), 0 0 30px rgba(155, 109, 255, 0.28); }
+  100% { box-shadow: 0 0 0 1px rgba(124, 156, 255, 0.25), 0 0 18px rgba(124, 156, 255, 0.10); }
+}
+.mtk.working .mtk-grid { animation: working-glow 2.2s ease-in-out infinite; border-color: rgba(155, 109, 255, 0.4); }
+.btn.busy-glow { animation: working-glow 2.2s ease-in-out infinite; }
 .mtk-labels { flex: 0 0 auto; background: var(--bg-elev); border-right: 1px solid var(--border); z-index: 2; }
 .mtk-corner { border-bottom: 1px solid var(--border-soft); }
 .mtk-label { position: relative; display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 0 8px 0 9px; border-bottom: 1px solid var(--border-soft); overflow: hidden; }
@@ -353,14 +369,90 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 /* Recording indicator */
 .rec-dot { width: 10px; height: 10px; border-radius: 50%; background: #ef4444; display: inline-block; animation: recBlink 1s ease-in-out infinite; }
 @keyframes recBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
-.mtk-seg-bar { display: flex; align-items: center; gap: 4px; }
+.mtk-seg-bar { display: flex; align-items: center; gap: 4px; position: relative; z-index: 2; }
+
+/* In-clip waveform: bottom-pinned upper envelope behind the controls/text. */
+.mtk-seg-wave {
+  position: absolute; left: 0; right: 0; bottom: 0; top: 0;
+  width: 100%; height: 100%;
+  pointer-events: none; z-index: 0; border-radius: 5px;
+}
+
+/* DAW handles on clips: trim edges, fade corners, dB line. Subtle until hover. */
+.mtk-trim-h {
+  position: absolute; top: 0; bottom: 0; width: 7px; z-index: 3;
+  cursor: ew-resize; opacity: 0; transition: opacity 0.1s;
+}
+.mtk-trim-h.l { left: 0; border-radius: 5px 0 0 5px; background: linear-gradient(90deg, rgba(52, 211, 153, 0.75), transparent); }
+.mtk-trim-h.r { right: 0; border-radius: 0 5px 5px 0; background: linear-gradient(270deg, rgba(239, 68, 68, 0.75), transparent); }
+.mtk-seg:hover .mtk-trim-h { opacity: 1; }
+.mtk-fade-h {
+  position: absolute; top: -1px; width: 11px; height: 11px; z-index: 4;
+  cursor: ew-resize; opacity: 0; transition: opacity 0.1s;
+  border: 1.5px solid rgba(255, 255, 255, 0.85); border-radius: 50%;
+  background: rgba(12, 16, 28, 0.85); box-sizing: border-box;
+}
+.mtk-seg:hover .mtk-fade-h, .mtk-fade-h.set { opacity: 0.95; }
+.mtk-fade-h.set { border-color: var(--accent-2); background: rgba(155, 109, 255, 0.45); }
+.mtk-gain-line {
+  position: absolute; left: 4px; right: 4px; height: 9px; margin-top: -4.5px; z-index: 3;
+  cursor: ns-resize; display: flex; align-items: center; opacity: 0; transition: opacity 0.1s;
+}
+.mtk-gain-line::before { content: ''; flex: 1; height: 1.5px; background: rgba(255, 255, 255, 0.55); box-shadow: 0 0 4px rgba(0, 0, 0, 0.6); }
+.mtk-seg:hover .mtk-gain-line, .mtk-gain-line.set, .mtk-gain-line.active { opacity: 1; }
+.mtk-gain-line.set::before, .mtk-gain-line.active::before { background: var(--warn); }
+.mtk-gain-tag {
+  position: absolute; right: 2px; top: -14px; font-size: 9px; font-variant-numeric: tabular-nums;
+  color: var(--warn); background: rgba(12, 16, 28, 0.85); padding: 0 4px; border-radius: 3px; pointer-events: none;
+}
+
+/* A clip lifted off its lane (mid drag to another track) dims in place… */
+.mtk-seg.lifting { opacity: 0.35; }
+/* …while its ghost rides the cursor on the target lane. */
+.mtk-seg-ghost {
+  position: absolute; z-index: 6; border: 1.5px dashed var(--good); border-radius: 6px;
+  background: rgba(63, 208, 138, 0.16); display: flex; align-items: center; padding: 3px 6px;
+  pointer-events: none; overflow: hidden;
+}
+.mtk-seg-ghost.invalid { border-color: var(--bad); background: rgba(255, 107, 125, 0.14); }
+.mtk-seg-ghost-tag { font-size: 10px; color: var(--good); white-space: nowrap; }
+.mtk-seg-ghost.invalid .mtk-seg-ghost-tag { color: var(--bad); }
+
+/* Track reorder: grip on the label, insertion line while dragging. */
+.mtk-grip { flex: none; cursor: grab; color: var(--text-faint); font-size: 11px; padding: 0 2px; user-select: none; }
+.mtk-grip:hover { color: var(--text); }
+.mtk-label.dragging { opacity: 0.45; }
+.mtk-track-drop {
+  position: absolute; left: 0; right: 0; height: 2px; z-index: 6;
+  background: var(--accent); box-shadow: 0 0 8px var(--accent); pointer-events: none;
+}
+
+/* Speaker roster reorder arrows */
+.sc-order { display: flex; flex-direction: column; gap: 1px; flex: none; }
+.sc-order-btn {
+  width: 16px; height: 12px; padding: 0; line-height: 1; font-size: 7px;
+  display: grid; place-items: center; border: 1px solid var(--border);
+  border-radius: 3px; background: var(--bg-elev-2); color: var(--text-dim); cursor: pointer;
+}
+.sc-order-btn:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.sc-order-btn:disabled { opacity: 0.3; cursor: default; }
 .mtk-ic { width: 22px; height: 19px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; border: 1px solid rgba(255,255,255,.18); background: rgba(0,0,0,.28); color: #fff; cursor: pointer; font-size: 10px; padding: 0; line-height: 1; }
 .mtk-ic:hover:not(:disabled) { background: rgba(0,0,0,.45); }
 .mtk-ic.on { background: var(--bad); border-color: var(--bad); }
+.mtk-ic.play-on { background: var(--good); border-color: var(--good); color: #04200f; box-shadow: 0 0 8px rgba(63, 208, 138, 0.6); }
 .mtk-ic:disabled { opacity: .4; cursor: default; }
 .mtk-seg-dur { margin-left: auto; font-size: 10px; color: rgba(255,255,255,.55); font-variant-numeric: tabular-nums; }
-.mtk-seg-text { font-size: 11px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(255,255,255,.85); cursor: text; }
-.mtk-seg-edit { flex: 1; width: 100%; resize: none; box-sizing: border-box; font-family: inherit; font-size: 11px; line-height: 1.25; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--accent); background: rgba(0,0,0,.4); color: #fff; }
+/* Dialogue pinned to the top, floating over the waveform on a gradient scrim so
+   it stays readable even when the rows are squashed tight. */
+.mtk-seg-text {
+  position: relative; z-index: 2;
+  font-size: 11px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: rgba(255,255,255,.9); cursor: text;
+  background: linear-gradient(180deg, rgba(8, 11, 18, 0.72) 0%, rgba(8, 11, 18, 0.38) 70%, rgba(8, 11, 18, 0) 100%);
+  margin: 0 -6px; padding: 1px 6px 5px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+.mtk-seg-edit { flex: 1; width: 100%; resize: none; box-sizing: border-box; font-family: inherit; font-size: 11px; line-height: 1.25; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--accent); background: rgba(0,0,0,.4); color: #fff; position: relative; z-index: 2; }
 .mtk-seg-edit:focus { outline: none; }
 .mtk-seg.dirty { box-shadow: 0 0 0 1px var(--warn) inset; }
 .mtk-ic.warn { background: var(--warn); border-color: var(--warn); color: #1b1300; }

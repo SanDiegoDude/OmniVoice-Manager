@@ -56,8 +56,10 @@ from .schemas import (
     GenerateRequest,
     InpaintRequest,
     MergeSegmentsRequest,
+    MoveSegmentRequest,
     InsertSegmentRequest,
     LoadModelRequest,
+    TrackOrderRequest,
     PromoteChannelRequest,
     ProcessVoiceRequest,
     ReflowRequest,
@@ -826,7 +828,39 @@ def multitrack_edit(sid: str, index: int, req: EditSegmentRequest):
             sid, index,
             start_s=req.start_s, trim_start_s=req.trim_start_s,
             trim_end_s=req.trim_end_s, speed=req.speed, gain_db=req.gain_db,
+            fade_in_s=req.fade_in_s, fade_out_s=req.fade_out_s,
         )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/segment/{index}/move")
+def multitrack_move_segment(sid: str, index: int, req: MoveSegmentRequest):
+    """Move a clip to another track (the audio stays — regenerate to re-voice)."""
+    try:
+        return sessions.move_segment(sid, index, req.speaker_id, req.start_s)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/multitrack/{sid}/track-order")
+def multitrack_track_order(sid: str, req: TrackOrderRequest):
+    """Reorder tracks (organizational only — the additive mix is unchanged)."""
+    try:
+        return sessions.reorder_tracks(sid, req.order)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/multitrack/{sid}/segment/{index}/peaks")
+def multitrack_segment_peaks(sid: str, index: int, n: int = 800):
+    """Amplitude bins over a segment's full raw audio (for in-clip waveforms)."""
+    try:
+        return sessions.segment_peaks(sid, index, n)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
 
