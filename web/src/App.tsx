@@ -22,6 +22,20 @@ export default function App() {
   const [session, setSession] = useState<MultitrackSession | null>(null)
   // Cues the multitrack editor to play from a spot after a render completes.
   const [playCue, setPlayCue] = useState<{ nonce: number; index?: number; channel?: string; at?: number } | null>(null)
+  // Side columns: collapsible on desktop, pop-over drawers on mobile.
+  const isMobile = () => window.matchMedia('(max-width: 1000px)').matches
+  const [leftOpen, setLeftOpen] = useState(() => !isMobile() && localStorage.getItem('ov-left') !== '0')
+  const [rightOpen, setRightOpen] = useState(() => !isMobile() && localStorage.getItem('ov-right') !== '0')
+  const toggleLeft = () =>
+    setLeftOpen((v) => {
+      localStorage.setItem('ov-left', v ? '0' : '1')
+      return !v
+    })
+  const toggleRight = () =>
+    setRightOpen((v) => {
+      localStorage.setItem('ov-right', v ? '0' : '1')
+      return !v
+    })
   const sessionRef = useRef<MultitrackSession | null>(null)
   const replacingRef = useRef<string | null>(null)
   const [regenIndex, setRegenIndex] = useState<number | null>(null)
@@ -659,8 +673,8 @@ export default function App() {
         onToggleLod={toggleLod}
         onToggleLowVram={toggleLowVram}
       />
-      <div className="workspace">
-        <div className="col">
+      <div className={`workspace${leftOpen ? '' : ' no-left'}${rightOpen ? '' : ' no-right'}`}>
+        <div className="col side-left">
           <VoiceLibrary
             tree={tree}
             count={voices.length}
@@ -724,7 +738,7 @@ export default function App() {
           notify={notify}
         />
 
-        <div className="col">
+        <div className="col side-right">
           <SidePanel
             history={history}
             outputs={outputs}
@@ -736,6 +750,34 @@ export default function App() {
           />
         </div>
       </div>
+
+      {/* Side-panel toggles: ride the panel edge when open, dock to the screen
+          edge when closed. On mobile the panels become overlay drawers. */}
+      <button
+        className={`edge-tab left${leftOpen ? ' open' : ''}`}
+        onClick={toggleLeft}
+        title={leftOpen ? 'Hide voices & tags' : 'Voices & tags'}
+        aria-label="Toggle voice library"
+      >
+        {leftOpen ? '◂' : '🎙'}
+      </button>
+      <button
+        className={`edge-tab right${rightOpen ? ' open' : ''}`}
+        onClick={toggleRight}
+        title={rightOpen ? 'Hide history & outputs' : 'History & outputs'}
+        aria-label="Toggle history"
+      >
+        {rightOpen ? '▸' : '🕘'}
+      </button>
+      {(leftOpen || rightOpen) && (
+        <div
+          className="drawer-backdrop"
+          onClick={() => {
+            if (leftOpen) toggleLeft()
+            if (rightOpen) toggleRight()
+          }}
+        />
+      )}
 
       {labOpen && (
         <VoiceLab voices={voices} onClose={() => setLabOpen(false)} onSaved={refreshVoices} notify={notify} />

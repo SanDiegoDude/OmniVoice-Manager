@@ -44,6 +44,7 @@ input, textarea, select { font-family: inherit; }
   display: grid;
   grid-template-rows: auto 1fr;
   height: 100vh;
+  height: 100dvh; /* mobile browsers: exclude the URL bar */
   overflow: hidden;
 }
 
@@ -55,9 +56,33 @@ input, textarea, select { font-family: inherit; }
   overflow: hidden;
   min-height: 0;
 }
+/* Collapsible side columns (desktop): drop the track when hidden. */
+.workspace.no-left { grid-template-columns: 1fr 340px; }
+.workspace.no-right { grid-template-columns: 280px 1fr; }
+.workspace.no-left.no-right { grid-template-columns: 1fr; }
+.workspace.no-left .side-left { display: none; }
+.workspace.no-right .side-right { display: none; }
 
 .col { min-height: 0; display: flex; flex-direction: column; gap: 14px; overflow: hidden; }
-.col-scroll { overflow-y: auto; padding-right: 4px; display: flex; flex-direction: column; gap: 14px; }
+.col-scroll { overflow-y: auto; padding-right: 4px; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+
+/* Edge tabs: dock at the screen edge when the panel is closed, ride the
+   panel's inner edge when open. */
+.edge-tab {
+  position: fixed; top: 50%; transform: translateY(-50%);
+  z-index: 95; width: 24px; height: 64px; padding: 0;
+  display: grid; place-items: center;
+  background: var(--bg-elev); color: var(--text-dim);
+  border: 1px solid var(--border); font-size: 12px;
+  transition: left .15s ease, right .15s ease, color .12s, border-color .12s;
+}
+.edge-tab:hover { color: var(--text); border-color: var(--accent); }
+.edge-tab.left { left: 0; border-left: none; border-radius: 0 8px 8px 0; }
+.edge-tab.right { right: 0; border-right: none; border-radius: 8px 0 0 8px; }
+.edge-tab.left.open { left: 294px; }
+.edge-tab.right.open { right: 354px; }
+
+.drawer-backdrop { display: none; }
 
 /* ---------- Top bar ---------- */
 .topbar {
@@ -415,3 +440,63 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 .card.collapsed { position: relative; padding: 10px 14px 10px 30px; cursor: pointer; display: flex; align-items: center; }
 .card.collapsed:hover { border-color: var(--border); }
 .collapsed-title { font-weight: 600; color: var(--text-dim); font-size: 13px; }
+
+/* ---------- Mobile ---------- */
+@media (max-width: 1000px) {
+  /* Single column: the studio owns the screen, side panels become drawers. */
+  .workspace {
+    display: flex;
+    flex-direction: column;
+    padding: 10px;
+    gap: 10px;
+  }
+  .workspace .side-left,
+  .workspace .side-right {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    z-index: 90;
+    width: min(85vw, 340px);
+    background: var(--bg-elev);
+    padding: 12px;
+    overflow-y: auto;
+    box-shadow: 0 0 50px rgba(0, 0, 0, 0.6);
+  }
+  .workspace .side-left { left: 0; border-right: 1px solid var(--border); }
+  .workspace .side-right { right: 0; border-left: 1px solid var(--border); }
+
+  .drawer-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 85;
+    background: rgba(5, 7, 12, 0.55);
+    backdrop-filter: blur(1px);
+  }
+
+  /* Edge tabs ride the drawer edge (above the backdrop). */
+  .edge-tab { z-index: 95; height: 56px; width: 26px; }
+  .edge-tab.left.open { left: min(85vw, 340px); }
+  .edge-tab.right.open { right: min(85vw, 340px); }
+
+  /* Top bar: wrap, shed the meters, tighter padding. */
+  .topbar { flex-wrap: wrap; gap: 8px; padding: 8px 10px; row-gap: 6px; }
+  .gpu-meter { display: none; }
+  .brand small { display: none; }
+
+  /* 16px inputs prevent iOS auto-zoom on focus. */
+  input, textarea, select { font-size: 16px; }
+
+  /* Bigger touch targets. */
+  .btn { padding: 8px 12px; }
+  .btn.sm { padding: 6px 10px; }
+
+  /* Modals go (nearly) full screen. */
+  .modal-overlay { padding: 8px; align-items: flex-start; padding-top: 12px; }
+  .modal-panel { width: 100% !important; max-width: 100%; max-height: calc(100dvh - 24px); }
+
+  /* Cards breathe less on a small screen. */
+  .card { padding: 12px; }
+  .toasts { left: 10px; right: 10px; bottom: 10px; }
+  .toasts > * { width: auto; }
+}
