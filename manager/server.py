@@ -1084,40 +1084,55 @@ _mount_spa()
 def _ensure_ssl_cert() -> tuple[str, str]:
     """Create (once) and reuse a self-signed cert so the UI can be served over
     HTTPS. Browsers only expose microphone capture (getUserMedia) on secure
-    origins — plain http:// over the LAN hides the whole API."""
+    origins — plain http:// over the LAN hides the whole API.
+
+    Generated in pure Python (cryptography) — no external openssl binary, which
+    is often missing or misconfigured on Windows."""
+    import datetime
+    import ipaddress
     import socket
-    import subprocess
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
 
     d = DATA_DIR / "ssl"
     d.mkdir(parents=True, exist_ok=True)
     crt, key = d / "server.crt", d / "server.key"
     if not (crt.exists() and key.exists()):
         host = socket.gethostname()
-        san = {f"DNS:{host}", "DNS:localhost", "IP:127.0.0.1"}
+        ips = {"127.0.0.1"}
         try:
-            for ip in socket.gethostbyname_ex(host)[2]:
-                san.add(f"IP:{ip}")
+            ips.update(socket.gethostbyname_ex(host)[2])
         except OSError:
             pass
-        try:
-            subprocess.run(
-                [
-                    "openssl", "req", "-x509", "-newkey", "rsa:2048", "-sha256",
-                    "-days", "3650", "-nodes",
-                    "-keyout", str(key), "-out", str(crt),
-                    "-subj", f"/CN={host}",
-                    "-addext", f"subjectAltName={','.join(sorted(san))}",
-                ],
-                check=True,
-                capture_output=True,
+        san = x509.SubjectAlternativeName(
+            [x509.DNSName(host), x509.DNSName("localhost")]
+            + [x509.IPAddress(ipaddress.ip_address(ip)) for ip in sorted(ips)]
+        )
+        key_obj = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key_obj.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + datetime.timedelta(days=3650))
+            .add_extension(san, critical=False)
+            .sign(key_obj, hashes.SHA256())
+        )
+        key.write_bytes(
+            key_obj.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
             )
-        except FileNotFoundError:
-            raise SystemExit(
-                "--ssl needs the 'openssl' command to generate a self-signed cert, "
-                "but it was not found on PATH. Install OpenSSL (on Windows it ships "
-                "with Git for Windows: <Git>\\usr\\bin\\openssl.exe) or place a cert "
-                f"at {crt} and key at {key} manually."
-            )
+        )
+        crt.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
         print(f"Generated self-signed TLS cert: {crt}", flush=True)
     return str(crt), str(key)
 

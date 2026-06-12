@@ -44,18 +44,46 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
 
-    # Die when the parent (server) dies — even on SIGKILL — so a hard-killed
-    # server can never orphan this GPU worker and leak its CUDA context/VRAM.
-    try:
-        import ctypes
-        import signal
+    # Die when the parent (server) dies — even on SIGKILL / hard kill — so a
+    # killed server can never orphan this GPU worker and leak its CUDA
+    # context/VRAM.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            import multiprocessing
+            import threading
 
-        PR_SET_PDEATHSIG = 1
-        ctypes.CDLL("libc.so.6", use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
-        if os.getppid() == 1:  # parent already gone during startup race
-            os._exit(0)
-    except Exception:  # noqa: BLE001
-        pass
+            # NOT os.getppid(): venv python.exe is a launcher shim, so the OS
+            # parent is the shim, which outlives a killed server. The
+            # multiprocessing parent is the real server process.
+            pp = multiprocessing.parent_process()
+            parent_pid = pp.pid if pp is not None else os.getppid()
+
+            SYNCHRONIZE = 0x00100000
+            kernel32 = ctypes.windll.kernel32
+            parent = kernel32.OpenProcess(SYNCHRONIZE, False, parent_pid)
+            if parent:
+                # WaitForSingleObject returns the moment the parent exits.
+                def _watch_parent(handle=parent):
+                    kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+                    os._exit(0)
+
+                threading.Thread(target=_watch_parent, daemon=True).start()
+            else:  # parent already gone during startup race
+                os._exit(0)
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        try:
+            import ctypes
+            import signal
+
+            PR_SET_PDEATHSIG = 1
+            ctypes.CDLL("libc.so.6", use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
+            if os.getppid() == 1:  # parent already gone during startup race
+                os._exit(0)
+        except Exception:  # noqa: BLE001
+            pass
 
     import torch
 

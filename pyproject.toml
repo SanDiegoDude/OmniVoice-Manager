@@ -50,6 +50,8 @@ dependencies = [
     "uvicorn[standard]>=0.42.0",
     "einops>=0.8.2",
     "rotary-embedding-torch>=0.8.9",
+    # Self-signed cert generation for --ssl (no external openssl needed).
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

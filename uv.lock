@@ -1674,6 +1674,7 @@ source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
     { name = "audiotsm" },
+    { name = "cryptography" },
     { name = "einops" },
     { name = "fastapi" },
     { name = "gradio" },
@@ -1713,6 +1714,7 @@ eval = [
 requires-dist = [
     { name = "accelerate" },
     { name = "audiotsm", specifier = ">=0.1.2" },
+    { name = "cryptography", specifier = ">=42" },
     { name = "deepfilternet", marker = "extra == 'dereverb'", specifier = ">=0.5.6" },
     { name = "einops", specifier = ">=0.8.2" },
     { name = "fastapi", specifier = ">=0.135.2" },
