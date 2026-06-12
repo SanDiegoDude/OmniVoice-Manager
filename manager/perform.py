@@ -26,7 +26,10 @@ import numpy as np
 import torch
 
 # UI weight (1..5) -> knob value, calibrated by ear (see ROADMAP P1-P3 notes).
-CHARACTER_RELEASE = {1: 0.80, 2: 0.60, 3: 0.40, 4: 0.25, 5: 0.10}
+# NOTE: release direction is inverted vs. the original guess — in practice a
+# LATE release (high value) gives the character the most takeover, so 5 maps
+# to the highest release point and 1 to the lowest.
+CHARACTER_RELEASE = {1: 0.10, 2: 0.25, 3: 0.40, 4: 0.60, 5: 0.80}
 VOICE_STRIDE = {1: 1, 2: 2, 3: 3, 4: 4, 5: 6}
 
 
