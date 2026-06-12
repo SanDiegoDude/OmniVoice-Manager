@@ -64,7 +64,10 @@ def _resolve(provider_id: _Optional[str]):
     provider = get_provider(provider_id) if provider_id else active_provider()
     if not provider:
         raise ScriptAIError(
-            "No AI script providers configured. Add an AI_PROVIDER_* line to .env."
+            "No AI provider is configured, so the AI script writer is unavailable "
+            "(writing your script by hand works fine!). To enable it: copy "
+            ".env_sample to .env, add an AI_PROVIDER_* line with your API key, "
+            "then click the refresh button next to the provider picker."
         )
     return provider
 

@@ -142,12 +142,18 @@ Model weights for OmniVoice, the vocal isolation checkpoint, and (when used) Whi
 
 ---
 
-## Configuration
+## Configuration (optional — AI script writer only)
 
-Copy the template and add your keys:
+**This whole step is optional, and no API keys are required to use the Manager.**
+The `.env` file only powers the AI Smart Script writer; without it you simply
+write (or paste) your own scripts and every other feature — voice cloning,
+multitrack editing, performance transfer, the works — runs exactly the same.
+
+To enable AI dialogue generation, copy the template and add your keys:
 
 ```bash
-cp .env_sample .env
+cp .env_sample .env       # Linux / macOS
+copy .env_sample .env     # Windows
 ```
 
 Declare one AI provider per line:
@@ -156,7 +162,7 @@ Declare one AI provider per line:
 AI_PROVIDER_<ID> = Label | model | base_url (blank = official OpenAI) | api_key
 ```
 
-Comment a line out to hide that provider. After editing `.env`, click **Refresh** next to the provider picker in the UI to reload — no restart needed. The Smart Script writer is optional; everything else works without an AI key.
+Comment a line out to hide that provider. After editing `.env`, click **Refresh** next to the provider picker in the UI to reload — no restart needed.
 
 ---
 
