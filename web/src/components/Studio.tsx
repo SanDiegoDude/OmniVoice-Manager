@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { GenParams, GenerateBody, Job, MultitrackSegment, MultitrackSession, Provider, SpeakerConfig, Voice } from '../api'
 import { AudioPlayer } from './AudioPlayer'
 import { MultitrackEditor } from './MultitrackEditor'
+import { PerformanceCapture, type PerfCaptureState } from './PerformanceCapture'
 import { SpeakerCard } from './SpeakerCard'
 import { Collapsible, Slider, Toggle } from './ui'
 import { blurTag, focusTag } from '../tagInject'
@@ -57,6 +58,7 @@ export function Studio({
   onSelectProvider,
   onReloadProviders,
   onGenerate,
+  onPerformGenerate,
   onGenerateScript,
   onLucky,
   onRegenSegment,
@@ -105,6 +107,7 @@ export function Studio({
   onSelectProvider: (id: string) => void
   onReloadProviders: () => void
   onGenerate: (body: GenerateBody, title: string, multitrack?: boolean) => void
+  onPerformGenerate: (body: GenerateBody, perf: PerfCaptureState) => void
   onGenerateScript: (prompt: string, numSpeakers: number, speakers: SpeakerConfig[], existing: string) => Promise<{ title: string; script: string } | null>
   onLucky: (body: GenerateBody, title: string, multitrack?: boolean) => void
   onRegenSegment: (index: number, text?: string) => void
@@ -147,8 +150,11 @@ export function Studio({
   onFinalize: () => void
   notify: (m: string, k?: 'info' | 'error' | 'success') => void
 }) {
-  const [mode, setMode] = useState<'single' | 'multi'>('single')
-  const [speakers, setSpeakers] = useState<SpeakerConfig[]>([defaultSpeaker(), defaultSpeaker()])
+  // ADR Studio (multitrack) is home: one speaker, one track, ready to act.
+  const [mode, setMode] = useState<'single' | 'multi'>('multi')
+  const [speakers, setSpeakers] = useState<SpeakerConfig[]>([defaultSpeaker()])
+  // Voice Clone tab: optional recorded take that guides the render (V2V).
+  const [perfState, setPerfState] = useState<PerfCaptureState | null>(null)
   const [script, setScript] = useState('')
   const [title, setTitle] = useState('')
   const [aiPrompt, setAiPrompt] = useState('')
@@ -324,7 +330,8 @@ export function Studio({
       body.script = res.script
       body.text = mode === 'single' ? res.script : null
       body.title = res.title
-      onLucky(body, res.title, useMultitrack)
+      if (mode === 'single' && perfState) onPerformGenerate(body, perfState)
+      else onLucky(body, res.title, useMultitrack)
     }
   }
 
@@ -342,11 +349,11 @@ export function Studio({
       <Collapsible className="card" title="🎤 Speakers">
         <div className="flex-between" style={{ marginBottom: 12 }}>
           <div className="segment">
-            <button className={mode === 'single' ? 'active' : ''} onClick={() => setMode('single')}>
-              Single voice
-            </button>
             <button className={mode === 'multi' ? 'active' : ''} onClick={() => setMode('multi')}>
-              Multi-speaker
+              🎬 ADR Studio
+            </button>
+            <button className={mode === 'single' ? 'active' : ''} onClick={() => setMode('single')}>
+              🎤 Voice Clone
             </button>
           </div>
           {mode === 'multi' && (
@@ -376,6 +383,13 @@ export function Studio({
           )}
         </div>
       </Collapsible>
+
+      {/* Voice Clone: optional performance-guided render */}
+      {mode === 'single' && (
+        <Collapsible className="card" title="🎭 Vocal performance (optional)">
+          <PerformanceCapture onState={setPerfState} onWhisperText={(t) => setScript(t)} notify={notify} />
+        </Collapsible>
+      )}
 
       {/* AI prompt */}
       <Collapsible className="card" title="✨ Smart Script">
@@ -482,9 +496,14 @@ export function Studio({
           <button
             className="btn primary"
             disabled={running || !script.trim()}
-            onClick={() => onGenerate(buildBody(), title || 'Untitled Scene', useMultitrack)}
+            onClick={() => {
+              const body = buildBody()
+              if (mode === 'single' && perfState) onPerformGenerate(body, perfState)
+              else onGenerate(body, title || 'Untitled Scene', useMultitrack)
+            }}
           >
-            {running ? <span className="spinner" /> : '🎙'} Generate audio
+            {running ? <span className="spinner" /> : '🎙'}{' '}
+            {mode === 'single' && perfState ? 'Render performance' : 'Generate audio'}
           </button>
         </div>
 
@@ -530,7 +549,7 @@ export function Studio({
       </Collapsible>
 
       {/* Progress / output */}
-      {running && !session && (
+      {running && (mode === 'single' || !session) && (
         <div className="progress-box">
           <div className="row">
             <span className="spinner" />
@@ -543,6 +562,8 @@ export function Studio({
                 ? `De-reverbing voice ${prog.speaker}…`
                 : prog?.stage === 'generating'
                 ? `Generating line ${prog.line}/${prog.total}`
+                : prog?.stage === 'performing'
+                ? 'Transferring your performance…'
                 : prog?.stage === 'leveling'
                 ? 'Matching loudness…'
                 : 'Working…'}

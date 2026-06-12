@@ -201,7 +201,12 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
                 if low_vram:
                     _free("dereverber", "dfn")
             if spk.get("normalize"):
-                wav = normalize_rms(wav)
+                # Active-frame leveling (not whole-signal RMS): quiet references
+                # don't just clone quietly — decode scales output to the ref's
+                # RMS, so an under-leveled ref drags every render down with it.
+                from manager.perform import normalize_active
+
+                wav = normalize_active(wav, spk_sr)
             cleaned[sid] = (wav, spk_sr, spk.get("ref_text") or None)
 
         # Make sure no secondary model is resident before the TTS model loads.

@@ -235,6 +235,18 @@ export const api = {
 
   generate: (body: GenerateBody) =>
     jfetch<{ job_id: string }>('/api/generate', { method: 'POST', body: JSON.stringify(body) }),
+  async generatePerform(
+    body: GenerateBody,
+    take: Blob,
+    perf: { mode: 'character' | 'voice'; strength: number; gain_db: number; speed: number },
+  ): Promise<{ job_id: string }> {
+    const fd = new FormData()
+    fd.append('file', take, 'take.wav')
+    fd.append('payload', JSON.stringify({ ...body, perform: perf }))
+    const res = await fetch('/api/generate-perform', { method: 'POST', body: fd })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Generation failed')
+    return res.json()
+  },
   job: (id: string) => jfetch<Job>(`/api/jobs/${id}`),
 
   multitrackGenerate: (body: GenerateBody) =>

@@ -56,8 +56,10 @@ export default function PerformanceModal({
   const [mode, setMode] = useState<Mode>(existing?.mode ?? 'character')
   const [strength, setStrength] = useState(existing?.strength ?? 3)
   const [text, setText] = useState(seg.text)
-  const [cleanIsolate, setCleanIsolate] = useState(false)
-  const [cleanDereverb, setCleanDereverb] = useState(false)
+  // Cleanup defaults ON for fresh takes (raw mic input without it sounds bad);
+  // re-editing a saved take starts off so we don't double-process it.
+  const [cleanIsolate, setCleanIsolate] = useState(!existing)
+  const [cleanDereverb, setCleanDereverb] = useState(!existing)
   const [processing, setProcessing] = useState(false)
   const [busy, setBusy] = useState<'whisper' | 'save' | 'render' | null>(null)
   const [error, setError] = useState<string | null>(null)

@@ -255,11 +255,29 @@ export default function App() {
         // Keep any current skeleton up until the populated scene arrives, then
         // swap + discard the old one (see job poll).
         replacingRef.current = sessionRef.current?.id ?? null
-      } else {
-        setSession(null)
       }
+      // One-shot renders leave any ADR session untouched — the Voice Clone tab
+      // is a side trip, not a scene replacement.
       const { job_id } = multitrack ? await api.multitrackGenerate(body) : await api.generate(body)
       setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: { multitrack } })
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+
+  // Voice Clone tab: one-shot performance-guided render (V2V over the take).
+  const performGenerate = async (
+    body: GenerateBody,
+    perf: { blob: Blob; gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number },
+  ) => {
+    try {
+      const { job_id } = await api.generatePerform(body, perf.blob, {
+        mode: perf.mode,
+        strength: perf.strength,
+        gain_db: perf.gain_db,
+        speed: perf.speed,
+      })
+      setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: {} })
     } catch (e) {
       notify(String(e), 'error')
     }
@@ -669,6 +687,7 @@ export default function App() {
           onSelectProvider={selectProvider}
           onReloadProviders={reloadProviders}
           onGenerate={startGenerate}
+          onPerformGenerate={performGenerate}
           onGenerateScript={generateScript}
           onLucky={startGenerate}
           onRegenSegment={regenSegment}

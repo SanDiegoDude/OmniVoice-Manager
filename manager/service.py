@@ -198,8 +198,16 @@ def finalize_session(sid: str) -> Dict[str, Any]:
     return {"title": info["title"], **saved}
 
 
-def make_generation_job(model_manager, req: GenerateRequest, title: str) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
+def make_generation_job(
+    model_manager,
+    req: GenerateRequest,
+    title: str,
+    perform: Dict[str, Any] | None = None,
+) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
     payload = build_generation_payload(req)
+    if perform is not None:
+        # Standalone V2V (Voice Clone tab): the single line rides the take.
+        payload["lines"][0]["perform"] = perform
     num_speakers = req.num_speakers if req.multi_speaker else 1
 
     def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:

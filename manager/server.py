@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import re
 import time
+import json
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -349,6 +350,48 @@ def generate(req: GenerateRequest):
     title = req.title or "Untitled Scene"
     try:
         job_fn = service.make_generation_job(model_manager, req, title)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(400, str(e))
+    job_id = job_manager.submit(job_fn, meta={"title": title})
+    return {"job_id": job_id}
+
+
+@app.post("/api/generate-perform")
+async def generate_perform(file: UploadFile = File(...), payload: str = Form(...)):
+    """One-shot performance-guided generation (Voice Clone tab): render the text
+    in the configured voice, riding the uploaded take's timing and delivery."""
+    from .audio_utils import time_stretch
+
+    data = json.loads(payload)
+    perf_cfg = data.pop("perform", None) or {}
+    req = GenerateRequest(**data)
+    title = req.title or "Untitled Take"
+
+    raw = await file.read()
+    tmp = TMP_DIR / f"vperf_{uuid.uuid4().hex}.bin"
+    tmp.write_bytes(raw)
+    try:
+        wav = load_audio(tmp, sr=24000)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Could not read take audio: {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    gain = float(perf_cfg.get("gain_db", 0.0) or 0.0)
+    if abs(gain) > 1e-3:
+        wav = np.clip(wav * (10.0 ** (gain / 20.0)), -1.0, 1.0).astype(np.float32)
+    speed = float(perf_cfg.get("speed", 1.0) or 1.0)
+    if abs(speed - 1.0) > 1e-3:
+        wav = time_stretch(wav, speed)
+    perform = {
+        "waveform": wav,
+        "sample_rate": 24000,
+        "mode": str(perf_cfg.get("mode", "character")),
+        "strength": int(perf_cfg.get("strength", 3)),
+        "seed": perf_cfg.get("seed"),
+    }
+    try:
+        job_fn = service.make_generation_job(model_manager, req, title, perform=perform)
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(400, str(e))
     job_id = job_manager.submit(job_fn, meta={"title": title})
