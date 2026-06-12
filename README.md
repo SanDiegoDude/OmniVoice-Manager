@@ -106,6 +106,13 @@ All GPU work runs in a dedicated child process. This isolates the CUDA context, 
 
 Linux, Windows, and macOS (Apple Silicon) are supported.
 
+> ⚠️ **macOS performance:** the Mac build is fully functional but **much slower
+> than an NVIDIA GPU** — PyTorch's MPS backend only accelerates part of the
+> pipeline (the audio tokenizer falls back to CPU, among others), so renders
+> that take seconds on CUDA can take a minute or more on an M-series Mac.
+> Treat it as a portable/dev experience, not a production one. Exploring
+> [MLX](https://github.com/ml-explore/mlx)-based speedups is on the roadmap.
+
 - An NVIDIA GPU with CUDA, or an Apple Silicon Mac with MPS (CPU works but is slow)
 - Python 3.10+
 - Node.js 18+ (only to build the web UI)
