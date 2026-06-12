@@ -9,8 +9,8 @@ from typing import Any, Callable, Dict, List
 
 import numpy as np
 
-from . import history, sessions, voices
-from .audio_utils import duration_seconds, encode_audio
+from . import history, ref_cache, sessions, voices
+from .audio_utils import duration_seconds, encode_audio, load_audio
 from .config import OUTPUT_DIR, settings
 from .generation import parse_script
 from .schemas import GenerateRequest, GenParams, SpeakerConfig
@@ -37,8 +37,30 @@ def _speaker_to_worker(cfg: SpeakerConfig) -> Dict[str, Any]:
     if cfg.mode == "clone":
         if not cfg.voice:
             raise ValueError("Clone speaker requires a voice selection.")
-        spk["waveform"] = voices.load_voice_audio(cfg.voice)
+        path = voices.resolve_voice_path(cfg.voice)
+        spk["waveform"] = load_audio(path)
+        if cfg.isolate or cfg.dereverb:
+            # Reuse the cleaned reference if this exact voice + flags combo was
+            # processed before; otherwise tag the speaker so the job can cache
+            # the cleaned ref the worker hands back.
+            key = ref_cache.cache_key(path, cfg.isolate, cfg.dereverb, cfg.dereverb_method, cfg.normalize)
+            cached = ref_cache.load(key)
+            if cached is not None:
+                spk["waveform"] = cached
+                spk["isolate"] = spk["dereverb"] = spk["normalize"] = False
+            else:
+                spk["cache_key"] = key
     return spk
+
+
+def _store_cleaned_refs(payload: Dict[str, Any], result: Dict[str, Any]) -> None:
+    """Cache the cleaned references the worker returned for any speaker whose
+    voice+flags combo wasn't cached yet (tagged with cache_key above)."""
+    refs = result.get("refs") or {}
+    for sid, spk in payload.get("speakers", {}).items():
+        key = spk.get("cache_key")
+        if key and sid in refs:
+            ref_cache.store(key, np.asarray(refs[sid], dtype=np.float32))
 
 
 def build_generation_payload(req: GenerateRequest) -> Dict[str, Any]:
@@ -120,6 +142,7 @@ def make_multitrack_job(
 
     def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
         result = model_manager.generate(payload, progress_cb=progress_cb)
+        _store_cleaned_refs(payload, result)
         session = sessions.create(
             title=title,
             speakers_cfg=speakers_cfg,
@@ -215,6 +238,7 @@ def make_generation_job(
 
     def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
         result = model_manager.generate(payload, progress_cb=progress_cb)
+        _store_cleaned_refs(payload, result)
         audio = np.asarray(result["waveform"], dtype=np.float32)
         sr = int(result["sample_rate"])
         out: Dict[str, Any] = {"title": title, "duration_s": duration_seconds(audio, sr)}

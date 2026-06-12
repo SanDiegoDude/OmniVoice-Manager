@@ -104,13 +104,20 @@ All GPU work runs in a dedicated child process. This isolates the CUDA context, 
 
 ## Requirements
 
-Linux and Windows are both supported.
+Linux, Windows, and macOS (Apple Silicon) are supported.
+
+> ⚠️ **macOS performance:** the Mac build is fully functional but **much slower
+> than an NVIDIA GPU** — PyTorch's MPS backend only accelerates part of the
+> pipeline (the audio tokenizer falls back to CPU, among others), so renders
+> that take seconds on CUDA can take a minute or more on an M-series Mac.
+> Treat it as a portable/dev experience, not a production one. Exploring
+> [MLX](https://github.com/ml-explore/mlx)-based speedups is on the roadmap.
 
 Bring your own tooling — the installer never installs or modifies system-level
 tools (Node, Python, ffmpeg), so it can't break your existing environments.
 Have these on your PATH before you start:
 
-- An NVIDIA GPU with CUDA (CPU works but is slow)
+- An NVIDIA GPU with CUDA, or an Apple Silicon Mac with MPS (CPU works but is slow)
 - **Node.js 18+** with npm — used only for a one-time build of the web UI, never
   installed for you. Get it from [nodejs.org](https://nodejs.org) or a package
   manager (`winget install OpenJS.NodeJS.LTS` / `brew install node` /
@@ -127,7 +134,7 @@ Have these on your PATH before you start:
 
 ## Installation
 
-The same commands work on Linux and Windows:
+The same commands work on Linux, Windows, and macOS:
 
 ```bash
 git clone https://github.com/SanDiegoDude/OmniVoice-Manager
@@ -146,7 +153,7 @@ uv sync --extra dereverb
 cd web && npm install && npm run build && cd ..
 ```
 
-(`uv sync` automatically pulls the CUDA build of PyTorch on both Linux and Windows.)
+(`uv sync` automatically pulls the CUDA build of PyTorch on Linux and Windows, and the standard PyPI build — with Metal/MPS support — on macOS.)
 
 Model weights for OmniVoice, the vocal isolation checkpoint, and (when used) Whisper are downloaded automatically on first use into `./models` and the Hugging Face cache.
 
@@ -196,7 +203,7 @@ Run the backend directly for more control:
 | --- | --- |
 | `--port` / `--host` | Bind address (default `8200` / `0.0.0.0`) |
 | `--model` | Model id (default `k2-fsa/OmniVoice`) |
-| `--device` | e.g. `cuda:0` |
+| `--device` | `auto` (default; picks CUDA > MPS > CPU) or pin e.g. `cuda:0` / `mps` / `cpu` |
 | `--lod` | Load the model on demand and free VRAM after each job |
 | `--eager` | Load the model at startup |
 | `--preload-asr` | Preload Whisper (otherwise it loads only when transcribing a reference) |

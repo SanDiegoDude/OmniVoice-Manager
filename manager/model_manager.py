@@ -11,6 +11,7 @@ from __future__ import annotations
 import atexit
 import multiprocessing as mp
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -23,7 +24,11 @@ ProgressCb = Optional[Callable[[Dict[str, Any]], None]]
 
 
 def query_gpu_memory() -> Dict[str, Any]:
-    """Return GPU memory usage via nvidia-smi (keeps the server CUDA-free)."""
+    """Return GPU memory usage without importing torch in the server process.
+
+    NVIDIA boxes use nvidia-smi; Apple Silicon reports unified memory (the GPU
+    shares system RAM, so process-wide RAM pressure is the meaningful number).
+    """
     try:
         out = subprocess.check_output(
             [
@@ -38,7 +43,39 @@ def query_gpu_memory() -> Dict[str, Any]:
         used, total, name = [p.strip() for p in line.split(",")]
         return {"used_mb": int(used), "total_mb": int(total), "name": name, "available": True}
     except Exception:  # noqa: BLE001
-        return {"used_mb": None, "total_mb": None, "name": None, "available": False}
+        pass
+    if sys.platform == "darwin":
+        try:
+            total_b = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], timeout=5).decode().strip())
+            chip = subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"], timeout=5
+            ).decode().strip()
+            # Approximate "used" as active + wired + compressed pages.
+            vm = subprocess.check_output(["vm_stat"], timeout=5).decode()
+            page_size = 16384
+            stats: Dict[str, int] = {}
+            for ln in vm.splitlines():
+                if ln.startswith("Mach Virtual Memory Statistics"):
+                    if "page size of" in ln:
+                        page_size = int(ln.split("page size of")[1].split("bytes")[0].strip())
+                    continue
+                if ":" in ln:
+                    k, v = ln.split(":", 1)
+                    stats[k.strip()] = int(v.strip().rstrip("."))
+            used_pages = (
+                stats.get("Pages active", 0)
+                + stats.get("Pages wired down", 0)
+                + stats.get("Pages occupied by compressor", 0)
+            )
+            return {
+                "used_mb": used_pages * page_size // (1024 * 1024),
+                "total_mb": total_b // (1024 * 1024),
+                "name": f"{chip} (unified memory)",
+                "available": True,
+            }
+        except Exception:  # noqa: BLE001
+            pass
+    return {"used_mb": None, "total_mb": None, "name": None, "available": False}
 
 
 class ModelManager:
@@ -52,6 +89,9 @@ class ModelManager:
         self._loaded = False
         self._started_at: Optional[float] = None
         self._current_model = settings.model_id
+        # Actual device/dtype the worker resolved (e.g. "auto" -> "mps").
+        self._resolved_device: Optional[str] = None
+        self._resolved_dtype: Optional[str] = None
         # Ensure the worker is torn down on graceful interpreter exit.
         atexit.register(self.shutdown_worker)
 
@@ -81,6 +121,9 @@ class ModelManager:
         kind, _rid, _payload = self._res_q.get()
         if kind != "ready":
             raise RuntimeError(f"Worker failed to start: {kind} {_payload}")
+        if isinstance(_payload, dict):
+            self._resolved_device = _payload.get("device") or self._resolved_device
+            self._resolved_dtype = _payload.get("dtype") or self._resolved_dtype
         self._started_at = time.time()
 
     def shutdown_worker(self) -> None:
@@ -163,8 +206,8 @@ class ModelManager:
             "worker_alive": alive,
             "load_on_demand": self.settings.load_on_demand,
             "low_vram": self.settings.low_vram,
-            "device": self.settings.device,
-            "dtype": self.settings.dtype,
+            "device": self._resolved_device or self.settings.device,
+            "dtype": self._resolved_dtype or self.settings.dtype,
             "uptime_s": round(time.time() - self._started_at, 1) if self._started_at else None,
             "gpu": query_gpu_memory(),
         }

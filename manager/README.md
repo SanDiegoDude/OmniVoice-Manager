@@ -55,7 +55,7 @@ Then open <http://localhost:8200>.
 | `--lod` | Load model on demand; free VRAM after each job |
 | `--eager` | Load the model at startup (persistent mode) |
 | `--no-asr` | Skip Whisper ASR (reference-text auto-transcription) |
-| `--device cuda:0` | Select device |
+| `--device auto` | Select device (`auto` picks CUDA > MPS > CPU; or pin `cuda:0` / `mps` / `cpu`) |
 | `--model k2-fsa/OmniVoice` | Model id or local path |
 
 ### UI dev mode (hot reload)

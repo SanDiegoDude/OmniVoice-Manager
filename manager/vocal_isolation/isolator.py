@@ -109,8 +109,13 @@ class VocalIsolator:
         self.num_overlap = 2
         self.config = config or MEL_BAND_ROFORMER_CONFIG
 
-        if device is None:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device is None or str(device).strip().lower() == "auto":
+            if torch.cuda.is_available():
+                self.device = torch.device("cuda")
+            elif torch.backends.mps.is_available():
+                self.device = torch.device("mps")
+            else:
+                self.device = torch.device("cpu")
         else:
             self.device = torch.device(device)
 
@@ -254,3 +259,8 @@ class VocalIsolator:
             self._initialized = False
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            elif torch.backends.mps.is_available():
+                try:
+                    torch.mps.empty_cache()
+                except Exception:  # noqa: BLE001
+                    pass

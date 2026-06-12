@@ -37,7 +37,10 @@ class Settings:
     """Runtime settings, overridable via CLI in server.py."""
 
     model_id: str = field(default_factory=lambda: _env("OMNIVOICE_MODEL", "k2-fsa/OmniVoice"))
-    device: str = field(default_factory=lambda: _env("OMNIVOICE_DEVICE", "cuda:0"))
+    # "auto" resolves to the best backend inside the GPU worker (CUDA > MPS >
+    # CPU), keeping the server process torch-free. Pin e.g. "cuda:0" / "mps" /
+    # "cpu" via OMNIVOICE_DEVICE or --device.
+    device: str = field(default_factory=lambda: _env("OMNIVOICE_DEVICE", "auto"))
     dtype: str = "float16"
     # Load-on-demand: load the TTS model per job in a child process and free
     # VRAM by terminating it afterwards (mirrors VibeVoice's --lod).
