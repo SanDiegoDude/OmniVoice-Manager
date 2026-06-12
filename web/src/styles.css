@@ -421,7 +421,9 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 .mtk-sel-h.l { left: -1px; border-radius: 3px 0 0 3px; }
 .mtk-sel-h.r { right: -1px; border-radius: 0 3px 3px 0; }
 /* tag library */
-.tag-lib { margin-top: 12px; }
+/* Shrinkable (min-height: 0 overrides flexbox's min-height: auto) so it can't
+   starve the voice library above it on short viewports; scrolls internally. */
+.tag-lib { margin-top: 12px; flex: 0 1 auto; min-height: 0; overflow-y: auto; }
 .tag-group { margin-top: 8px; }
 .tag-group-title { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 4px; }
 .tag-row { display: flex; flex-wrap: wrap; gap: 5px; }

@@ -93,7 +93,9 @@ export function VoiceLibrary({
   onOpenLab: () => void
 }) {
   return (
-    <div className="card flush col" style={{ flex: 1, minHeight: 0 }}>
+    // min-height keeps the library usable (head + a few voices + the Voice Lab
+    // button) on short viewports; the tag library below shrinks/scrolls instead.
+    <div className="card flush col" style={{ flex: 1, minHeight: 240 }}>
       <div className="card-head">
         <h3>Voice Library ({count})</h3>
         <button className="btn ghost sm" onClick={onRefresh} title="Refresh">
