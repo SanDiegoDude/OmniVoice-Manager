@@ -84,6 +84,7 @@ export function Studio({
   onMergeSegments,
   onCollapseTrack,
   onUndo,
+  playCue,
   onSetPerformance,
   onRenderPerformance,
   onClearPerformance,
@@ -91,6 +92,7 @@ export function Studio({
   onFinalize,
   notify,
 }: {
+  playCue: { nonce: number; index?: number; channel?: string; at?: number } | null
   voices: Voice[]
   job: Job | null
   scriptBusy: boolean
@@ -592,6 +594,7 @@ export function Studio({
             onMergeSegments={onMergeSegments}
             onCollapseTrack={onCollapseTrack}
             onUndo={onUndo}
+            playCue={playCue}
             onSetPerformance={onSetPerformance}
             onRenderPerformance={onRenderPerformance}
             onClearPerformance={onClearPerformance}

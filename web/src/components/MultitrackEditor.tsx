@@ -70,6 +70,7 @@ export function MultitrackEditor({
   onMergeSegments,
   onCollapseTrack,
   onUndo,
+  playCue,
   onSetPerformance,
   onRenderPerformance,
   onClearPerformance,
@@ -80,6 +81,7 @@ export function MultitrackEditor({
   finalizing,
 }: {
   session: MultitrackSession
+  playCue: { nonce: number; index?: number; channel?: string; at?: number } | null
   onRegen: (index: number, text?: string) => void
   onEditSegment: (index: number, fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number; gain_db?: number }) => void
   onReflow: (fields: { gap_ms?: number; speed?: number }) => void
@@ -319,6 +321,25 @@ export function MultitrackEditor({
     if (t > 0.01) playerRef.current?.seek(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.mix_url])
+
+  // After any render (segment regen, insert, channel regen, full scene) play
+  // what was just rendered. Defined after the restore effect on purpose: both
+  // queue a seek on the remounted player, and the latest pending target wins.
+  const cueNonceRef = useRef(0)
+  useEffect(() => {
+    if (!playCue || playCue.nonce === cueNonceRef.current) return
+    cueNonceRef.current = playCue.nonce
+    let t = playCue.at ?? 0
+    if (playCue.index != null) {
+      const s = flatSegs.find((sg) => sg.index === playCue.index)
+      if (s) t = s.start_s
+    } else if (playCue.channel != null) {
+      const tr = session.tracks.find((x) => x.speaker_id === playCue.channel)
+      if (tr?.segments.length) t = Math.min(...tr.segments.map((sg) => sg.start_s))
+    }
+    playerRef.current?.seekAndPlay(Math.max(0, t - 0.02))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playCue])
 
   // Global drag listeners: segment move, insert-ghost move, delete-space select,
   // and red-bar move/resize.

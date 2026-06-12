@@ -62,8 +62,14 @@ export default function PerformanceModal({
   const [busy, setBusy] = useState<'whisper' | 'save' | 'render' | null>(null)
   const [error, setError] = useState<string | null>(null)
   // Rendered output preview (trim/gain here apply to the segment on save).
-  const [output, setOutput] = useState<{ url: string } | null>(null)
+  // Initial trim is copied from the take's trim lines at render time.
+  const [output, setOutput] = useState<{ url: string; trimStart?: number; trimEnd?: number } | null>(null)
   const outDraftRef = useRef<{ trimStart: number; trimEnd: number; gain: number } | null>(null)
+  // Live trim lines on the take player (raw take time).
+  const takeTrimRef = useRef<{ start: number; end: number; dur: number } | null>(null)
+  // A/B + split inspection playback.
+  const [abPlaying, setAbPlaying] = useState<null | 'ab' | 'split'>(null)
+  const abCtxRef = useRef<AudioContext | null>(null)
 
   const recRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
@@ -84,6 +90,7 @@ export default function PerformanceModal({
       if (urlRef.current) URL.revokeObjectURL(urlRef.current)
       if (timerRef.current) window.clearInterval(timerRef.current)
       recRef.current?.stream.getTracks().forEach((t) => t.stop())
+      abCtxRef.current?.close().catch(() => {})
     },
     [],
   )
@@ -232,17 +239,104 @@ export default function PerformanceModal({
   const render = async () => {
     setBusy('render')
     setError(null)
+    stopAb()
     try {
       const newSeg = await onRender(take?.blob ?? null, params())
       if (!newSeg) throw new Error('Render returned no segment')
       dirtyRef.current = false
       const url = newSeg.url + (newSeg.url.includes('?') ? '&' : '?') + `cb=${Date.now()}`
+      // Copy the take's trim lines onto the output (scaled by take speed, since
+      // speed is baked into the render). Not locked — adjust freely after.
+      const tt = takeTrimRef.current
+      let trimStart: number | undefined
+      let trimEnd: number | undefined
+      if (tt && (tt.start > 0.01 || tt.end < tt.dur - 0.01)) {
+        const spd = speed || 1
+        trimStart = tt.start / spd
+        trimEnd = tt.end / spd
+      }
       outDraftRef.current = null
-      setOutput({ url })
+      setOutput({ url, trimStart, trimEnd })
     } catch (e) {
       setError(`Render failed: ${e instanceof Error ? e.message : e}`)
     } finally {
       setBusy(null)
+    }
+  }
+
+  // ---- A/B + split inspection playback ----
+  const stopAb = () => {
+    abCtxRef.current?.close().catch(() => {})
+    abCtxRef.current = null
+    setAbPlaying(null)
+  }
+
+  const playAb = async (kind: 'ab' | 'split') => {
+    if (abPlaying) {
+      stopAb()
+      return
+    }
+    if (!output) return
+    setError(null)
+    try {
+      const ctx = new AudioContext()
+      abCtxRef.current = ctx
+      const decode = async (src: Blob | string) => {
+        const arr = typeof src === 'string' ? await (await fetch(src)).arrayBuffer() : await src.arrayBuffer()
+        return ctx.decodeAudioData(arr)
+      }
+      const takeSrc = take?.blob ?? take?.url
+      if (!takeSrc) throw new Error('No take loaded')
+      const [bufA, bufB] = await Promise.all([decode(takeSrc), decode(output.url)])
+      if (abCtxRef.current !== ctx) return // stopped while decoding
+
+      const tt = takeTrimRef.current
+      const aStart = tt?.start ?? 0
+      const aDur = Math.max(0.05, (tt?.end ?? bufA.duration) - aStart)
+      const od = outDraftRef.current
+      const bStart = od?.trimStart ?? 0
+      const bDur = Math.max(0.05, (od?.trimEnd ?? bufB.duration) - bStart)
+
+      const mk = (buf: AudioBuffer, gDb: number, pan: number, rate: number) => {
+        const src = ctx.createBufferSource()
+        src.buffer = buf
+        src.playbackRate.value = rate
+        const g = ctx.createGain()
+        g.gain.value = Math.pow(10, gDb / 20)
+        const p = ctx.createStereoPanner()
+        p.pan.value = pan
+        src.connect(g)
+        g.connect(p)
+        p.connect(ctx.destination)
+        return src
+      }
+      const spd = speed || 1
+      if (kind === 'ab') {
+        // Take (trimmed, at render speed/gain) then the render, back-to-back.
+        const a = mk(bufA, gain, 0, spd)
+        const b = mk(bufB, outDraftRef.current?.gain ?? 0, 0, 1)
+        const t0 = ctx.currentTime + 0.05
+        a.start(t0, aStart, aDur)
+        b.start(t0 + aDur / spd + 0.25, bStart, bDur)
+        b.onended = () => {
+          if (abCtxRef.current === ctx) stopAb()
+        }
+      } else {
+        // Simultaneous: take hard-left, render hard-right.
+        const a = mk(bufA, gain, -1, spd)
+        const b = mk(bufB, outDraftRef.current?.gain ?? 0, 1, 1)
+        const t0 = ctx.currentTime + 0.05
+        a.start(t0, aStart, aDur)
+        b.start(t0, bStart, bDur)
+        const longer = aDur / spd >= bDur ? a : b
+        longer.onended = () => {
+          if (abCtxRef.current === ctx) stopAb()
+        }
+      }
+      setAbPlaying(kind)
+    } catch (e) {
+      stopAb()
+      setError(`Comparison playback failed: ${e instanceof Error ? e.message : e}`)
     }
   }
 
@@ -365,6 +459,9 @@ export default function PerformanceModal({
             showDownload={false}
             initialGain={gain}
             playbackRate={previewSpeed}
+            onTrimChange={(s, e, dur) => {
+              takeTrimRef.current = { start: s, end: e, dur }
+            }}
             onGainChange={(g) => {
               setGain(g)
               markDirty()
@@ -473,14 +570,34 @@ export default function PerformanceModal({
       {/* Rendered output: trim + gain here apply to the segment on save */}
       {output && (
         <div style={{ marginTop: 14, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
-          <div className="hint" style={{ marginBottom: 4 }}>
-            <strong>Rendered output</strong> — trim &amp; gain below apply to the clip on the track when you Save.
+          <div className="flex-between" style={{ marginBottom: 4 }}>
+            <span className="hint">
+              <strong>Rendered output</strong> — trim &amp; gain apply to the clip on Save (trim copied from the take).
+            </span>
+            <div className="row" style={{ gap: 6 }}>
+              <button
+                className={`btn sm${abPlaying === 'ab' ? ' on' : ''}`}
+                title="Play your take, then the render, back-to-back (both trimmed)"
+                onClick={() => void playAb('ab')}
+              >
+                {abPlaying === 'ab' ? '■ Stop' : '▶ A/B'}
+              </button>
+              <button
+                className={`btn sm${abPlaying === 'split' ? ' on' : ''}`}
+                title="Play both at once — take in the left ear, render in the right"
+                onClick={() => void playAb('split')}
+              >
+                {abPlaying === 'split' ? '■ Stop' : '▶ Split L/R'}
+              </button>
+            </div>
           </div>
           <AudioPlayer
             key={output.url}
             url={output.url}
             autoPlay
             showDownload={false}
+            initialStart={output.trimStart}
+            initialEnd={output.trimEnd}
             onTrimChange={(s, e) => {
               outDraftRef.current = { trimStart: s, trimEnd: e, gain: outDraftRef.current?.gain ?? 0 }
             }}

@@ -20,6 +20,8 @@ export default function App() {
   const [outputs, setOutputs] = useState<OutputFile[]>([])
   const [job, setJob] = useState<Job | null>(null)
   const [session, setSession] = useState<MultitrackSession | null>(null)
+  // Cues the multitrack editor to play from a spot after a render completes.
+  const [playCue, setPlayCue] = useState<{ nonce: number; index?: number; channel?: string; at?: number } | null>(null)
   const sessionRef = useRef<MultitrackSession | null>(null)
   const replacingRef = useRef<string | null>(null)
   const [regenIndex, setRegenIndex] = useState<number | null>(null)
@@ -145,6 +147,16 @@ export default function App() {
                 ? 'Channel regenerated'
                 : 'Scene ready — edit in multitrack'
             notify(msg, 'success')
+            // Always play what was just rendered — instant "it's done" feedback.
+            if (j.result.regenerated_index !== undefined) {
+              setPlayCue({ nonce: Date.now(), index: j.result.regenerated_index as number })
+            } else if (j.result.inserted_index !== undefined) {
+              setPlayCue({ nonce: Date.now(), index: j.result.inserted_index as number })
+            } else if (j.result.channel_regen !== undefined) {
+              setPlayCue({ nonce: Date.now(), channel: String(j.result.channel_regen) })
+            } else {
+              setPlayCue({ nonce: Date.now(), at: 0 })
+            }
           } else {
             notify('Generation complete', 'success')
           }
@@ -676,6 +688,7 @@ export default function App() {
           onMergeSegments={mergeSegments}
           onCollapseTrack={collapseTrack}
           onUndo={undoSession}
+          playCue={playCue}
           onSetPerformance={setPerformance}
           onRenderPerformance={renderPerformance}
           onClearPerformance={clearPerformance}
