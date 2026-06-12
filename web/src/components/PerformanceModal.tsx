@@ -780,8 +780,12 @@ export default function PerformanceModal({
               takeTrimRef.current = { start: s, end: e, dur }
             }}
             onGainChange={(g) => {
-              setGain(g)
-              markDirty()
+              // The player re-emits its current gain on every re-render — only a
+              // real change may dirty the take (else Save re-arms a fresh render).
+              if (g !== gain) {
+                setGain(g)
+                markDirty()
+              }
             }}
           />
           <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>

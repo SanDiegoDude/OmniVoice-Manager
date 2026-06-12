@@ -875,16 +875,38 @@ def channel_regen_payload(sid: str, pos: str) -> Dict[str, Any]:
     if cfg.get("kind") == "audio":
         raise ValueError("Cannot regenerate an uploaded audio channel")
     sr = int(session["sample_rate"])
-    lines = [
-        {"speaker_id": str(pos), "text": s["text"], "index": int(s["index"])}
-        for s in sorted(session["segments"], key=lambda x: x["index"])
-        if str(s["speaker_id"]) == str(pos) and (s.get("text") or "").strip()
-    ]
+    base_spk = _speaker_worker(session, str(pos), sr)
+    speakers: Dict[str, Any] = {str(pos): base_spk}
+    lines: List[Dict[str, Any]] = []
+    for s in sorted(session["segments"], key=lambda x: x["index"]):
+        if str(s["speaker_id"]) != str(pos) or not (s.get("text") or "").strip():
+            continue
+        line: Dict[str, Any] = {"speaker_id": str(pos), "text": s["text"], "index": int(s["index"])}
+        # Segments with a saved vocal performance keep riding their take through
+        # a channel-wide regen (e.g. re-casting the voice) instead of falling
+        # back to a generic clone read.
+        perform = _perform_line(session, s, sr)
+        if perform:
+            line["perform"] = perform
+            if base_spk.get("mode") != "clone":
+                # Same fallback as single-segment regen: V2V needs a voice
+                # reference, so non-clone channels use the segment's own audio.
+                key = f"pf{int(s['index'])}"
+                speakers[key] = {
+                    **base_spk,
+                    "mode": "clone",
+                    "waveform": load_audio(_dir(sid) / s["file"], sr=sr),
+                    "isolate": False,
+                    "normalize": True,
+                    "dereverb": False,
+                }
+                line["speaker_id"] = key
+        lines.append(line)
     if not lines:
         raise ValueError("This channel has no spoken segments to regenerate")
     return {
         "lines": lines,
-        "speakers": {str(pos): _speaker_worker(session, str(pos), sr)},
+        "speakers": speakers,
         "params": session.get("params", {}),
         "gap_ms": session.get("gap_ms", 250),
         "multitrack": True,
@@ -920,6 +942,8 @@ def apply_channel_regen(sid: str, pos: str, worker_result: Dict[str, Any]) -> Di
             target["trim_end_s"] = dur
             target["speed"] = 1.0
             _ripple_endpoint(session, idx, end_old, _eff_duration(target) - old_eff, controls)
+            if target.get("perform"):
+                target["perform"]["dirty"] = False  # take re-rendered with the channel
         _store_refs(session, worker_result, sr)
         _stitch(session)
         _write(session)
