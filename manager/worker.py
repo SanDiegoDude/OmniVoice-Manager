@@ -396,7 +396,10 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
         if params.get("match_loudness", True):
             full = peak_limit(full, ceiling_db=float(params.get("peak_ceiling_db", -1.0)))
 
-        return {"waveform": full, "sample_rate": sr}
+        # Hand back the cleaned references here too, so the server can cache
+        # them globally (skips re-isolation on reruns of the same voice).
+        refs_out = {sid: wav for sid, (wav, _spk_sr, _rt) in cleaned.items()}
+        return {"waveform": full, "sample_rate": sr, "refs": refs_out}
 
     def _free(*keys: str) -> None:
         """Close the named secondary models and reclaim their VRAM immediately."""
