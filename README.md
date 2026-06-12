@@ -107,9 +107,10 @@ All GPU work runs in a dedicated child process. This isolates the CUDA context, 
 Linux and Windows are both supported.
 
 - An NVIDIA GPU with CUDA (CPU works but is slow)
-- Python 3.10+
 - Node.js 18+ (only to build the web UI)
 - [`uv`](https://github.com/astral-sh/uv) for Python dependency management
+  (you do **not** need Python pre-installed — `uv sync` downloads a managed
+  Python 3.10 automatically, without touching any Python already on your system)
 - `ffmpeg` on your PATH for MP3/M4A/OGG output encoding (without it, outputs fall back to WAV)
 
 ---
@@ -122,7 +123,10 @@ The same commands work on Linux and Windows:
 git clone <your-repo-url> OmniVoice
 cd OmniVoice
 
-# Python environment + dependencies
+# Python environment + dependencies.
+# Keep "--python 3.10" as written, regardless of which Python (if any) you have
+# installed — uv fetches its own 3.10 if needed and leaves your system Python
+# alone. The version is pinned to the known-good, tested configuration.
 uv sync --python 3.10
 
 # Optional: DeepFilterNet de-reverb backend
