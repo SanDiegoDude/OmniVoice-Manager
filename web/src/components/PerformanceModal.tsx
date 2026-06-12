@@ -7,6 +7,10 @@ import ToolModal from './ToolModal'
 
 type Mode = 'character' | 'voice'
 type PerfParams = { gain_db: number; speed: number; mode: Mode; strength: number; text?: string }
+// One entry in the dub trail. blob is null only for the segment's previously
+// saved take (server-side file) — rendering with null tells the backend to
+// reuse what it already has stored.
+type DubVersion = { id: number; blob: Blob | null; url: string }
 
 const STRENGTH_HINT: Record<Mode, string[]> = {
   character: [
@@ -96,11 +100,22 @@ export default function PerformanceModal({
   const [abPlaying, setAbPlaying] = useState<null | 'ab' | 'split'>(null)
   const abCtxRef = useRef<AudioContext | null>(null)
   const [abSaving, setAbSaving] = useState<null | 'ab' | 'split'>(null)
+  // Dub trail: every Redub layers the previous render as the new take, and the
+  // chips let you walk back to an earlier source. Only the ACTIVE take is
+  // persisted on Save — the trail is scratch space and dies with the modal.
+  const [vers, setVers] = useState<DubVersion[]>(() =>
+    existing ? [{ id: 0, blob: null, url: existing.url }] : [],
+  )
+  const [activeVer, setActiveVer] = useState(0)
+  const nextVerRef = useRef(1)
+  // One-step undo for an accidental × on a redub chip.
+  const [trash, setTrash] = useState<{ ver: DubVersion; pos: number } | null>(null)
 
   const recRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const timerRef = useRef<number | null>(null)
-  const urlRef = useRef<string | null>(null)
+  // Object URLs stay alive for the whole trail; everything is revoked on unmount.
+  const urlsRef = useRef<string[]>([])
   // The take before cleanup, so isolate/dereverb toggles are non-destructive.
   const rawRef = useRef<Blob | null>(null)
   // True once params/take changed after the last render/save (so Save knows
@@ -114,7 +129,7 @@ export default function PerformanceModal({
 
   useEffect(
     () => () => {
-      if (urlRef.current) URL.revokeObjectURL(urlRef.current)
+      urlsRef.current.forEach((u) => URL.revokeObjectURL(u))
       if (timerRef.current) window.clearInterval(timerRef.current)
       recRef.current?.stream.getTracks().forEach((t) => t.stop())
       abCtxRef.current?.close().catch(() => {})
@@ -126,10 +141,42 @@ export default function PerformanceModal({
     dirtyRef.current = true
   }
 
+  // A previously saved take lives in ONE server-side file that gets overwritten
+  // every time a performance renders — so a redub would corrupt the "Original"
+  // chip. Pin the original into memory as soon as the modal opens.
+  useEffect(() => {
+    const v = vers[0]
+    if (!existing || !v || v.blob) return
+    let alive = true
+    void (async () => {
+      try {
+        const blob = await (await fetch(existing.url)).blob()
+        if (!alive) return
+        const url = URL.createObjectURL(blob)
+        urlsRef.current.push(url)
+        setVers((vs) => vs.map((x) => (x.id === v.id ? { ...x, blob, url } : x)))
+        // Only swap the live take if the user hasn't replaced it meanwhile.
+        setTake((t) => (t && t.url === existing.url ? { blob, url } : t))
+      } catch {
+        // Offline fetch failed — fall back to server-stored take semantics.
+      }
+    })()
+    return () => {
+      alive = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Fresh outside audio (record / upload / cleanup re-process) restarts the dub
+  // trail — any redubs were derived from the previous source and are stale.
   const setTakeBlob = useCallback((wav: Blob) => {
-    if (urlRef.current) URL.revokeObjectURL(urlRef.current)
     const url = URL.createObjectURL(wav)
-    urlRef.current = url
+    urlsRef.current.push(url)
+    const id = nextVerRef.current++
+    setVers([{ id, blob: wav, url }])
+    setActiveVer(id)
+    setTrash(null)
+    takeTrimRef.current = null
     setTake({ blob: wav, url })
     dirtyRef.current = true
   }, [])
@@ -192,6 +239,63 @@ export default function PerformanceModal({
     },
     [applyCleanup, cleanIsolate, cleanDereverb, whisperBlob],
   )
+
+  // ---- Dub trail (Redub chain) ----
+  const selectVer = (v: DubVersion) => {
+    setActiveVer(v.id)
+    setTake({ blob: v.blob, url: v.url })
+    takeTrimRef.current = null
+    // The render preview belonged to whatever input produced it — comparing it
+    // against a different take would mislead, so it goes away on switch.
+    setOutput(null)
+    outDraftRef.current = null
+    markDirty()
+  }
+
+  // Promote the current render to the active take for another pass — e.g. a
+  // gentle voice round first, then a character round on top.
+  const redub = async () => {
+    if (!output) return
+    setError(null)
+    try {
+      const blob = await (await fetch(output.url)).blob()
+      const url = URL.createObjectURL(blob)
+      urlsRef.current.push(url)
+      const id = nextVerRef.current++
+      setVers((vs) => [...vs, { id, blob, url }])
+      setActiveVer(id)
+      setTake({ blob, url })
+      takeTrimRef.current = null
+      // The render is already leveled and at final tempo — reset per-take knobs.
+      setGain(0)
+      setSpeed(1)
+      setPreviewSpeed(1)
+      setOutput(null)
+      outDraftRef.current = null
+      markDirty()
+    } catch (e) {
+      setError(`Redub failed: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  const deleteVer = (id: number) => {
+    const pos = vers.findIndex((x) => x.id === id)
+    if (pos <= 0) return // the original can't be deleted
+    const nv = vers.filter((x) => x.id !== id)
+    setTrash({ ver: vers[pos], pos })
+    setVers(nv)
+    if (activeVer === id) selectVer(nv[Math.min(pos - 1, nv.length - 1)])
+  }
+
+  const undoDelete = () => {
+    if (!trash) return
+    setVers((vs) => {
+      const nv = [...vs]
+      nv.splice(Math.min(trash.pos, nv.length), 0, trash.ver)
+      return nv
+    })
+    setTrash(null)
+  }
 
   // Make sure we have the raw take as a blob (re-fetch a previously saved one).
   const ensureRaw = async (): Promise<Blob | null> => {
@@ -594,33 +698,76 @@ export default function PerformanceModal({
             Auto-Whisper
           </label>
         )}
-        {hasTake && !recording && (
+        {hasTake && !recording && (() => {
+          // Cleanup re-processes the ORIGINAL source audio — on a redub it would
+          // restart the trail, so the toggles lock while a redub is active.
+          const onOriginal = vers.length === 0 || vers[0].id === activeVer
+          const lockTitle = onOriginal ? undefined : 'Cleanup applies to the original source — switch back to 🎬 Original to change it'
+          return (
           <>
-            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+            <label className="hint" title={lockTitle} style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: onOriginal ? 'pointer' : 'not-allowed', opacity: onOriginal ? 1 : 0.5 }}>
               <input
                 type="checkbox"
                 checked={cleanIsolate}
-                disabled={processing}
+                disabled={processing || !onOriginal}
                 onChange={(e) => void toggleCleanup('isolate', e.target.checked)}
               />
               Isolate vocals
             </label>
-            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+            <label className="hint" title={lockTitle} style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: onOriginal ? 'pointer' : 'not-allowed', opacity: onOriginal ? 1 : 0.5 }}>
               <input
                 type="checkbox"
                 checked={cleanDereverb}
-                disabled={processing}
+                disabled={processing || !onOriginal}
                 onChange={(e) => void toggleCleanup('dereverb', e.target.checked)}
               />
               Dereverb (de-boom)
             </label>
             {processing && <span className="spinner sm" aria-label="processing" />}
           </>
-        )}
+          )
+        })()}
       </div>
 
       {capture && hasTake && !recording && (
         <div style={{ marginTop: 10 }}>
+          {(vers.length > 1 || trash) && (
+            <div className="row" style={{ gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
+              <span className="hint" title="Each Redub layers the previous render as the new take. Click a chip to go back to an earlier source; only the active take is kept on Save.">
+                Dub trail
+              </span>
+              {vers.map((v, i) => (
+                <button
+                  key={v.id}
+                  className={`btn sm${v.id === activeVer ? ' on' : ''}`}
+                  title={i === 0 ? 'The original take' : `Rendered from ${i === 1 ? 'the original' : `Redub ${i - 1}`}`}
+                  onClick={() => {
+                    if (v.id !== activeVer) selectVer(v)
+                  }}
+                >
+                  {i === 0 ? '🎬 Original' : `Redub ${i}`}
+                  {i > 0 && (
+                    <span
+                      role="button"
+                      title="Remove this redub from the trail"
+                      style={{ marginLeft: 7, opacity: 0.65 }}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        deleteVer(v.id)
+                      }}
+                    >
+                      ×
+                    </span>
+                  )}
+                </button>
+              ))}
+              {trash && (
+                <button className="btn sm ghost" title="Restore the redub you just deleted" onClick={undoDelete}>
+                  ↩ Undo delete
+                </button>
+              )}
+            </div>
+          )}
           <AudioPlayer
             key={take.url}
             url={take.url}
@@ -749,6 +896,13 @@ export default function PerformanceModal({
             </span>
             {capture && hasTake && (
               <div className="row" style={{ gap: 6 }}>
+                <button
+                  className="btn sm"
+                  title="Use this render as the new take for another pass — e.g. a gentle voice round first, then a character round on top"
+                  onClick={() => void redub()}
+                >
+                  ⟳ Redub
+                </button>
                 <button
                   className={`btn sm${abPlaying === 'ab' ? ' on' : ''}`}
                   title="Play your take, then the render, back-to-back (both trimmed)"
