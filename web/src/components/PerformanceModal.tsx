@@ -456,7 +456,8 @@ export default function PerformanceModal({
             key={take.url}
             url={take.url}
             autoPlay={false}
-            showDownload={false}
+            showDownload
+            filename={`clip${seg.index}_performance_take.wav`}
             initialGain={gain}
             playbackRate={previewSpeed}
             onTrimChange={(s, e, dur) => {
@@ -595,7 +596,8 @@ export default function PerformanceModal({
             key={output.url}
             url={output.url}
             autoPlay
-            showDownload={false}
+            showDownload
+            filename={`clip${seg.index}_performance_render.wav`}
             initialStart={output.trimStart}
             initialEnd={output.trimEnd}
             onTrimChange={(s, e) => {
