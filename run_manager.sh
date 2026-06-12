@@ -20,7 +20,6 @@ elif [ -x ".venv/bin/python" ]; then
 elif command -v uv >/dev/null 2>&1; then
   exec uv run omnivoice-manager --port "$PORT" "$@"
 else
-  echo "No .venv found and 'uv' is not on PATH. Run 'uv sync' first (uv lives in" >&2
-  echo "your pyenv 3.10.13: ~/.pyenv/versions/3.10.13/bin/uv)." >&2
+  echo "No .venv found and 'uv' is not on PATH. Run 'uv sync --python 3.10' first." >&2
   exit 1
 fi

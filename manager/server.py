@@ -1099,17 +1099,25 @@ def _ensure_ssl_cert() -> tuple[str, str]:
                 san.add(f"IP:{ip}")
         except OSError:
             pass
-        subprocess.run(
-            [
-                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-sha256",
-                "-days", "3650", "-nodes",
-                "-keyout", str(key), "-out", str(crt),
-                "-subj", f"/CN={host}",
-                "-addext", f"subjectAltName={','.join(sorted(san))}",
-            ],
-            check=True,
-            capture_output=True,
-        )
+        try:
+            subprocess.run(
+                [
+                    "openssl", "req", "-x509", "-newkey", "rsa:2048", "-sha256",
+                    "-days", "3650", "-nodes",
+                    "-keyout", str(key), "-out", str(crt),
+                    "-subj", f"/CN={host}",
+                    "-addext", f"subjectAltName={','.join(sorted(san))}",
+                ],
+                check=True,
+                capture_output=True,
+            )
+        except FileNotFoundError:
+            raise SystemExit(
+                "--ssl needs the 'openssl' command to generate a self-signed cert, "
+                "but it was not found on PATH. Install OpenSSL (on Windows it ships "
+                "with Git for Windows: <Git>\\usr\\bin\\openssl.exe) or place a cert "
+                f"at {crt} and key at {key} manually."
+            )
         print(f"Generated self-signed TLS cert: {crt}", flush=True)
     return str(crt), str(key)
 

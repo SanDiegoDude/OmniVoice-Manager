@@ -61,7 +61,16 @@ def encode_audio(
 
         pcm = (audio * 32767.0).astype("<i2").tobytes()
         seg = AudioSegment(data=pcm, sample_width=2, frame_rate=sr, channels=1)
-        seg.export(str(path), format=fmt, bitrate=bitrate)
+        # Pin the MP3 encoder to libmp3lame. Some ffmpeg builds (notably conda's
+        # on Windows) default the mp3 muxer to the MediaFoundation encoder
+        # (mp3_mf), which exits 0 but encodes nothing — a silent ~500-byte file.
+        codec = "libmp3lame" if fmt == "mp3" else None
+        seg.export(str(path), format=fmt, bitrate=bitrate, codec=codec)
+        # Sanity check: a broken encoder can still exit 0 with a header-only
+        # file. Anything implausibly small for the duration means it failed.
+        min_bytes = max(1024, int(len(audio) / sr * 1000))  # ~8 kbit/s floor
+        if path.stat().st_size < min_bytes:
+            raise RuntimeError(f"encoder produced an empty {fmt} file")
         return path
     except Exception:  # noqa: BLE001 — ffmpeg/pydub missing or codec error
         fallback = path.with_suffix(".wav")

@@ -516,7 +516,10 @@ def main():
         )
         detailed_error_info = traceback.format_exc()
         logging.error(f"--- DETAILED TRACEBACK ---\n{detailed_error_info}")
-        os.killpg(os.getpgid(os.getpid()), signal.SIGKILL)
+        if hasattr(os, "killpg"):
+            os.killpg(os.getpgid(os.getpid()), signal.SIGKILL)
+        else:  # Windows has no process groups; just exit hard.
+            os._exit(1)
 
     total_synthesis_time = sum(total_synthesis_time)
     total_audio_duration = sum(total_audio_duration)

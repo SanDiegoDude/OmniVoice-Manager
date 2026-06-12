@@ -104,14 +104,19 @@ All GPU work runs in a dedicated child process. This isolates the CUDA context, 
 
 ## Requirements
 
+Linux and Windows are both supported.
+
 - An NVIDIA GPU with CUDA (CPU works but is slow)
 - Python 3.10+
 - Node.js 18+ (only to build the web UI)
 - [`uv`](https://github.com/astral-sh/uv) for Python dependency management
+- `ffmpeg` on your PATH for MP3/M4A/OGG output encoding (without it, outputs fall back to WAV)
 
 ---
 
 ## Installation
+
+The same commands work on Linux and Windows:
 
 ```bash
 git clone <your-repo-url> OmniVoice
@@ -126,6 +131,8 @@ uv sync --extra dereverb
 # Build the web UI
 cd web && npm install && npm run build && cd ..
 ```
+
+(`uv sync` automatically pulls the CUDA build of PyTorch on both Linux and Windows.)
 
 Model weights for OmniVoice, the vocal isolation checkpoint, and (when used) Whisper are downloaded automatically on first use into `./models` and the Hugging Face cache.
 
@@ -152,7 +159,8 @@ Comment a line out to hide that provider. After editing `.env`, click **Refresh*
 ## Running
 
 ```bash
-./run_manager.sh
+./run_manager.sh      # Linux / macOS
+run_manager.bat       # Windows
 ```
 
 The script builds the UI on first run and serves the app at `http://localhost:8200`.
@@ -160,7 +168,8 @@ The script builds the UI on first run and serves the app at `http://localhost:82
 Run the backend directly for more control:
 
 ```bash
-.venv/bin/omnivoice-manager --port 8200 [options]
+.venv/bin/omnivoice-manager --port 8200 [options]       # Linux / macOS
+.venv\Scripts\omnivoice-manager --port 8200 [options]   # Windows
 ```
 
 | Flag | Description |
