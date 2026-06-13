@@ -47,7 +47,8 @@ ROADMAP.md
 
 # ── Research: local test media + experiment outputs (never commit) ────────────
 examples/box-of-chocolates.wav
-research/out/
+# Entire research working area stays out of the repo until the paper is published
+research/
 
 # ── Editor / OS ───────────────────────────────────────────────────────────────
 .DS_Store
