@@ -1,0 +1,6 @@
+# Keep shell scripts LF so they run on macOS/Linux even when edited on Windows.
+*.sh text eol=lf
+run_manager.sh text eol=lf
+
+# Windows batch files stay CRLF.
+*.bat text eol=crlf

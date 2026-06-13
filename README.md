@@ -190,7 +190,18 @@ Comment a line out to hide that provider. After editing `.env`, click **Refresh*
 run_manager.bat       # Windows
 ```
 
-The script builds the UI on first run and serves the app at `http://localhost:8200`.
+The script serves the app at `http://localhost:8200`. It builds the web UI on
+first run and **automatically rebuilds whenever the frontend source is newer
+than the last build** — so after a `git pull` you always get the current UI
+without thinking about it. Two launcher-only flags help when things get stuck
+(they are consumed by the script and not passed to the server):
+
+| Launcher flag | Description |
+| --- | --- |
+| `--rebuild` | Force a fresh web UI build even if one already exists (e.g. after a dependency change the timestamp check wouldn't catch) |
+| `--forceup` | Kill whatever is already listening on the port before starting — clears an orphaned/stale server (handy on Windows, where closing the window can leave the Python process running) |
+
+All other flags pass straight through, e.g. `run_manager.bat --forceup --ssl`.
 
 Run the backend directly for more control:
 
