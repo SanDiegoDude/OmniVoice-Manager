@@ -66,6 +66,7 @@ export function Studio({
   onReflow,
   onInsertSegment,
   onEnsureSession,
+  onImportToStudio,
   onAddSpeaker,
   onUpdateSpeaker,
   onRemoveSpeaker,
@@ -120,6 +121,12 @@ export function Studio({
   onReflow: (fields: { gap_ms?: number; speed?: number }) => void
   onInsertSegment: (speakerId: string, text: string, startS: number, ripple: boolean) => void
   onEnsureSession: (speakers: Record<string, SpeakerConfig>, params: GenParams) => void
+  onImportToStudio: (
+    filename: string,
+    text: string,
+    speakers: Record<string, SpeakerConfig>,
+    params: GenParams,
+  ) => Promise<void>
   onAddSpeaker: (cfg: SpeakerConfig) => void
   onUpdateSpeaker: (pos: string, cfg: SpeakerConfig) => void
   onRemoveSpeaker: (pos: string) => Promise<MultitrackSession | null> | void
@@ -174,6 +181,7 @@ export function Studio({
   // Voice Clone tab: optional recorded take that guides the render (V2V).
   const [perfState, setPerfState] = useState<PerfCaptureState | null>(null)
   const [script, setScript] = useState('')
+  const [importing, setImporting] = useState(false)
   const [title, setTitle] = useState('')
   const [aiPrompt, setAiPrompt] = useState('')
   const [params, setParams] = useState<GenParams>(defaultParams)
@@ -687,12 +695,34 @@ export function Studio({
       )}
 
       {(mode === 'single' || !session) && audioUrl && (
-        <AudioPlayer
-          key={audioUrl}
-          url={audioUrl}
-          title={job?.result?.title}
-          filename={job?.result?.filename}
-        />
+        <>
+          <AudioPlayer
+            key={audioUrl}
+            url={audioUrl}
+            title={job?.result?.title}
+            filename={job?.result?.filename}
+          />
+          {mode === 'single' && job?.result?.filename && (
+            <div className="row" style={{ justifyContent: 'flex-end', marginTop: 6 }}>
+              <button
+                className="btn sm"
+                disabled={importing}
+                title="Drop this take at 0:00 on track 1 in ADR Studio and keep working on it there — no download/re-upload"
+                onClick={async () => {
+                  setImporting(true)
+                  try {
+                    await onImportToStudio(job.result!.filename as string, script, speakerMap(), params)
+                    setMode('multi')
+                  } finally {
+                    setImporting(false)
+                  }
+                }}
+              >
+                {importing ? <span className="spinner sm" /> : '🎬'} Import to ADR Studio
+              </button>
+            </div>
+          )}
+        </>
       )}
     </div>
   )

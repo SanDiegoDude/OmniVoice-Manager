@@ -76,7 +76,9 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
     return () => window.removeEventListener('keydown', h)
   }, [onClose])
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    // Backdrop clicks intentionally do NOT close — modals hold unsaved work
+    // and a stray misclick outside must never throw it away.
+    <div className="modal-backdrop">
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="m-head">
           <h2>{title}</h2>

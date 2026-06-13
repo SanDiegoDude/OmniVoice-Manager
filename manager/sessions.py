@@ -702,6 +702,41 @@ def apply_insert(
         return public(session)
 
 
+def import_clip(sid: str, speaker_id: str, text: str, start_s: float, source: Path) -> Dict[str, Any]:
+    """Drop an existing audio file (e.g. a Voice Clone output) onto a track as a
+    regular segment — no model run, no ripple. The clip keeps full editability:
+    move / trim / regen / perform all work on it afterwards."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        if str(speaker_id) not in session.get("speakers", {}):
+            raise FileNotFoundError(f"Speaker {speaker_id} not found")
+        sr = int(session["sample_rate"])
+        wav = load_audio(source, sr=sr)
+        new_index = int(session.get("next_index", max((s["index"] for s in session["segments"]), default=-1) + 1))
+        session["next_index"] = new_index + 1
+        fn = f"seg_{new_index:03d}.wav"
+        save_wav(_dir(sid) / fn, wav, sr)
+        dur = duration_seconds(wav, sr)
+        session["segments"].append(
+            {
+                "index": new_index,
+                "speaker_id": str(speaker_id),
+                "text": (text or "").strip(),
+                "file": fn,
+                "raw_duration_s": dur,
+                "trim_start_s": 0.0,
+                "trim_end_s": dur,
+                "speed": 1.0,
+                "start_s": round(max(0.0, float(start_s)), 3),
+            }
+        )
+        _stitch(session)
+        _write(session)
+        return public(session)
+
+
 def set_segment(sid: str, index: int, **fields: Any) -> Dict[str, Any]:
     """Update a segment's timeline properties (start_s / trim / speed) and
     re-stitch. No model run."""

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MultitrackSegment } from '../api'
 import { api } from '../api'
-import { audioBufferToWavMulti, blobToWav } from '../audio-encode'
+import { audioBufferToWavMulti, blobToWav, sliceBlobToWav } from '../audio-encode'
 import { AudioPlayer, type AudioPlayerHandle } from './AudioPlayer'
 import ToolModal from './ToolModal'
 
@@ -96,8 +96,10 @@ export default function PerformanceModal({
   // Initial trim is copied from the take's trim lines at render time.
   const [output, setOutput] = useState<{ url: string; trimStart?: number; trimEnd?: number } | null>(null)
   const outDraftRef = useRef<{ trimStart: number; trimEnd: number; gain: number } | null>(null)
-  // Live trim lines on the take player (raw take time).
+  // Live trim lines on the take player (raw take time). State mirror drives
+  // the Stamp Trim button; the ref is read at render/comparison time.
   const takeTrimRef = useRef<{ start: number; end: number; dur: number } | null>(null)
+  const [takeTrim, setTakeTrim] = useState<{ start: number; end: number; dur: number } | null>(null)
   // A/B + split inspection playback.
   const [abPlaying, setAbPlaying] = useState<null | 'ab' | 'split'>(null)
   const abCtxRef = useRef<AudioContext | null>(null)
@@ -185,6 +187,7 @@ export default function PerformanceModal({
     setActiveVer(id)
     setTrash(null)
     takeTrimRef.current = null
+    setTakeTrim(null)
     setTake({ blob: wav, url })
     dirtyRef.current = true
   }, [])
@@ -253,6 +256,7 @@ export default function PerformanceModal({
     setActiveVer(v.id)
     setTake({ blob: v.blob, url: v.url })
     takeTrimRef.current = null
+    setTakeTrim(null)
     // The render preview belonged to whatever input produced it — comparing it
     // against a different take would mislead, so it goes away on switch.
     setOutput(null)
@@ -274,6 +278,7 @@ export default function PerformanceModal({
       setActiveVer(id)
       setTake({ blob, url })
       takeTrimRef.current = null
+      setTakeTrim(null)
       // The render is already leveled and at final tempo — reset per-take knobs.
       setGain(0)
       setSpeed(1)
@@ -303,6 +308,40 @@ export default function PerformanceModal({
       return nv
     })
     setTrash(null)
+  }
+
+  // "Stamp Trim": destructively cut the active take to the trim lines — the
+  // cut becomes the new source of truth, so renders no longer process the
+  // mistakes outside the crop.
+  const stampTrim = async () => {
+    const tt = takeTrimRef.current
+    if (!take || !tt) return
+    if (tt.start < 0.02 && tt.end > tt.dur - 0.02) return // nothing to cut
+    setProcessing(true)
+    setError(null)
+    try {
+      const src = take.blob ?? (await (await fetch(take.url)).blob())
+      const stamped = await sliceBlobToWav(src, tt.start, tt.end)
+      const onOriginal = vers.length === 0 || vers[0]?.id === activeVer
+      if (onOriginal) {
+        // The stamped cut replaces the source outright (and any redubs derived
+        // from the uncut audio — they no longer match the new ground truth).
+        rawRef.current = stamped
+        setTakeBlob(stamped)
+      } else {
+        const url = URL.createObjectURL(stamped)
+        urlsRef.current.push(url)
+        setVers((vs) => vs.map((v) => (v.id === activeVer ? { ...v, blob: stamped, url } : v)))
+        setTake({ blob: stamped, url })
+        takeTrimRef.current = null
+        setTakeTrim(null)
+        markDirty()
+      }
+    } catch (e) {
+      setError(`Stamp trim failed: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setProcessing(false)
+    }
   }
 
   // Make sure we have the raw take as a blob (re-fetch a previously saved one).
@@ -491,14 +530,15 @@ export default function PerformanceModal({
           if (abCtxRef.current === ctx) stopAb()
         }
       } else {
-        // Simultaneous: take hard-left, render hard-right.
+        // Simultaneous: take hard-left, render hard-right — BOTH windows come
+        // from the output's crop bar so the two performances line up sample-
+        // for-sample (output time maps back to take time × speed).
         const a = mk(p.bufA, p.aGain, -1, p.spd)
         const b = mk(p.bufB, p.bGain, 1, 1)
         const t0 = ctx.currentTime + 0.05
-        a.start(t0, p.aStart, p.aDur)
+        a.start(t0, p.bStart * p.spd, p.bDur * p.spd)
         b.start(t0, p.bStart, p.bDur)
-        const longer = p.aDur / p.spd >= p.bDur ? a : b
-        longer.onended = () => {
+        b.onended = () => {
           if (abCtxRef.current === ctx) stopAb()
         }
       }
@@ -523,8 +563,7 @@ export default function PerformanceModal({
       const p = await comparisonPieces(decode)
       if (!p) throw new Error('No take loaded')
       const sr = p.bufB.sampleRate
-      const total =
-        kind === 'ab' ? p.aDur / p.spd + 0.25 + p.bDur : Math.max(p.aDur / p.spd, p.bDur)
+      const total = kind === 'ab' ? p.aDur / p.spd + 0.25 + p.bDur : p.bDur
       const off = new OfflineAudioContext(kind === 'split' ? 2 : 1, Math.ceil((total + 0.1) * sr), sr)
       const mk = (buf: AudioBuffer, gDb: number, pan: number, rate: number) => {
         const src = off.createBufferSource()
@@ -545,7 +584,8 @@ export default function PerformanceModal({
       }
       const a = mk(p.bufA, p.aGain, -1, p.spd)
       const b = mk(p.bufB, p.bGain, 1, 1)
-      a.start(0, p.aStart, p.aDur)
+      // Split aligns both windows on the output's crop bar (see playAb).
+      a.start(0, kind === 'split' ? p.bStart * p.spd : p.aStart, kind === 'split' ? p.bDur * p.spd : p.aDur)
       b.start(kind === 'ab' ? p.aDur / p.spd + 0.25 : 0, p.bStart, p.bDur)
       const rendered = await off.startRendering()
       const blob = audioBufferToWavMulti(rendered)
@@ -602,7 +642,7 @@ export default function PerformanceModal({
       open
       title={
         <span>
-          🎙 {seg ? `Vocal performance — clip ${seg.index}` : draft ? `Record dialog — speaker ${draft.speakerId} @ ${draft.startS.toFixed(1)}s` : 'Record dialog'}
+          🎙 {seg ? `${capture ? 'Vocal performance' : 'Dialogue'} — clip ${seg.index}` : draft ? `Record dialog — speaker ${draft.speakerId} @ ${draft.startS.toFixed(1)}s` : 'Record dialog'}
         </span>
       }
       onClose={onClose}
@@ -796,6 +836,7 @@ export default function PerformanceModal({
             playbackRate={previewSpeed}
             onTrimChange={(s, e, dur) => {
               takeTrimRef.current = { start: s, end: e, dur }
+              setTakeTrim({ start: s, end: e, dur })
             }}
             onGainChange={(g) => {
               // The player re-emits its current gain on every re-render — only a
@@ -806,6 +847,21 @@ export default function PerformanceModal({
               }
             }}
           />
+          {takeTrim && (takeTrim.start > 0.02 || takeTrim.end < takeTrim.dur - 0.02) && (
+            <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 6 }}>
+              <button
+                className="btn sm good"
+                disabled={processing}
+                title="Cut the take to the trim lines for real — the cut becomes the new source audio, so renders no longer process anything outside the crop"
+                onClick={() => void stampTrim()}
+              >
+                ✂ Stamp trim ({takeTrim.start.toFixed(2)}s – {takeTrim.end.toFixed(2)}s)
+              </button>
+              <span className="hint" style={{ opacity: 0.75 }}>
+                renders still use the FULL take until stamped
+              </span>
+            </div>
+          )}
           <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
             <span style={{ minWidth: 130 }}>Take speed · {speed.toFixed(2)}×</span>
             <input

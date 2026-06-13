@@ -146,6 +146,8 @@ input, textarea, select { font-family: inherit; }
 .btn:hover { border-color: #34466a; background: #1f2738; }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
 .btn.primary { background: var(--accent-grad); border: none; color: white; font-weight: 600; box-shadow: 0 4px 16px rgba(109,139,255,.35); }
+.btn.good { background: rgba(74, 222, 128, 0.16); border-color: rgba(74, 222, 128, 0.45); color: #6ee7a0; }
+.btn.good:hover { background: rgba(74, 222, 128, 0.26); }
 .btn.primary:hover { filter: brightness(1.08); }
 .btn.ghost { background: transparent; border-color: transparent; color: var(--text-dim); }
 .btn.ghost:hover { background: var(--bg-elev); color: var(--text); }
@@ -420,6 +422,12 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 
 /* Track reorder: grip on the label, insertion line while dragging. */
 .mtk-grip { flex: none; cursor: grab; color: var(--text-faint); font-size: 11px; padding: 0 2px; user-select: none; }
+
+/* Dragging clips / selections must never highlight text (Safari is especially
+   eager). Real text entry inside the grid (inline edit, exact-duration input)
+   opts back in. */
+.mtk-grid, .mtk-grid * { -webkit-user-select: none; user-select: none; }
+.mtk-grid input, .mtk-grid textarea { -webkit-user-select: text; user-select: text; }
 .mtk-grip:hover { color: var(--text); }
 .mtk-label.dragging { opacity: 0.45; }
 .mtk-track-drop {

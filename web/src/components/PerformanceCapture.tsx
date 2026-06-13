@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
-import { blobToWav } from '../audio-encode'
+import { blobToWav, sliceBlobToWav } from '../audio-encode'
 import { AudioPlayer } from './AudioPlayer'
 
 type Mode = 'character' | 'voice'
@@ -58,6 +58,7 @@ export function PerformanceCapture({
   const [autoWhisper, setAutoWhisper] = useState(true)
   const autoWhisperRef = useRef(true)
   autoWhisperRef.current = autoWhisper
+  const [takeTrim, setTakeTrim] = useState<{ start: number; end: number; dur: number } | null>(null)
 
   const recRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
@@ -87,7 +88,26 @@ export function PerformanceCapture({
     const url = URL.createObjectURL(wav)
     urlRef.current = url
     setTake({ blob: wav, url })
+    setTakeTrim(null)
   }, [])
+
+  // "Stamp Trim": destructively cut the take to the trim lines — the cut is
+  // what generation processes from then on (trim alone is preview-only).
+  const stampTrim = async () => {
+    const tt = takeTrim
+    if (!take || !tt) return
+    if (tt.start < 0.02 && tt.end > tt.dur - 0.02) return
+    setProcessing(true)
+    try {
+      const stamped = await sliceBlobToWav(take.blob, tt.start, tt.end)
+      rawRef.current = stamped
+      setTakeBlob(stamped)
+    } catch (e) {
+      notify(`Stamp trim failed: ${e instanceof Error ? e.message : e}`, 'error')
+    } finally {
+      setProcessing(false)
+    }
+  }
 
   const applyCleanup = useCallback(
     async (base: Blob, isolate: boolean, dereverb: boolean): Promise<Blob> => {
@@ -284,7 +304,23 @@ export function PerformanceCapture({
             initialGain={gain}
             playbackRate={previewSpeed}
             onGainChange={setGain}
+            onTrimChange={(s, e, dur) => setTakeTrim({ start: s, end: e, dur })}
           />
+          {takeTrim && (takeTrim.start > 0.02 || takeTrim.end < takeTrim.dur - 0.02) && (
+            <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 6 }}>
+              <button
+                className="btn sm good"
+                disabled={processing}
+                title="Cut the take to the trim lines for real — the cut becomes the new source audio, so generation no longer processes anything outside the crop"
+                onClick={() => void stampTrim()}
+              >
+                ✂ Stamp trim ({takeTrim.start.toFixed(2)}s – {takeTrim.end.toFixed(2)}s)
+              </button>
+              <span className="hint" style={{ opacity: 0.75 }}>
+                generation uses the FULL take until stamped
+              </span>
+            </div>
+          )}
           <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
             <span style={{ minWidth: 130 }}>Take speed · {speed.toFixed(2)}×</span>
             <input

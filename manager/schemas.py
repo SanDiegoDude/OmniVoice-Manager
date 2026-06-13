@@ -113,6 +113,14 @@ class InsertSegmentRequest(BaseModel):
     ripple: bool = False
 
 
+class ImportClipRequest(BaseModel):
+    # Existing output file (in the outputs dir) to drop onto a track as a segment.
+    filename: str
+    speaker_id: str
+    text: str = ""
+    start_s: float = 0.0
+
+
 class EmptySessionRequest(BaseModel):
     """Spin up a blank multitrack timeline to compose by hand."""
     title: Optional[str] = None

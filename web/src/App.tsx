@@ -333,6 +333,39 @@ export default function App() {
     },
     [notify],
   )
+  // Voice Clone → ADR Studio: drop a finished output at t=0 on the first
+  // generative track (creating the scene with the current roster if needed).
+  const importClipToStudio = useCallback(
+    async (filename: string, text: string, speakers: Record<string, SpeakerConfig>, params: GenParams) => {
+      try {
+        if (!sessionRef.current) {
+          const s = await api.multitrackEmpty({ title: 'Untitled Scene', speakers, params })
+          sessionRef.current = s
+          setSession(s)
+        }
+        const sess = sessionRef.current
+        if (!sess) return
+        const track = sess.tracks.find((t) => t.kind !== 'audio')
+        if (!track) {
+          notify('No generative track to import onto', 'error')
+          return
+        }
+        const ns = await api.importClip(sess.id, {
+          filename,
+          speaker_id: track.speaker_id,
+          text,
+          start_s: 0,
+        })
+        sessionRef.current = ns
+        setSession(ns)
+        notify('Imported to ADR Studio — clip placed at 0:00 on track 1', 'success')
+      } catch (e) {
+        notify(String(e), 'error')
+      }
+    },
+    [notify],
+  )
+
   const addSpeakerToSession = useCallback(async (cfg: SpeakerConfig) => {
     const s = sessionRef.current
     if (!s) return
@@ -813,6 +846,7 @@ export default function App() {
           onReflow={reflowSession}
           onInsertSegment={insertSegment}
           onEnsureSession={ensureEmptySession}
+          onImportToStudio={importClipToStudio}
           onAddSpeaker={addSpeakerToSession}
           onUpdateSpeaker={updateSpeakerInSession}
           onRemoveSpeaker={removeSpeakerFromSession}

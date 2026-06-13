@@ -57,6 +57,7 @@ from .schemas import (
     InpaintRequest,
     MergeSegmentsRequest,
     MoveSegmentRequest,
+    ImportClipRequest,
     InsertSegmentRequest,
     LoadModelRequest,
     TrackOrderRequest,
@@ -946,6 +947,19 @@ def multitrack_insert(sid: str, req: InsertSegmentRequest):
         raise HTTPException(404, str(e))
     job_id = job_manager.submit(job_fn, meta={"multitrack": True, "insert": True})
     return {"job_id": job_id}
+
+
+@app.post("/api/multitrack/{sid}/import-clip")
+def multitrack_import_clip(sid: str, req: ImportClipRequest):
+    """Drop an existing output file onto a track as a segment (no model run) —
+    e.g. 'Import to ADR Studio' from the Voice Clone tab."""
+    src = (OUTPUT_DIR / req.filename).resolve()
+    if OUTPUT_DIR.resolve() not in src.parents or not src.exists():
+        raise HTTPException(404, "Output file not found")
+    try:
+        return sessions.import_clip(sid, req.speaker_id, req.text or "", req.start_s, src)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(404, str(e))
 
 
 @app.post("/api/multitrack/{sid}/finalize")

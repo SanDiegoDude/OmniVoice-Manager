@@ -31,6 +31,25 @@ function normalizeBuffer(buf: AudioBuffer, targetPeak: number) {
   }
 }
 
+/** Destructively cut a clip to [start, end] seconds and re-encode as mono WAV
+ * ("Stamp Trim" — the cut becomes the new source of truth). */
+export async function sliceBlobToWav(blob: Blob, start: number, end: number): Promise<Blob> {
+  const ctx = new AudioContext()
+  try {
+    const buf = await ctx.decodeAudioData(await blob.arrayBuffer())
+    const sr = buf.sampleRate
+    const s = Math.max(0, Math.floor(start * sr))
+    const e = Math.min(buf.length, Math.max(s + 1, Math.ceil(end * sr)))
+    const out = new AudioBuffer({ length: e - s, numberOfChannels: buf.numberOfChannels, sampleRate: sr })
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      out.copyToChannel(buf.getChannelData(c).subarray(s, e), c)
+    }
+    return audioBufferToWav(out)
+  } finally {
+    void ctx.close()
+  }
+}
+
 /** Encode an AudioBuffer preserving its channel count (16-bit PCM WAV) —
  * used for the stereo L/R comparison export. */
 export function audioBufferToWavMulti(buf: AudioBuffer): Blob {

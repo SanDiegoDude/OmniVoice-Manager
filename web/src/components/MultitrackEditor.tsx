@@ -899,17 +899,28 @@ export function MultitrackEditor({
                   style={{ height: rowH, backgroundImage: `repeating-linear-gradient(90deg, rgba(255,255,255,.045) 0 1px, transparent 1px ${pxPerSec}px)` }}
                   onDoubleClick={(e) => {
                     if ((e.target as HTMLElement).closest('.mtk-seg')) return
-                    // Detect a gap at the click: the clip ending just before and the
-                    // clip starting just after, on THIS track → offer a ripple-close.
+                    // Detect a gap at the click: from the end of THIS track's
+                    // previous clip to the next clip ANYWHERE in the stack —
+                    // closing it must never crush clips on other tracks.
                     const clickT = timeFromClientX(e.clientX)
                     const spans = t.segments.map((s) => ({ start: s.start_s, end: s.start_s + s.duration_s }))
                     const prev = spans.filter((s) => s.end <= clickT + 1e-3).sort((a, b) => b.end - a.end)[0]
-                    const next = spans.filter((s) => s.start >= clickT - 1e-3).sort((a, b) => a.start - b.start)[0]
                     let gapStart: number | undefined
                     let gapAmount: number | undefined
-                    if (prev && next && next.start - prev.end > 0.05) {
-                      gapStart = prev.end
-                      gapAmount = next.start - prev.end
+                    if (prev) {
+                      const all = session.tracks.flatMap((tr) =>
+                        tr.segments.map((s) => ({ start: s.start_s, end: s.start_s + s.duration_s })),
+                      )
+                      // Anything (on any track) still sounding at the gap start
+                      // means there is no true silence to remove.
+                      const covered = all.some((s) => s.start < prev.end - 1e-3 && s.end > prev.end + 1e-3)
+                      const nextStart = Math.min(
+                        ...all.filter((s) => s.start >= prev.end - 1e-3).map((s) => s.start),
+                      )
+                      if (!covered && Number.isFinite(nextStart) && nextStart - prev.end > 0.05) {
+                        gapStart = prev.end
+                        gapAmount = nextStart - prev.end
+                      }
                     }
                     setInsert({ kind: 'new', speakerId: t.speaker_id, start_s: snap(clickT), ripple: false, phase: 'menu', text: '', menuX: e.clientX, menuY: e.clientY, gapStart, gapAmount })
                   }}
@@ -1260,7 +1271,16 @@ export function MultitrackEditor({
                     {isAdd ? (
                       <button className="btn sm primary" onClick={() => { onAddSpace(a, w); updateSel(null) }}>⏱ Add space</button>
                     ) : (
-                      <button className="btn sm bad" onClick={() => { onDeleteSpace(a, w); updateSel(null) }}>🗑 Delete space</button>
+                      <>
+                        <button className="btn sm bad" onClick={() => { onDeleteSpace(a, w); updateSel(null) }}>🗑 Delete space</button>
+                        <button
+                          className="btn sm good"
+                          title="Insert this much empty time at the selection start (pushes everything after it later)"
+                          onClick={() => { onAddSpace(a, w); updateSel(null) }}
+                        >
+                          ⏱ Add space
+                        </button>
+                      </>
                     )}
                     <button className="btn sm ghost" onClick={() => updateSel(null)}>✕</button>
                   </div>
@@ -1353,7 +1373,6 @@ export function MultitrackEditor({
       {segMenu && (() => {
         const seg = flatSegs.find((s) => s.index === segMenu.index)
         if (!seg) return null
-        const text = edits[seg.index] ?? seg.text
         const dirty = edits[seg.index] !== undefined && edits[seg.index] !== seg.text
         const isPlaying = playingSeg === seg.index
         const canSplit = head.cur > seg.start_s + 0.05 && head.cur < seg.start_s + seg.duration_s - 0.05
@@ -1376,7 +1395,13 @@ export function MultitrackEditor({
                 </button>
               )}
               {!isAudioChan && (
-                <button className="btn sm" onClick={() => { startEdit(seg.index, text); setSegMenu(null) }}>✎ Edit dialogue</button>
+                <button
+                  className="btn sm"
+                  title="Open the dialogue editor — comfortable editing for long lines, render in place, or flip on Capture Performance to act the line yourself"
+                  onClick={() => { setPerfModal({ index: seg.index, mic: true, capture: false }); setSegMenu(null) }}
+                >
+                  ✎ Edit dialogue…
+                </button>
               )}
               <button className="btn sm" onClick={() => { openTrim(seg); setSegMenu(null) }}>✂ Trim / speed</button>
               {!isAudioChan && (

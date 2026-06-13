@@ -290,6 +290,8 @@ export const api = {
     jfetch<{ job_id: string }>(`/api/multitrack/${sid}/insert`, { method: 'POST', body: JSON.stringify(body) }),
   multitrackEmpty: (body: { title?: string; speakers: Record<string, SpeakerConfig>; params: GenParams }) =>
     jfetch<MultitrackSession>('/api/multitrack/empty', { method: 'POST', body: JSON.stringify(body) }),
+  importClip: (sid: string, body: { filename: string; speaker_id: string; text?: string; start_s?: number }) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/import-clip`, { method: 'POST', body: JSON.stringify(body) }),
   discardSession: (sid: string) => jfetch<{ ok: boolean }>(`/api/multitrack/${sid}`, { method: 'DELETE' }),
   addSpeaker: (sid: string, cfg: SpeakerConfig) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/speaker`, { method: 'POST', body: JSON.stringify(cfg) }),
