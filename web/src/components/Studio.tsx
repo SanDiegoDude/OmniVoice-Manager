@@ -673,6 +673,8 @@ export function Studio({
             onSetPreserveNonvocal={onSetPreserveNonvocal}
             onPromoteChannel={handlePromote}
             onRemoveTrack={handleRemoveTrack}
+            onAddSpeaker={onAddSpeaker}
+            voices={voices}
             onMergeSegments={onMergeSegments}
             onCollapseTrack={onCollapseTrack}
             onMoveSegment={onMoveSegment}

@@ -293,6 +293,9 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 .btn.busy-glow { animation: working-glow 2.2s ease-in-out infinite; }
 .mtk-labels { flex: 0 0 auto; background: var(--bg-elev); border-right: 1px solid var(--border); z-index: 2; }
 .mtk-corner { border-bottom: 1px solid var(--border-soft); }
+.mtk-add-track { width: 100%; display: flex; align-items: center; justify-content: center; gap: 4px; background: transparent; border: 0; border-bottom: 1px solid var(--border-soft); color: var(--text-dim); font-size: 11px; font-weight: 600; cursor: pointer; white-space: nowrap; padding: 0 6px; }
+.mtk-add-track:hover:not(:disabled) { background: var(--bg-elev-2); color: var(--accent); }
+.mtk-add-track:disabled { opacity: 0.45; cursor: default; }
 .mtk-label { position: relative; display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 0 8px 0 9px; border-bottom: 1px solid var(--border-soft); overflow: hidden; }
 .mtk-label.muted { opacity: 0.62; }
 .mtk-label.muted .mtk-label-name { text-decoration: line-through; text-decoration-color: var(--text-faint); }

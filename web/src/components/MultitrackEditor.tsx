@@ -1,12 +1,25 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
-import type { MultitrackSegment, MultitrackSession, MultitrackTrack } from '../api'
+import type { MultitrackSegment, MultitrackSession, MultitrackTrack, SpeakerConfig, Voice } from '../api'
 import { AudioPlayer, type AudioPlayerHandle } from './AudioPlayer'
 import { Toggle } from './ui'
 import { blurTag, focusTag } from '../tagInject'
 import { claimPlayback, releasePlayback } from '../audioBus'
 import PerformanceModal from './PerformanceModal'
 import ToolModal from './ToolModal'
+import { SpeakerCard } from './SpeakerCard'
+
+const newSpeakerCfg = (): SpeakerConfig => ({
+  mode: 'clone',
+  voice: null,
+  ref_text: '',
+  instruct: '',
+  language: null,
+  isolate: true,
+  normalize: true,
+  dereverb: false,
+  dereverb_method: 'roformer',
+})
 
 const ROW_H = 74
 const RULER_H = 22
@@ -84,6 +97,8 @@ export function MultitrackEditor({
   onSetPreserveNonvocal,
   onPromoteChannel,
   onRemoveTrack,
+  onAddSpeaker,
+  voices,
   onMergeSegments,
   onCollapseTrack,
   onMoveSegment,
@@ -123,6 +138,8 @@ export function MultitrackEditor({
   onSetPreserveNonvocal: (index: number, enabled: boolean) => Promise<void>
   onPromoteChannel: (pos: string, name: string) => Promise<MultitrackSession | null>
   onRemoveTrack: (pos: string) => Promise<void>
+  onAddSpeaker: (cfg: SpeakerConfig) => void
+  voices: Voice[]
   onMergeSegments: (indices: number[]) => Promise<void>
   onCollapseTrack: (pos: string) => Promise<void>
   onMoveSegment: (index: number, speakerId: string, startS: number) => void
@@ -189,6 +206,8 @@ export function MultitrackEditor({
   const [slicing, setSlicing] = useState<number | null>(null)
   const [inpainting, setInpainting] = useState<number | null>(null)
   const [promoting, setPromoting] = useState<string | null>(null)
+  // Add-track flyout: a draft speaker config edited in-place; null = closed.
+  const [addTrack, setAddTrack] = useState<SpeakerConfig | null>(null)
   const [previewSpeed, setPreviewSpeed] = useState(1)
   const [insert, setInsert] = useState<Insert>(null)
   const segMenuRef = useRef<HTMLDivElement>(null)
@@ -859,7 +878,16 @@ export function MultitrackEditor({
 
       <div className="mtk-grid" style={{ marginTop: 12 }}>
         <div className="mtk-labels" style={{ width: LABEL_W, position: 'relative' }} ref={labelsRef}>
-          <div className="mtk-corner" style={{ height: RULER_H }} />
+          <button
+            type="button"
+            className="mtk-corner mtk-add-track"
+            style={{ height: RULER_H }}
+            disabled={!!busy}
+            onClick={() => setAddTrack(newSpeakerCfg())}
+            title="Add a new speaker track to the end of the stack"
+          >
+            + Speaker track
+          </button>
           {session.tracks.map((t, ti) => (
             <ChannelLabel
               key={t.speaker_id}
@@ -1593,6 +1621,34 @@ export function MultitrackEditor({
           />
         )
       })()}
+
+      {addTrack && (
+        <ToolModal
+          open
+          title="🎚 Add speaker track"
+          width={560}
+          onClose={() => setAddTrack(null)}
+          actions={
+            <button
+              className="btn sm good"
+              onClick={() => { onAddSpeaker(addTrack); setAddTrack(null) }}
+              title="Append this speaker as a new track at the bottom of the stack"
+            >
+              + Add track
+            </button>
+          }
+        >
+          <SpeakerCard
+            index={session.tracks.filter((t) => t.kind !== 'audio').length + 1}
+            config={addTrack}
+            voices={voices}
+            onChange={setAddTrack}
+          />
+          <div className="hint" style={{ marginTop: 10 }}>
+            The new track lands at the bottom of the stack. Leave the transcript blank to auto-Whisper the reference on first render.
+          </div>
+        </ToolModal>
+      )}
 
       <div className="hint" style={{ marginTop: 8 }}>
         Drag a clip to move — <strong>pull it up/down</strong> to drop it on another track (regenerate to re-voice) ·
