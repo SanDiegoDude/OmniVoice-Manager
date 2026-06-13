@@ -874,6 +874,7 @@ export function MultitrackEditor({
               onPromote={async (pos, name) => { setPromoting(pos); try { await onPromoteChannel(pos, name) } finally { setPromoting(null) } }}
               onCollapse={onCollapseTrack}
               onRemove={onRemoveTrack}
+              lastTrack={session.tracks.length <= 1}
             />
           ))}
           {trackDrag && (
@@ -1620,6 +1621,7 @@ function ChannelLabel({
   onPromote,
   onCollapse,
   onRemove,
+  lastTrack,
 }: {
   track: MultitrackTrack
   rowH: number
@@ -1632,6 +1634,7 @@ function ChannelLabel({
   onPromote: (pos: string, name: string) => void
   onCollapse: (pos: string) => Promise<void>
   onRemove: (pos: string) => Promise<void>
+  lastTrack?: boolean
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(track.name)
@@ -1711,7 +1714,14 @@ function ChannelLabel({
           >
             {muted ? '🔇' : '🔊'}
           </button>
-          <button className="mtk-label-x del" disabled={working || busy} onClick={doDelete} title="Delete this track">✕</button>
+          <button
+            className="mtk-label-x del"
+            disabled={working || busy || lastTrack}
+            onClick={doDelete}
+            title={lastTrack ? 'A scene needs at least one track — add another before deleting this one' : 'Delete this track'}
+          >
+            ✕
+          </button>
         </div>
       </div>
       {!isAudio && track.voice_name && track.voice_name !== track.name && (

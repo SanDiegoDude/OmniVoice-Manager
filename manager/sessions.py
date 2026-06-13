@@ -1124,6 +1124,8 @@ def remove_speaker(sid: str, pos: str) -> Dict[str, Any]:
         if not session:
             raise FileNotFoundError("Session not found")
         pos = str(pos)
+        if len(session.get("speakers", {})) <= 1:
+            raise ValueError("Can't delete the last track — a scene needs at least one.")
         is_num = pos.isdigit()
         p = int(pos) if is_num else -1
         # Drop the removed track's segment files; renumber only NUMERIC ids above it.
