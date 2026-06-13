@@ -32,12 +32,29 @@ _MONOLOGUE_RULES = (
 )
 
 _DIALOGUE_RULES = (
-    "You write a natural multi-speaker conversation for a text-to-speech engine. "
+    "You write a natural, speaker-labelled script for a text-to-speech engine. "
     "Every line MUST begin with a speaker label in the exact form 'Speaker 1:', "
-    "'Speaker 2:', up to 'Speaker {n}:'. Use exactly {n} speakers, numbered from 1 "
+    "'Speaker 2:', up to 'Speaker {n}:'. Use exactly {n} speaker(s), numbered from 1 "
     "(never 'Speaker 0'). Put each speaker's turn on its own line and never place two "
     "speakers on one line. The 'Speaker N:' labels are control markers that are removed "
     "before synthesis; everything after the label is spoken."
+)
+
+# With single speaker, keep the labelled format but ask for connected delivery
+# (one person speaking) rather than a back-and-forth conversation.
+_DIALOGUE_SOLO_NOTE = (
+    " There is only one speaker: label every line 'Speaker 1:' and write it as one "
+    "person speaking continuously, not a conversation with themselves."
+)
+
+# Round-robin turn order (1,2,3,4,1,2,3,4 …) is a strong failure mode for big
+# casts, especially on smaller models. Demand organic, non-sequential turns.
+_VARIETY_NOTE = (
+    " IMPORTANT — vary the turn order: do NOT cycle through the speakers in numeric "
+    "order (no predictable 1,2,3,4,5 round-robin). Real conversations jump around — "
+    "let speakers interrupt, react out of order, hold back-and-forth exchanges between "
+    "just two of them, and speak different amounts. Decide who speaks next by what the "
+    "scene needs, not by their number, while still giving every speaker a real presence."
 )
 
 _COMMON_RULES = (
@@ -95,11 +112,23 @@ def _client(provider: dict):
     return OpenAI(api_key=api_key)
 
 
-def _build_system(num_speakers: int, speakers: Optional[List[Dict[str, Any]]]) -> str:
-    if num_speakers <= 1:
+def _build_system(
+    num_speakers: int,
+    speakers: Optional[List[Dict[str, Any]]],
+    monologue: Optional[bool] = None,
+) -> str:
+    # Monologue is a Voice Clone–only format. When the caller doesn't say (older
+    # API clients), fall back to the legacy "monologue iff a single speaker" rule.
+    mono = (num_speakers <= 1) if monologue is None else bool(monologue)
+    n = max(1, num_speakers)
+    if mono:
         base = _MONOLOGUE_RULES
     else:
-        base = _DIALOGUE_RULES.format(n=num_speakers)
+        base = _DIALOGUE_RULES.format(n=n)
+        if n == 1:
+            base += _DIALOGUE_SOLO_NOTE
+        elif n >= 4:
+            base += _VARIETY_NOTE
     base += _COMMON_RULES
 
     if speakers:
@@ -108,7 +137,7 @@ def _build_system(num_speakers: int, speakers: Optional[List[Dict[str, Any]]]) -
             label = spk.get("name") or spk.get("instruct") or spk.get("voice")
             if not label:
                 continue
-            if num_speakers <= 1:
+            if mono:
                 descs.append(f"the voice is {label}")
             else:
                 descs.append(f"Speaker {i + 1} is {label}")
@@ -290,10 +319,11 @@ def generate_script(
     max_tokens: int = 16000,
     max_retries: int = 4,
     provider_id: Optional[str] = None,
+    monologue: Optional[bool] = None,
 ) -> Dict[str, Any]:
     provider = _resolve(provider_id)
     client = _client(provider)
-    system_message = _build_system(num_speakers, speakers)
+    system_message = _build_system(num_speakers, speakers, monologue)
     user_message = _build_user(prompt, existing_script, previous)
     model = provider["model"]
     messages = [

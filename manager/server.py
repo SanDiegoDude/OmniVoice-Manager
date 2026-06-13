@@ -329,6 +329,7 @@ def make_script(req: ScriptRequest):
             previous=req.previous,
             temperature=req.temperature,
             provider_id=req.provider_id,
+            monologue=req.monologue,
         )
     except scripts_ai.ScriptAIError as e:
         raise HTTPException(400, str(e))

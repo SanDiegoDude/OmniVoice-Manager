@@ -414,6 +414,9 @@ export interface ScriptBody {
   existing_script?: string
   previous?: { prompt?: string; script?: string }
   provider_id?: string
+  /** Voice Clone tab only: write an unlabelled monologue. ADR Studio omits this
+   * (or sends false) so scripts are always "Speaker N:" labelled. */
+  monologue?: boolean
 }
 
 export interface GenerateBody {

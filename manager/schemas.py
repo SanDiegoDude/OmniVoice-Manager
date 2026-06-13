@@ -170,6 +170,9 @@ class ScriptRequest(BaseModel):
     previous: Optional[Dict[str, str]] = None
     temperature: float = 0.7
     provider_id: Optional[str] = None
+    # Voice Clone tab writes an unlabelled monologue; ADR Studio always writes
+    # labelled dialogue. None = legacy fallback (monologue iff num_speakers <= 1).
+    monologue: Optional[bool] = None
 
 
 class ScriptAndSpeakRequest(BaseModel):

@@ -761,7 +761,7 @@ export default function App() {
     }
   }
 
-  const generateScript = async (prompt: string, numSpeakers: number, speakers: SpeakerConfig[], existing: string) => {
+  const generateScript = async (prompt: string, numSpeakers: number, speakers: SpeakerConfig[], existing: string, monologue: boolean) => {
     setScriptBusy(true)
     try {
       const res = await api.script({
@@ -773,6 +773,7 @@ export default function App() {
           voice: s.voice || undefined,
         })),
         existing_script: existing,
+        monologue,
       })
       notify(`Script “${res.title}” ready`, 'success')
       refreshHistory()

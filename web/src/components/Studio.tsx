@@ -114,7 +114,7 @@ export function Studio({
   onReloadProviders: () => void
   onGenerate: (body: GenerateBody, title: string, multitrack?: boolean) => void
   onPerformGenerate: (body: GenerateBody, perf: PerfCaptureState) => void
-  onGenerateScript: (prompt: string, numSpeakers: number, speakers: SpeakerConfig[], existing: string) => Promise<{ title: string; script: string } | null>
+  onGenerateScript: (prompt: string, numSpeakers: number, speakers: SpeakerConfig[], existing: string, monologue: boolean) => Promise<{ title: string; script: string } | null>
   onLucky: (body: GenerateBody, title: string, multitrack?: boolean) => void
   onRegenSegment: (index: number, text?: string) => void
   onEditSegment: (index: number, fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number; gain_db?: number }) => void
@@ -345,6 +345,13 @@ export function Studio({
     setSpeakers((prev) => [...prev, cfg])
     if (liveSync) onAddSpeaker(cfg)
   }
+  // +Speaker track button inside the editor: append a fully-configured speaker
+  // and grow the local roster in lockstep, so the scene stays multi-speaker
+  // (otherwise the script writer sees a 1-speaker roster and goes monologue).
+  const addSpeakerFromEditor = (cfg: SpeakerConfig) => {
+    setSpeakers((prev) => [...prev, cfg])
+    onAddSpeaker(cfg)
+  }
   const removeSpeaker = (i: number) =>
     setSpeakers((prev) => {
       if (prev.length <= 1) return prev
@@ -370,9 +377,14 @@ export function Studio({
     }
   }
 
+  // Monologue (no "Speaker N:" labels) is a Voice Clone–only format. ADR Studio
+  // always writes labelled dialogue — even for a single speaker — so scripts read
+  // consistently across the editor.
+  const monologue = mode === 'single'
+
   async function handleScript() {
     if (!aiPrompt.trim()) return notify('Enter an idea for the AI to write', 'error')
-    const res = await onGenerateScript(aiPrompt, count, activeSpeakers, script)
+    const res = await onGenerateScript(aiPrompt, count, activeSpeakers, script, monologue)
     if (res) {
       setScript(res.script)
       setTitle(res.title)
@@ -381,7 +393,7 @@ export function Studio({
 
   async function handleLucky() {
     if (!aiPrompt.trim()) return notify('Enter an idea first', 'error')
-    const res = await onGenerateScript(aiPrompt, count, activeSpeakers, script)
+    const res = await onGenerateScript(aiPrompt, count, activeSpeakers, script, monologue)
     if (res) {
       setScript(res.script)
       setTitle(res.title)
@@ -673,7 +685,7 @@ export function Studio({
             onSetPreserveNonvocal={onSetPreserveNonvocal}
             onPromoteChannel={handlePromote}
             onRemoveTrack={handleRemoveTrack}
-            onAddSpeaker={onAddSpeaker}
+            onAddSpeaker={addSpeakerFromEditor}
             voices={voices}
             onMergeSegments={onMergeSegments}
             onCollapseTrack={onCollapseTrack}
