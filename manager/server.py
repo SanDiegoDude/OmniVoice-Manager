@@ -565,6 +565,73 @@ def _group_sentences(chunks: list, total_s: float) -> list:
     return [s for s in sentences if s["text"]]
 
 
+_SENT_RE = re.compile(r"[^.!?…。！？]+(?:[.!?…。！？]+['\"”’\)\]]*)?\s*")
+
+
+def _sentences_from_source(chunks: list, source: str, total_s: float) -> Optional[list]:
+    """Build auto-slice sentences from the segment's *own* script text, taking
+    only the timing from Whisper's word stamps. Whisper occasionally decodes a
+    whole 30s chunk lowercased with no punctuation, which both wrecked the
+    dialogue text on sliced clips and collapsed sentence detection; the script
+    that generated the audio is the better source of truth for the words.
+    Returns None when the script can't be aligned (caller falls back to the
+    raw Whisper sentences)."""
+    import difflib
+
+    src_sents = [m.group(0).strip() for m in _SENT_RE.finditer(source) if m.group(0).strip()]
+    if len(src_sents) < 2:
+        return None
+
+    def norm(w: str) -> str:
+        return re.sub(r"[^a-z0-9']+", "", w.lower())
+
+    words = [c for c in chunks if (c.get("text") or "").strip()]
+    if not words:
+        return None
+    src_words: list = []
+    sent_of: list = []
+    for si, s in enumerate(src_sents):
+        for w in s.split():
+            src_words.append(norm(w))
+            sent_of.append(si)
+    sm = difflib.SequenceMatcher(a=[norm(c["text"]) for c in words], b=src_words, autojunk=False)
+    spans = [[None, None] for _ in src_sents]  # [start, end] audible seconds
+    matched = 0
+    for a, b, n in sm.get_matching_blocks():
+        for k in range(n):
+            matched += 1
+            si = sent_of[b + k]
+            st, en = words[a + k].get("start"), words[a + k].get("end")
+            if st is not None:
+                spans[si][0] = st if spans[si][0] is None else min(spans[si][0], st)
+            if en is not None:
+                spans[si][1] = en if spans[si][1] is None else max(spans[si][1], en)
+    if matched < max(2, len(src_words) // 2):
+        return None  # script and audio genuinely disagree
+
+    # Sentences whose words never matched carry no timing — fold their text
+    # into a timed neighbour so no dialogue is dropped. auto_slice cuts each
+    # slice at the previous slice's end, so only `end` has to be solid.
+    out: list = []
+    pending = ""
+    for si, s in enumerate(src_sents):
+        st, en = spans[si]
+        text = f"{pending} {s}".strip()
+        pending = ""
+        if en is None or (out and en <= out[-1]["end"]):
+            pending = text
+            continue
+        out.append({"text": text, "start": st if st is not None else (out[-1]["end"] if out else 0.0), "end": float(en)})
+    if pending:
+        if not out:
+            return None
+        out[-1]["text"] = f"{out[-1]['text']} {pending}".strip()
+    if len(out) < 2:
+        return None
+    out[-1]["end"] = total_s
+    return out
+
+
 @app.post("/api/multitrack/{sid}/segment/{index}/auto-slice")
 def multitrack_auto_slice(sid: str, index: int):
     """Auto-split a segment into one clip per sentence using Whisper timestamps."""
@@ -575,7 +642,10 @@ def multitrack_auto_slice(sid: str, index: int):
     total_s = len(audio) / float(max(sr, 1))
     res = model_manager.transcribe({"waveform": audio, "sample_rate": sr, "chunks": True})
     chunks = res.get("chunks") or []
-    sentences = _group_sentences(chunks, total_s)
+    src_text = sessions.segment_text(sid, index)
+    sentences = _sentences_from_source(chunks, src_text, total_s) if src_text else None
+    if sentences is None:
+        sentences = _group_sentences(chunks, total_s)
     if len(sentences) < 2:
         raise HTTPException(400, "Couldn't detect multiple sentences in this segment.")
     try:

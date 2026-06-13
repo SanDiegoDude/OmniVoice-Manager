@@ -350,6 +350,16 @@ export default function App() {
           notify('No generative track to import onto', 'error')
           return
         }
+        // The session may predate the user's voice pick (an empty scene is
+        // auto-created on load with a voiceless roster) — push the Voice Clone
+        // tab's speaker config onto the target track so regens and performance
+        // renders use the right voice, not a stale empty one.
+        const cfg = speakers['1']
+        if (cfg) {
+          const us = await api.updateSpeaker(sess.id, track.speaker_id, cfg)
+          sessionRef.current = us
+          setSession(us)
+        }
         const ns = await api.importClip(sess.id, {
           filename,
           speaker_id: track.speaker_id,

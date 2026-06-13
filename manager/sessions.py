@@ -264,6 +264,16 @@ def get(sid: str) -> Optional[Dict[str, Any]]:
         return public(session) if session else None
 
 
+def segment_text(sid: str, index: int) -> str:
+    """A segment's current dialogue text ('' when missing)."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            return ""
+        seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
+        return str(seg.get("text") or "") if seg else ""
+
+
 def public(session: Dict[str, Any]) -> Dict[str, Any]:
     sid = session["id"]
     bust = int(time.time() * 1000)
