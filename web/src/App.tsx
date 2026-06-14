@@ -3,6 +3,7 @@ import { api } from './api'
 import type { GenParams, GenerateBody, HistoryEntry, Job, MultitrackSegment, MultitrackSession, OutputFile, Provider, SpeakerConfig, SystemInfo, Voice, VoiceNode } from './api'
 import { SidePanel } from './components/SidePanel'
 import { Studio, type Injected } from './components/Studio'
+import type { PerfCaptureState } from './components/PerformanceCapture'
 import { TopBar } from './components/TopBar'
 import { Toasts, type ToastItem } from './components/ui'
 import { VoiceLab } from './components/VoiceLab'
@@ -300,7 +301,7 @@ export default function App() {
   // Voice Clone tab: one-shot performance-guided render (V2V over the take).
   const performGenerate = async (
     body: GenerateBody,
-    perf: { blob: Blob; gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number },
+    perf: PerfCaptureState,
   ) => {
     try {
       const { job_id } = await api.generatePerform(body, perf.blob, {
@@ -308,6 +309,8 @@ export default function App() {
         strength: perf.strength,
         gain_db: perf.gain_db,
         speed: perf.speed,
+        transforms: perf.transforms,
+        auto_pitch: perf.auto_pitch,
       })
       setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: {} })
     } catch (e) {

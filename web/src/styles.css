@@ -553,6 +553,7 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 .card.collapsed { position: relative; padding: 10px 14px 10px 30px; cursor: pointer; display: flex; align-items: center; }
 .card.collapsed:hover { border-color: var(--border); }
 .collapsed-title { font-weight: 600; color: var(--text-dim); font-size: 13px; }
+.collapsed-extra { margin-left: auto; display: flex; align-items: center; gap: 8px; cursor: default; }
 
 /* ---------- Mobile ---------- */
 @media (max-width: 1000px) {

@@ -384,6 +384,24 @@ async def generate_perform(file: UploadFile = File(...), payload: str = Form(...
     gain = float(perf_cfg.get("gain_db", 0.0) or 0.0)
     if abs(gain) > 1e-3:
         wav = np.clip(wav * (10.0 ** (gain / 20.0)), -1.0, 1.0).astype(np.float32)
+    from .voice_transforms import apply_transforms, auto_pitch_shift, has_effect
+
+    tf = dict(perf_cfg.get("transforms") or {})
+    if perf_cfg.get("auto_pitch"):
+        from . import voices as _voices
+
+        voice_id = next(
+            (s.voice for s in req.speakers.values() if s.mode == "clone" and s.voice), None
+        )
+        if voice_id:
+            try:
+                shift = auto_pitch_shift(wav, 24000, str(_voices.resolve_voice_path(voice_id)))
+                if abs(shift) > 1e-3:
+                    tf["pitch"] = float(tf.get("pitch", 0.0)) + shift
+            except (FileNotFoundError, ValueError):
+                pass
+    if tf and has_effect(tf):
+        wav = apply_transforms(wav, 24000, tf)
     speed = float(perf_cfg.get("speed", 1.0) or 1.0)
     if abs(speed - 1.0) > 1e-3:
         wav = time_stretch(wav, speed)
@@ -729,9 +747,17 @@ async def multitrack_set_performance(
     mode: str = Form("character"),
     strength: int = Form(3),
     text: str = Form(""),
+    transforms: str = Form(""),
+    auto_pitch: bool = Form(False),
 ):
     """Attach a recorded vocal performance to a segment (V2V mode). With a file
     the take is (re)stored; without one, only the params update."""
+    tf = None
+    if transforms.strip():
+        try:
+            tf = json.loads(transforms)
+        except json.JSONDecodeError:
+            raise HTTPException(400, "Invalid transforms payload")
     wav = None
     in_sr = None
     if file is not None:
@@ -752,7 +778,7 @@ async def multitrack_set_performance(
         return sessions.set_performance(
             sid, index, wav, int(in_sr) if in_sr else None,
             gain_db=gain_db, speed=speed, mode=mode, strength=strength,
-            text=text or None,
+            text=text or None, transforms=tf, auto_pitch=auto_pitch,
         )
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
@@ -802,6 +828,106 @@ async def process_clip(
     return FileResponse(str(out), media_type="audio/wav", filename="processed.wav")
 
 
+@app.post("/api/perform/transform-clip")
+async def perform_transform_clip(
+    file: UploadFile = File(...),
+    transforms: str = Form(""),
+    auto_pitch: bool = Form(False),
+    voice: str = Form(""),
+    persist: bool = Form(False),
+    title: str = Form("transformed"),
+):
+    """Apply the vocal transforms (+ optional auto pitch-match to a target voice)
+    to a clip and bake the result onto the audio.
+
+    Two modes:
+      - default: stream the reshaped WAV back (the take "Apply" — bake the modulated
+        audio straight onto the main take player).
+      - persist=true: save the reshaped audio into the outputs directory like a normal
+        render and return its descriptor, so the modulated *output* is a first-class
+        output file — importable to ADR Studio, usable as a redub, and savable."""
+    import librosa
+
+    from .voice_transforms import apply_transforms, auto_pitch_shift, has_effect
+
+    tf: dict = {}
+    if transforms.strip():
+        try:
+            tf = json.loads(transforms) or {}
+        except json.JSONDecodeError:
+            raise HTTPException(400, "Invalid transforms payload")
+
+    data = await file.read()
+    tmp = TMP_DIR / f"xform_{uuid.uuid4().hex}.bin"
+    tmp.write_bytes(data)
+    try:
+        wav, in_sr = librosa.load(str(tmp), sr=24000, mono=True)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Could not read audio: {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    if auto_pitch and voice.strip():
+        from . import voices as voices_mod
+
+        try:
+            shift = auto_pitch_shift(np.asarray(wav, dtype=np.float32), 24000, str(voices_mod.resolve_voice_path(voice)))
+            if abs(shift) > 1e-3:
+                tf["pitch"] = float(tf.get("pitch", 0.0)) + shift
+        except (FileNotFoundError, ValueError):
+            pass
+
+    if has_effect(tf):
+        wav = apply_transforms(np.asarray(wav, dtype=np.float32), 24000, tf)
+
+    if persist:
+        return service.save_output(np.asarray(wav, dtype=np.float32), 24000, title or "transformed", 1)
+
+    out = TMP_DIR / f"xform_{uuid.uuid4().hex}.wav"
+    save_wav(out, np.asarray(wav, dtype=np.float32), 24000)
+    return FileResponse(str(out), media_type="audio/wav", filename="transformed.wav")
+
+
+@app.post("/api/perform/stamp-output")
+async def perform_stamp_output(
+    file: UploadFile = File(...),
+    trim_start: float = Form(0.0),
+    trim_end: float = Form(0.0),
+    speed: float = Form(1.0),
+    title: str = Form("clone"),
+):
+    """Bake a trim window and/or pitch-preserving speed change into an output and
+    persist it as a real output file — the Voice Clone tab's "Stamp trim" for the
+    render, mirroring the take side. The stamped file is the new ground truth
+    (importable / redub / save)."""
+    import librosa
+
+    from .audio_utils import time_stretch
+
+    data = await file.read()
+    tmp = TMP_DIR / f"stamp_{uuid.uuid4().hex}.bin"
+    tmp.write_bytes(data)
+    try:
+        wav, _ = librosa.load(str(tmp), sr=24000, mono=True)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Could not read audio: {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    wav = np.asarray(wav, dtype=np.float32)
+    dur = len(wav) / 24000.0
+    s = max(0.0, float(trim_start))
+    e = float(trim_end) if trim_end and trim_end > s else dur
+    e = min(e, dur)
+    if e - s > 0.02 and (s > 0.02 or e < dur - 0.02):
+        wav = wav[int(s * 24000) : int(e * 24000)]
+
+    if abs(float(speed) - 1.0) > 1e-3:
+        wav = time_stretch(wav, float(speed))
+
+    return service.save_output(np.asarray(wav, dtype=np.float32), 24000, title or "clone", 1)
+
+
 @app.post("/api/transcribe-clip")
 async def transcribe_clip(file: UploadFile = File(...)):
     """Whisper-transcribe an arbitrary uploaded clip (e.g. a take being edited
@@ -819,6 +945,43 @@ async def transcribe_clip(file: UploadFile = File(...)):
         tmp.unlink(missing_ok=True)
     res = model_manager.transcribe({"waveform": wav, "sample_rate": int(in_sr)})
     return {"text": (res.get("text") or "").strip()}
+
+
+@app.post("/api/perform/pitch-match")
+async def perform_pitch_match(file: UploadFile = File(...), voice: str = Form("")):
+    """Suggest a semitone pitch shift that moves the uploaded take's median f0
+    onto the target library voice's — the "auto pitch-match to target" helper for
+    the vocal-transform box. The UI applies the result to the pitch slider."""
+    import librosa
+
+    from . import voices as voices_mod
+    from .voice_transforms import estimate_f0_median, suggest_pitch_semitones
+
+    if not voice.strip():
+        raise HTTPException(400, "A target voice is required to pitch-match.")
+    try:
+        target = voices_mod.load_voice_audio(voice)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "Target voice not found in the library.")
+
+    data = await file.read()
+    tmp = TMP_DIR / f"pmatch_{uuid.uuid4().hex}.bin"
+    tmp.write_bytes(data)
+    try:
+        take, take_sr = librosa.load(str(tmp), sr=None, mono=True)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Could not read take audio: {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    out = suggest_pitch_semitones(
+        np.asarray(take, dtype=np.float32), int(take_sr), target, 24000
+    )
+    if out["take_hz"] <= 0 or out["target_hz"] <= 0:
+        raise HTTPException(
+            422, "Couldn't detect a clear pitch on the take and/or target voice."
+        )
+    return out
 
 
 @app.post("/api/multitrack/{sid}/speaker/{pos}/promote")

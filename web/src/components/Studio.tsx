@@ -1,11 +1,23 @@
 import { useEffect, useRef, useState } from 'react'
-import type { GenParams, GenerateBody, Job, MultitrackSegment, MultitrackSession, Provider, SpeakerConfig, Voice } from '../api'
+import type { GenParams, GenerateBody, Job, MultitrackSegment, MultitrackSession, Provider, SpeakerConfig, Voice, VocalTransform } from '../api'
+import { api, DEFAULT_TRANSFORM } from '../api'
+import { audioBufferToWavMulti } from '../audio-encode'
 import { AudioPlayer } from './AudioPlayer'
+import { VocalTransforms } from './VocalTransforms'
 import { MultitrackEditor } from './MultitrackEditor'
-import { PerformanceCapture, type PerfCaptureState } from './PerformanceCapture'
+import { PerformanceCapture, type PerfCaptureHandle, type PerfCaptureState } from './PerformanceCapture'
+import SaveVoiceModal from './SaveVoiceModal'
 import { SpeakerCard } from './SpeakerCard'
 import { Collapsible, Slider, Toggle } from './ui'
 import { blurTag, focusTag } from '../tagInject'
+
+const transformActive = (t: VocalTransform) =>
+  Math.abs(t.pitch) > 0.01 ||
+  Math.abs(t.formant) > 0.01 ||
+  t.sub > 0.01 ||
+  t.drive > 0.01 ||
+  t.ringmod > 0.01 ||
+  t.vibrato > 0.01
 
 const defaultSpeaker = (): SpeakerConfig => ({
   mode: 'clone',
@@ -180,6 +192,25 @@ export function Studio({
   const [speakers, setSpeakers] = useState<SpeakerConfig[]>([defaultSpeaker()])
   // Voice Clone tab: optional recorded take that guides the render (V2V).
   const [perfState, setPerfState] = useState<PerfCaptureState | null>(null)
+  const [saveVoiceOpen, setSaveVoiceOpen] = useState(false)
+  const [outTransforms, setOutTransforms] = useState<VocalTransform>(DEFAULT_TRANSFORM)
+  // Output edit chain, kept as two independent layers so trim/speed never bakes
+  // the creative transforms and the transform sliders survive an Apply:
+  //   outputBase  = raw render after a trim/speed Stamp (null = the raw render)
+  //   outputFinal = base after the creative transforms (null = no transforms baked)
+  // Everything downstream (player / A/B / redub / save / import) uses the topmost
+  // non-null layer.
+  const [outputBase, setOutputBase] = useState<{ filename: string; url: string } | null>(null)
+  const [outputFinal, setOutputFinal] = useState<{ filename: string; url: string } | null>(null)
+  const [outTrim, setOutTrim] = useState<{ start: number; end: number; dur: number } | null>(null)
+  const [outSpeed, setOutSpeed] = useState(1)
+  const [outPreviewSpeed, setOutPreviewSpeed] = useState(1)
+  const [outStamping, setOutStamping] = useState(false)
+  // Output A/B + split-L/R inspection (take vs render), mirroring the modal.
+  const [abPlaying, setAbPlaying] = useState<null | 'ab' | 'split'>(null)
+  const [abSaving, setAbSaving] = useState<null | 'ab' | 'split'>(null)
+  const abCtxRef = useRef<AudioContext | null>(null)
+  const perfCaptureRef = useRef<PerfCaptureHandle>(null)
   const [script, setScript] = useState('')
   const [importing, setImporting] = useState(false)
   const [title, setTitle] = useState('')
@@ -187,6 +218,10 @@ export function Studio({
   const [params, setParams] = useState<GenParams>(defaultParams)
   const [showSettings, setShowSettings] = useState(false)
   const [multitrack, setMultitrack] = useState(true)
+  // Keep the generate/render action reachable while the Script card is minimized.
+  // Default off on the ADR (multi) side — a stray click there can wipe a scene —
+  // but always on in the Voice Clone tab for fast rerolls while playing with voices.
+  const [showGenWhenMin, setShowGenWhenMin] = useState(false)
 
   useEffect(() => {
     if (injected.nonce > 0) {
@@ -414,6 +449,202 @@ export function Studio({
   const prog = job?.progress
   const audioUrl = job?.status === 'done' ? job.result?.audio_url : null
 
+  // A fresh render clears any baked output edits — they were derived from the
+  // previous render and are now stale.
+  useEffect(() => {
+    setOutputBase(null)
+    setOutputFinal(null)
+    setOutTransforms(DEFAULT_TRANSFORM)
+    setOutTrim(null)
+    setOutSpeed(1)
+    setOutPreviewSpeed(1)
+  }, [audioUrl])
+
+  useEffect(() => () => { abCtxRef.current?.close().catch(() => {}) }, [])
+
+  // What the output player / Redub / Save / Import actually act on.
+  const outBaseUrl = outputBase?.url ?? audioUrl
+  const outUrl = outputFinal?.url ?? outBaseUrl
+  const outFilename = outputFinal?.filename ?? outputBase?.filename ?? job?.result?.filename
+
+  const genLabel = mode === 'single' && perfState ? 'Render performance' : 'Generate audio'
+  const doGenerate = () => {
+    const body = buildBody()
+    if (mode === 'single' && perfState) onPerformGenerate(body, perfState)
+    else onGenerate(body, title || 'Untitled Scene', useMultitrack)
+  }
+  const genButton = (small = false) => (
+    <button
+      className={`btn primary${small ? ' sm' : ''}${running ? ' busy-glow' : ''}`}
+      disabled={running || !script.trim()}
+      onClick={doGenerate}
+      title={genLabel}
+    >
+      {running ? <span className="spinner" /> : '🎙'} {genLabel}
+    </button>
+  )
+
+  // ---- Voice Clone output: edit chain (transforms + trim/speed) → one override ----
+  const outTitle = (job?.result?.title || 'clone') + '_fx'
+
+  // Apply the creative transforms on top of the (possibly trim/speed-stamped)
+  // base. Always works from the base — never from an already-transformed file —
+  // so it can't stack, and the slider settings stay put for further tweaking.
+  const applyOutputTransforms = async () => {
+    if (!outBaseUrl) return
+    const blob = await (await fetch(outBaseUrl)).blob()
+    const saved = await api.transformOutputFile(blob, outTransforms, outTitle)
+    setOutputFinal({ filename: saved.filename, url: saved.audio_url })
+  }
+
+  // Reset clears only the transform layer; a trim/speed stamp underneath stays.
+  const resetOutput = () => {
+    setOutputFinal(null)
+    setOutTransforms(DEFAULT_TRANSFORM)
+  }
+
+  // Stamp trims/speeds the BASE only (no transforms baked in). If transforms were
+  // applied, re-apply them on top of the freshly stamped base afterward.
+  const stampOutput = async () => {
+    if (!outBaseUrl) return
+    setOutStamping(true)
+    try {
+      const blob = await (await fetch(outBaseUrl)).blob()
+      const saved = await api.stampOutput(blob, {
+        trimStart: outTrim?.start ?? 0,
+        trimEnd: outTrim?.end ?? 0,
+        speed: outSpeed,
+        title: outTitle,
+      })
+      setOutputBase({ filename: saved.filename, url: saved.audio_url })
+      if (transformActive(outTransforms)) {
+        const tBlob = await (await fetch(saved.audio_url)).blob()
+        const tSaved = await api.transformOutputFile(tBlob, outTransforms, outTitle)
+        setOutputFinal({ filename: tSaved.filename, url: tSaved.audio_url })
+      } else {
+        setOutputFinal(null)
+      }
+      setOutTrim(null)
+      setOutSpeed(1)
+      setOutPreviewSpeed(1)
+    } catch (e) {
+      notify(`Stamp failed: ${e instanceof Error ? e.message : e}`, 'error')
+    } finally {
+      setOutStamping(false)
+    }
+  }
+
+  // ---- Output A/B + Split L/R (take vs render), mirroring the modal ----
+  const stopAb = () => {
+    abCtxRef.current?.close().catch(() => {})
+    abCtxRef.current = null
+    setAbPlaying(null)
+  }
+
+  const abPieces = async (decode: (src: Blob | string) => Promise<AudioBuffer>) => {
+    if (!perfState || !outUrl) return null
+    const [bufA, bufB] = await Promise.all([decode(perfState.blob), decode(outUrl)])
+    return { bufA, bufB, aGain: perfState.gain_db || 0, spd: perfState.speed || 1 }
+  }
+
+  const playAb = async (kind: 'ab' | 'split') => {
+    if (abPlaying) {
+      stopAb()
+      return
+    }
+    try {
+      const ctx = new AudioContext()
+      abCtxRef.current = ctx
+      const decode = async (src: Blob | string) => {
+        const arr = typeof src === 'string' ? await (await fetch(src)).arrayBuffer() : await src.arrayBuffer()
+        return ctx.decodeAudioData(arr)
+      }
+      const p = await abPieces(decode)
+      if (!p) throw new Error('Need a take and a render')
+      if (abCtxRef.current !== ctx) return
+      const mk = (buf: AudioBuffer, gDb: number, pan: number, rate: number) => {
+        const src = ctx.createBufferSource()
+        src.buffer = buf
+        src.playbackRate.value = rate
+        const g = ctx.createGain()
+        g.gain.value = Math.pow(10, gDb / 20)
+        const pn = ctx.createStereoPanner()
+        pn.pan.value = pan
+        src.connect(g)
+        g.connect(pn)
+        pn.connect(ctx.destination)
+        return src
+      }
+      const t0 = ctx.currentTime + 0.05
+      if (kind === 'ab') {
+        const a = mk(p.bufA, p.aGain, 0, p.spd)
+        const b = mk(p.bufB, 0, 0, 1)
+        a.start(t0, 0)
+        b.start(t0 + p.bufA.duration / p.spd + 0.25, 0)
+        b.onended = () => { if (abCtxRef.current === ctx) stopAb() }
+      } else {
+        const a = mk(p.bufA, p.aGain, -1, p.spd)
+        const b = mk(p.bufB, 0, 1, 1)
+        a.start(t0, 0)
+        b.start(t0, 0)
+        b.onended = () => { if (abCtxRef.current === ctx) stopAb() }
+      }
+      setAbPlaying(kind)
+    } catch (e) {
+      stopAb()
+      notify(`Comparison failed: ${e instanceof Error ? e.message : e}`, 'error')
+    }
+  }
+
+  const downloadAb = async (kind: 'ab' | 'split') => {
+    setAbSaving(kind)
+    const dctx = new AudioContext()
+    try {
+      const decode = async (src: Blob | string) => {
+        const arr = typeof src === 'string' ? await (await fetch(src)).arrayBuffer() : await src.arrayBuffer()
+        return dctx.decodeAudioData(arr)
+      }
+      const p = await abPieces(decode)
+      if (!p) throw new Error('Need a take and a render')
+      const sr = p.bufB.sampleRate
+      const total = kind === 'ab' ? p.bufA.duration / p.spd + 0.25 + p.bufB.duration : Math.max(p.bufA.duration / p.spd, p.bufB.duration)
+      const off = new OfflineAudioContext(kind === 'split' ? 2 : 1, Math.ceil((total + 0.1) * sr), sr)
+      const mk = (buf: AudioBuffer, gDb: number, pan: number, rate: number) => {
+        const src = off.createBufferSource()
+        src.buffer = buf
+        src.playbackRate.value = rate
+        const g = off.createGain()
+        g.gain.value = Math.pow(10, gDb / 20)
+        src.connect(g)
+        if (kind === 'split') {
+          const pn = off.createStereoPanner()
+          pn.pan.value = pan
+          g.connect(pn)
+          pn.connect(off.destination)
+        } else {
+          g.connect(off.destination)
+        }
+        return src
+      }
+      const a = mk(p.bufA, p.aGain, -1, p.spd)
+      const b = mk(p.bufB, 0, 1, 1)
+      a.start(0, 0)
+      b.start(kind === 'ab' ? p.bufA.duration / p.spd + 0.25 : 0, 0)
+      const rendered = await off.startRendering()
+      const blob = audioBufferToWavMulti(rendered)
+      const aEl = document.createElement('a')
+      aEl.href = URL.createObjectURL(blob)
+      aEl.download = `clone_${kind === 'ab' ? 'a-b' : 'split_LR'}.wav`
+      aEl.click()
+      setTimeout(() => URL.revokeObjectURL(aEl.href), 2000)
+    } catch (e) {
+      notify(`Comparison export failed: ${e instanceof Error ? e.message : e}`, 'error')
+    } finally {
+      void dctx.close()
+      setAbSaving(null)
+    }
+  }
+
   return (
     <div className="col-scroll" style={{ flex: 1 }}>
       {/* Speakers */}
@@ -460,7 +691,14 @@ export function Studio({
       {/* Voice Clone: optional performance-guided render */}
       {mode === 'single' && (
         <Collapsible className="card" title="🎭 Vocal performance (optional)">
-          <PerformanceCapture onState={setPerfState} onWhisperText={(t) => setScript(t)} notify={notify} />
+          <PerformanceCapture
+            ref={perfCaptureRef}
+            onState={setPerfState}
+            onWhisperText={(t) => setScript(t)}
+            notify={notify}
+            targetVoice={speakers[0]?.mode === 'clone' ? speakers[0]?.voice ?? null : null}
+            onVoiceSaved={onVoiceSaved}
+          />
         </Collapsible>
       )}
 
@@ -514,7 +752,11 @@ export function Studio({
       </Collapsible>
 
       {/* Script editor */}
-      <Collapsible className="card" title={mode === 'multi' ? '📝 Script' : '📝 Text to speak'}>
+      <Collapsible
+        className="card"
+        title={mode === 'multi' ? '📝 Script' : '📝 Text to speak'}
+        collapsedExtra={mode === 'single' || showGenWhenMin ? genButton(true) : undefined}
+      >
         <div className="flex-between" style={{ marginBottom: 8 }}>
           <div className="section-title" style={{ margin: 0 }}>
             {mode === 'multi' ? 'Script (use “Speaker 1:”, “Speaker 2:” …)' : 'Text to speak'}
@@ -566,18 +808,19 @@ export function Studio({
               />
             )}
           </div>
-          <button
-            className={`btn primary${running ? ' busy-glow' : ''}`}
-            disabled={running || !script.trim()}
-            onClick={() => {
-              const body = buildBody()
-              if (mode === 'single' && perfState) onPerformGenerate(body, perfState)
-              else onGenerate(body, title || 'Untitled Scene', useMultitrack)
-            }}
-          >
-            {running ? <span className="spinner" /> : '🎙'}{' '}
-            {mode === 'single' && perfState ? 'Render performance' : 'Generate audio'}
-          </button>
+          <div className="row" style={{ gap: 10, alignItems: 'center' }}>
+            {mode === 'multi' && (
+              <label
+                className="hint"
+                style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}
+                title="Keep this Generate button reachable while the Script card is minimized. Off by default on the ADR side — a stray click can re-render and wipe scene work."
+              >
+                <input type="checkbox" checked={showGenWhenMin} onChange={(e) => setShowGenWhenMin(e.target.checked)} />
+                show when minimized
+              </label>
+            )}
+            {genButton(false)}
+          </div>
         </div>
 
         {showSettings && (
@@ -711,32 +954,124 @@ export function Studio({
       {(mode === 'single' || !session) && audioUrl && (
         <>
           <AudioPlayer
-            key={audioUrl}
-            url={audioUrl}
+            key={outUrl}
+            url={outUrl as string}
             title={job?.result?.title}
-            filename={job?.result?.filename}
+            filename={outFilename}
+            playbackRate={mode === 'single' ? outPreviewSpeed : 1}
+            onTrimChange={mode === 'single' ? (s, e, dur) => setOutTrim({ start: s, end: e, dur }) : undefined}
           />
-          {mode === 'single' && job?.result?.filename && (
-            <div className="row" style={{ justifyContent: 'flex-end', marginTop: 6 }}>
-              <button
-                className="btn sm"
-                disabled={importing}
-                title="Drop this take at 0:00 on track 1 in ADR Studio and keep working on it there — no download/re-upload"
-                onClick={async () => {
-                  setImporting(true)
-                  try {
-                    await onImportToStudio(job.result!.filename as string, script, speakerMap(), params)
-                    setMode('multi')
-                  } finally {
-                    setImporting(false)
-                  }
-                }}
-              >
-                {importing ? <span className="spinner sm" /> : '🎬'} Import to ADR Studio
-              </button>
-            </div>
+          {mode === 'single' && (
+            <>
+              {/* Inspect: A/B + Split L/R vs the take (needs a recorded take) */}
+              {perfState && (
+                <div className="row" style={{ gap: 6, marginTop: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <button className={`btn sm${abPlaying === 'ab' ? ' on' : ''}`} title="Play your take, then the render, back-to-back" onClick={() => void playAb('ab')}>
+                    {abPlaying === 'ab' ? '■ Stop' : '▶ A/B'}
+                  </button>
+                  <button className="btn sm ghost" disabled={abSaving != null} title="Download the A/B comparison as one WAV" onClick={() => void downloadAb('ab')}>
+                    {abSaving === 'ab' ? <span className="spinner sm" /> : '⬇'}
+                  </button>
+                  <button className={`btn sm${abPlaying === 'split' ? ' on' : ''}`} title="Play both at once — take in the left ear, render in the right" onClick={() => void playAb('split')}>
+                    {abPlaying === 'split' ? '■ Stop' : '▶ Split L/R'}
+                  </button>
+                  <button className="btn sm ghost" disabled={abSaving != null} title="Download the stereo split (take left, render right) as one WAV" onClick={() => void downloadAb('split')}>
+                    {abSaving === 'split' ? <span className="spinner sm" /> : '⬇'}
+                  </button>
+                </div>
+              )}
+
+              {/* Output speed + stamp (bakes trim/speed into the ground-truth output) */}
+              <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
+                <span style={{ minWidth: 130 }}>Output speed · {outSpeed.toFixed(2)}×</span>
+                <input
+                  type="range"
+                  min={0.5}
+                  max={1.5}
+                  step={0.05}
+                  value={outSpeed}
+                  style={{ flex: 1 }}
+                  onChange={(e) => setOutSpeed(parseFloat(e.target.value))}
+                  onMouseUp={() => setOutPreviewSpeed(outSpeed)}
+                  onTouchEnd={() => setOutPreviewSpeed(outSpeed)}
+                />
+              </label>
+              {(outStamping || Math.abs(outSpeed - 1) > 0.001 || (outTrim && (outTrim.start > 0.02 || outTrim.end < outTrim.dur - 0.02))) && (
+                <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 6 }}>
+                  <button
+                    className="btn sm good"
+                    disabled={outStamping}
+                    title="Bake the trim window + speed into the output — the stamped audio becomes the new ground truth (import / redub / save all use it)"
+                    onClick={() => void stampOutput()}
+                  >
+                    {outStamping ? <span className="spinner sm" /> : '✂ Stamp trim/speed'}
+                    {outTrim && (outTrim.start > 0.02 || outTrim.end < outTrim.dur - 0.02)
+                      ? ` (${outTrim.start.toFixed(2)}s – ${outTrim.end.toFixed(2)}s)`
+                      : ''}
+                  </button>
+                  <span className="hint" style={{ opacity: 0.75 }}>preview only until stamped</span>
+                </div>
+              )}
+
+              {/* Render-time creative transforms on the output, above the actions */}
+              <VocalTransforms
+                value={outTransforms}
+                onChange={setOutTransforms}
+                defaultOpen={false}
+                target="output"
+                applyLabel="🎧 Apply to output"
+                applied={!!outputFinal}
+                onApply={applyOutputTransforms}
+                onReset={resetOutput}
+              />
+
+              {job?.result?.filename && (
+                <div className="row" style={{ justifyContent: 'flex-end', marginTop: 8 }}>
+                  <button
+                    className="btn sm"
+                    title="Use this output as the new performance take for another pass (gentle voice round, then character round) — gain/speed/transforms reset"
+                    onClick={() => void perfCaptureRef.current?.adoptOutput(outUrl as string)}
+                  >
+                    ⟳ Redub (use as take)
+                  </button>
+                  <button
+                    className="btn sm"
+                    title="Save this voice to the library — the (modulated) output, or your raw take"
+                    onClick={() => setSaveVoiceOpen(true)}
+                  >
+                    📚 Save voice…
+                  </button>
+                  <button
+                    className="btn sm"
+                    disabled={importing}
+                    title="Drop this output at 0:00 on track 1 in ADR Studio and keep working on it there — no download/re-upload"
+                    onClick={async () => {
+                      setImporting(true)
+                      try {
+                        await onImportToStudio(outFilename as string, script, speakerMap(), params)
+                        setMode('multi')
+                      } finally {
+                        setImporting(false)
+                      }
+                    }}
+                  >
+                    {importing ? <span className="spinner sm" /> : '🎬'} Import to ADR Studio
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </>
+      )}
+
+      {saveVoiceOpen && (
+        <SaveVoiceModal
+          take={perfState ? { blob: perfState.blob, url: '' } : null}
+          output={outUrl ? { url: outUrl } : null}
+          defaultName="clone_voice"
+          onSaved={onVoiceSaved}
+          onClose={() => setSaveVoiceOpen(false)}
+        />
       )}
     </div>
   )

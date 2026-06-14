@@ -333,6 +333,8 @@ def public(session: Dict[str, Any]) -> Dict[str, Any]:
                         "strength": int(s["perform"].get("strength", 3)),
                         "gain_db": float(s["perform"].get("gain_db", 0.0) or 0.0),
                         "speed": float(s["perform"].get("speed", 1.0) or 1.0),
+                        "transforms": s["perform"].get("transforms") or None,
+                        "auto_pitch": bool(s["perform"].get("auto_pitch", False)),
                         "dirty": bool(s["perform"].get("dirty", False)),
                         "url": seg_url(s["perform"]["file"]),
                     }
@@ -353,6 +355,7 @@ def public(session: Dict[str, Any]) -> Dict[str, Any]:
                 "speaker_id": spk_id,
                 "name": custom_name or voice_name,
                 "voice_name": voice_name,
+                "voice": cfg.get("voice") or None,
                 "custom_name": custom_name,
                 "gain_db": float(cfg.get("gain_db", 0.0) or 0.0),
                 "muted": bool(cfg.get("muted", False)),
@@ -457,6 +460,25 @@ def _perform_line(session: Dict[str, Any], seg: Dict[str, Any], sr: int) -> Opti
     gain = float(pf.get("gain_db", 0.0) or 0.0)
     if abs(gain) > 1e-3:
         wav = np.clip(wav * (10.0 ** (gain / 20.0)), -1.0, 1.0).astype(np.float32)
+    # Vocal transforms (pitch/formant/character fx) reshape the take before it's
+    # tokenized, so the model clones a performance already in the target's range.
+    # Auto pitch-match transparently folds a take→target f0 shift into the pitch.
+    from .voice_transforms import apply_transforms, auto_pitch_shift, has_effect
+
+    tf = dict(pf.get("transforms") or {})
+    if pf.get("auto_pitch"):
+        voice_id = session.get("speakers", {}).get(str(seg.get("speaker_id")), {}).get("voice")
+        if voice_id:
+            try:
+                from . import voices as _voices
+
+                shift = auto_pitch_shift(wav, sr, str(_voices.resolve_voice_path(voice_id)))
+                if abs(shift) > 1e-3:
+                    tf["pitch"] = float(tf.get("pitch", 0.0)) + shift
+            except (FileNotFoundError, ValueError):
+                pass  # no resolvable target — skip auto-match
+    if tf and has_effect(tf):
+        wav = apply_transforms(wav, sr, tf)
     speed = float(pf.get("speed", 1.0) or 1.0)
     if abs(speed - 1.0) > 1e-3:
         wav = time_stretch(wav, speed)
@@ -1595,6 +1617,8 @@ def set_performance(
     mode: str = "character",
     strength: int = 3,
     text: Optional[str] = None,
+    transforms: Optional[Dict[str, Any]] = None,
+    auto_pitch: bool = False,
 ) -> Dict[str, Any]:
     """Attach (or update) a recorded vocal performance on a segment. With audio,
     the take is stored and the segment enters perform mode; without audio, only
@@ -1614,12 +1638,17 @@ def set_performance(
             pf["file"] = fn
         if not pf.get("file") or not (_dir(sid) / pf["file"]).exists():
             raise ValueError("No performance audio attached to this segment yet.")
+        from .voice_transforms import normalize_transforms
+
+        norm_tf = normalize_transforms(transforms) if transforms else None
         pf.update(
             {
                 "gain_db": float(gain_db),
                 "speed": float(speed),
                 "mode": "voice" if str(mode).lower() == "voice" else "character",
                 "strength": max(1, min(5, int(strength))),
+                "transforms": norm_tf,
+                "auto_pitch": bool(auto_pitch),
                 "dirty": True,
             }
         )

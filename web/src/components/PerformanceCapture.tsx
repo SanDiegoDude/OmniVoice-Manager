@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { api } from '../api'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { api, DEFAULT_TRANSFORM, type VocalTransform } from '../api'
 import { blobToWav, sliceBlobToWav } from '../audio-encode'
 import { AudioPlayer } from './AudioPlayer'
+import SaveVoiceModal from './SaveVoiceModal'
+import { VocalTransforms } from './VocalTransforms'
 
 type Mode = 'character' | 'voice'
 
@@ -11,7 +13,24 @@ export interface PerfCaptureState {
   speed: number
   mode: Mode
   strength: number
+  transforms?: VocalTransform | null
+  auto_pitch?: boolean
 }
+
+/** Imperative handle so the Voice Clone tab can promote a finished render back
+ * into the capture panel as the new take — the "Redub" chain, mirroring the ADR
+ * Studio performance modal. */
+export interface PerfCaptureHandle {
+  adoptOutput: (url: string) => Promise<void>
+}
+
+const transformActive = (t: VocalTransform) =>
+  Math.abs(t.pitch) > 0.01 ||
+  Math.abs(t.formant) > 0.01 ||
+  t.sub > 0.01 ||
+  t.drive > 0.01 ||
+  t.ringmod > 0.01 ||
+  t.vibrato > 0.01
 
 const STRENGTH_HINT: Record<Mode, string[]> = {
   character: [
@@ -33,15 +52,15 @@ const STRENGTH_HINT: Record<Mode, string[]> = {
 /** Inline performance capture for the Voice Clone tab: record or upload a
  * take, clean it up, set V2V mode/strength. Surfaces its state via onState
  * (null = no take → plain text-to-voice). */
-export function PerformanceCapture({
-  onState,
-  onWhisperText,
-  notify,
-}: {
+export const PerformanceCapture = forwardRef<PerfCaptureHandle, {
   onState: (s: PerfCaptureState | null) => void
   onWhisperText: (text: string) => void
   notify: (m: string, k?: 'info' | 'error' | 'success') => void
-}) {
+  /** Library voice id of the cast clone voice, for auto pitch-match. */
+  targetVoice?: string | null
+  /** Refresh the voice library after a take is saved into it. */
+  onVoiceSaved?: () => void
+}>(function PerformanceCapture({ onState, onWhisperText, notify, targetVoice, onVoiceSaved }, ref) {
   const [take, setTake] = useState<{ blob: Blob; url: string } | null>(null)
   const [recording, setRecording] = useState(false)
   const [recElapsed, setRecElapsed] = useState(0)
@@ -51,6 +70,16 @@ export function PerformanceCapture({
   const [mode, setMode] = useState<Mode>('character')
   // 4 is the sweet spot for character mode on most voices (the anneal25 gold standard).
   const [strength, setStrength] = useState(4)
+  const [transforms, setTransforms] = useState<VocalTransform>(DEFAULT_TRANSFORM)
+  // Transparent auto pitch-match — default on; only effective with a clone target.
+  const [autoPitch, setAutoPitch] = useState(true)
+  // True while the modulated take is baked onto the main player (vs. applied at
+  // render time). origTakeRef holds the pre-transform take so Reset can restore it.
+  const [transformApplied, setTransformApplied] = useState(false)
+  const origTakeRef = useRef<{ blob: Blob; url: string } | null>(null)
+  // Counts how many renders have been promoted back as takes (Redub depth).
+  const [redubDepth, setRedubDepth] = useState(0)
+  const [saveVoiceOpen, setSaveVoiceOpen] = useState(false)
   const [cleanIsolate, setCleanIsolate] = useState(true)
   const [cleanDereverb, setCleanDereverb] = useState(true)
   const [processing, setProcessing] = useState(false)
@@ -71,25 +100,64 @@ export function PerformanceCapture({
   useEffect(
     () => () => {
       if (urlRef.current) URL.revokeObjectURL(urlRef.current)
+      if (origTakeRef.current) URL.revokeObjectURL(origTakeRef.current.url)
       if (timerRef.current) window.clearInterval(timerRef.current)
       recRef.current?.stream.getTracks().forEach((t) => t.stop())
     },
     [],
   )
 
-  // Keep the parent in sync with the current take + params.
+  // Keep the parent in sync with the current take + params. When transforms are
+  // already baked onto the take (transformApplied), the model gets the take as-is
+  // — don't double-apply transforms/auto-pitch server-side.
   useEffect(() => {
-    onState(take ? { blob: take.blob, gain_db: gain, speed, mode, strength } : null)
+    onState(
+      take
+        ? {
+            blob: take.blob,
+            gain_db: gain,
+            speed,
+            mode,
+            strength,
+            transforms: transformApplied ? null : transformActive(transforms) ? transforms : null,
+            auto_pitch: transformApplied ? false : !!targetVoice && autoPitch,
+          }
+        : null,
+    )
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [take, gain, speed, mode, strength])
+  }, [take, gain, speed, mode, strength, transforms, autoPitch, targetVoice, transformApplied])
 
   const setTakeBlob = useCallback((wav: Blob) => {
     if (urlRef.current) URL.revokeObjectURL(urlRef.current)
+    if (origTakeRef.current) URL.revokeObjectURL(origTakeRef.current.url)
+    origTakeRef.current = null
+    setTransformApplied(false)
     const url = URL.createObjectURL(wav)
     urlRef.current = url
     setTake({ blob: wav, url })
     setTakeTrim(null)
   }, [])
+
+  // Redub: promote a finished render to the new take for another pass (e.g. a
+  // gentle voice round, then a character round). The render is already leveled,
+  // at final tempo, and carries any baked transforms — reset the per-take knobs.
+  useImperativeHandle(ref, () => ({
+    adoptOutput: async (renderUrl: string) => {
+      try {
+        const raw = await (await fetch(renderUrl)).blob()
+        const { wav } = await blobToWav(raw, 0.9)
+        rawRef.current = wav
+        setTakeBlob(wav)
+        setGain(0)
+        setSpeed(1)
+        setPreviewSpeed(1)
+        setTransforms(DEFAULT_TRANSFORM)
+        setRedubDepth((d) => d + 1)
+      } catch (e) {
+        notify(`Redub failed: ${e instanceof Error ? e.message : e}`, 'error')
+      }
+    },
+  }), [setTakeBlob, notify])
 
   // "Stamp Trim": destructively cut the take to the trim lines — the cut is
   // what generation processes from then on (trim alone is preview-only).
@@ -202,9 +270,48 @@ export function PerformanceCapture({
 
   const clearTake = () => {
     if (urlRef.current) URL.revokeObjectURL(urlRef.current)
+    if (origTakeRef.current) URL.revokeObjectURL(origTakeRef.current.url)
+    origTakeRef.current = null
     urlRef.current = null
     rawRef.current = null
+    setTransformApplied(false)
     setTake(null)
+    setRedubDepth(0)
+  }
+
+  // Bake the current transforms (+ auto pitch-match) straight onto the take so
+  // the main player plays exactly what the model will receive. Reset restores the
+  // pristine take. Re-apply always works from the original, never stacks.
+  const applyTransforms = async () => {
+    if (!take) return
+    const base = origTakeRef.current ?? take
+    try {
+      const blob = await api.transformClip(base.blob, transformActive(transforms) ? transforms : null, {
+        autoPitch: !!targetVoice && autoPitch,
+        voice: targetVoice,
+      })
+      if (!origTakeRef.current) origTakeRef.current = take
+      if (urlRef.current && urlRef.current !== origTakeRef.current.url) URL.revokeObjectURL(urlRef.current)
+      const url = URL.createObjectURL(blob)
+      urlRef.current = url
+      setTake({ blob, url })
+      setTransformApplied(true)
+    } catch (e) {
+      notify(`Transform failed: ${e instanceof Error ? e.message : e}`, 'error')
+    }
+  }
+
+  const resetTransforms = () => {
+    const orig = origTakeRef.current
+    if (!orig) {
+      setTransformApplied(false)
+      return
+    }
+    if (urlRef.current && urlRef.current !== orig.url) URL.revokeObjectURL(urlRef.current)
+    urlRef.current = orig.url
+    origTakeRef.current = null
+    setTake(orig)
+    setTransformApplied(false)
   }
 
   const whisper = () => {
@@ -286,6 +393,9 @@ export function PerformanceCapture({
             <button className="btn sm" disabled={whispering || processing} onClick={whisper} title="Transcribe the take into the text box">
               {whispering ? <span className="spinner sm" /> : '🎤'} Whisper → text
             </button>
+            <button className="btn sm" onClick={() => setSaveVoiceOpen(true)} title="Save your take (your voice) straight into the voice library">
+              📚 Save voice…
+            </button>
             <button className="btn sm ghost" onClick={clearTake} title="Drop the take — back to plain text-to-voice">
               ✕ Clear take
             </button>
@@ -295,6 +405,11 @@ export function PerformanceCapture({
 
       {take && !recording && (
         <div style={{ marginTop: 10 }}>
+          {redubDepth > 0 && (
+            <div className="hint" style={{ marginBottom: 6, opacity: 0.85 }}>
+              ⟳ Redub {redubDepth} — this take is a previous render. Generate again to layer another pass.
+            </div>
+          )}
           <AudioPlayer
             key={take.url}
             url={take.url}
@@ -366,8 +481,29 @@ export function PerformanceCapture({
             />
           </label>
           <div className="hint" style={{ opacity: 0.8 }}>{STRENGTH_HINT[mode][strength - 1]}</div>
+
+          <VocalTransforms
+            value={transforms}
+            onChange={setTransforms}
+            autoPitch={targetVoice ? autoPitch : undefined}
+            onAutoPitch={targetVoice ? setAutoPitch : undefined}
+            applied={transformApplied}
+            target="take"
+            onApply={applyTransforms}
+            onReset={resetTransforms}
+          />
         </div>
+      )}
+
+      {saveVoiceOpen && take && (
+        <SaveVoiceModal
+          take={{ blob: take.blob, url: take.url }}
+          output={null}
+          defaultName="my_take"
+          onSaved={onVoiceSaved}
+          onClose={() => setSaveVoiceOpen(false)}
+        />
       )}
     </div>
   )
-}
+})

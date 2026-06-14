@@ -6,12 +6,16 @@ export function Collapsible({
   defaultOpen = true,
   className = 'card',
   right,
+  collapsedExtra,
 }: {
   title: ReactNode
   children: ReactNode
   defaultOpen?: boolean
   className?: string
   right?: ReactNode
+  /** Rendered in the collapsed header (e.g. a primary action you want reachable
+   * without expanding). Clicks here don't expand the card. */
+  collapsedExtra?: ReactNode
 }) {
   const [open, setOpen] = useState(defaultOpen)
   if (!open) {
@@ -19,6 +23,11 @@ export function Collapsible({
       <div className={`${className} collapsed`} onClick={() => setOpen(true)} title="Click to expand">
         <button className="mini-collapse" onClick={(e) => { e.stopPropagation(); setOpen(true) }} title="Expand">+</button>
         <span className="collapsed-title">{title}</span>
+        {collapsedExtra && (
+          <span className="collapsed-extra" onClick={(e) => e.stopPropagation()}>
+            {collapsedExtra}
+          </span>
+        )}
       </div>
     )
   }

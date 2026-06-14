@@ -1601,12 +1601,16 @@ export function MultitrackEditor({
         const seg = segIndex != null ? flatSegs.find((s) => s.index === segIndex) ?? null : null
         if (segIndex != null && !seg) return null
         const draft = 'draft' in perfModal ? perfModal.draft : null
+        const spkId = seg?.speaker_id ?? draft?.speakerId
+        const track = spkId != null ? session.tracks.find((t) => t.speaker_id === spkId) : undefined
+        const targetVoice = track?.mode === 'clone' ? track?.voice ?? null : null
         return (
           <PerformanceModal
             seg={seg}
             draft={draft}
             defaultCapture={perfModal.capture}
             withMic={perfModal.mic}
+            targetVoice={targetVoice}
             onSave={(i, wav, params) => onSetPerformance(i, wav, params)}
             onRender={(i, wav, params) => onRenderPerformance(i, wav, params)}
             onRenderPlain={(i, text) => onRegenAndWait(i, text)}

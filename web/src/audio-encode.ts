@@ -50,6 +50,33 @@ export async function sliceBlobToWav(blob: Blob, start: number, end: number): Pr
   }
 }
 
+/** Bake an output's trim window + dB gain into a fresh mono WAV — used by Redub
+ * so the leveled/cropped render becomes the literal new take (gain survives the
+ * round-trip instead of being reset to 0). */
+export async function bakeBlob(
+  blob: Blob,
+  opts: { gainDb?: number; start?: number; end?: number },
+): Promise<Blob> {
+  const ctx = new AudioContext()
+  try {
+    const buf = await ctx.decodeAudioData(await blob.arrayBuffer())
+    const sr = buf.sampleRate
+    const s = Math.max(0, Math.floor((opts.start ?? 0) * sr))
+    const e = opts.end != null ? Math.min(buf.length, Math.ceil(opts.end * sr)) : buf.length
+    const len = Math.max(1, e - s)
+    const g = Math.pow(10, (opts.gainDb ?? 0) / 20)
+    const out = new AudioBuffer({ length: len, numberOfChannels: buf.numberOfChannels, sampleRate: sr })
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const src = buf.getChannelData(c).subarray(s, e)
+      const dst = out.getChannelData(c)
+      for (let i = 0; i < len; i++) dst[i] = Math.max(-1, Math.min(1, src[i] * g))
+    }
+    return audioBufferToWav(out)
+  } finally {
+    void ctx.close()
+  }
+}
+
 /** Encode an AudioBuffer preserving its channel count (16-bit PCM WAV) —
  * used for the stereo L/R comparison export. */
 export function audioBufferToWavMulti(buf: AudioBuffer): Blob {

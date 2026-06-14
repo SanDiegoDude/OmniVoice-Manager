@@ -1,12 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { MultitrackSegment } from '../api'
-import { api } from '../api'
-import { audioBufferToWavMulti, blobToWav, sliceBlobToWav } from '../audio-encode'
+import type { MultitrackSegment, VocalTransform } from '../api'
+import { api, DEFAULT_TRANSFORM } from '../api'
+import { audioBufferToWavMulti, bakeBlob, blobToWav, sliceBlobToWav } from '../audio-encode'
 import { AudioPlayer, type AudioPlayerHandle } from './AudioPlayer'
+import { VocalTransforms } from './VocalTransforms'
+import SaveVoiceModal from './SaveVoiceModal'
 import ToolModal from './ToolModal'
 
 type Mode = 'character' | 'voice'
-type PerfParams = { gain_db: number; speed: number; mode: Mode; strength: number; text?: string }
+type PerfParams = { gain_db: number; speed: number; mode: Mode; strength: number; text?: string; transforms?: VocalTransform | null; auto_pitch?: boolean }
+
+const transformActive = (t: VocalTransform) =>
+  Math.abs(t.pitch) > 0.01 ||
+  Math.abs(t.formant) > 0.01 ||
+  t.sub > 0.01 ||
+  t.drive > 0.01 ||
+  t.ringmod > 0.01 ||
+  t.vibrato > 0.01
 // One entry in the dub trail. blob is null only for the segment's previously
 // saved take (server-side file) — rendering with null tells the backend to
 // reuse what it already has stored.
@@ -38,6 +48,7 @@ export default function PerformanceModal({
   draft,
   defaultCapture,
   withMic,
+  targetVoice,
   onSave,
   onRender,
   onRenderPlain,
@@ -52,6 +63,8 @@ export default function PerformanceModal({
   draft: { speakerId: string; startS: number } | null
   defaultCapture: boolean
   withMic: boolean
+  /** Library voice id of the segment's clone track, for auto pitch-match. */
+  targetVoice?: string | null
   onSave: (index: number, wav: Blob | null, params: PerfParams) => Promise<void>
   onRender: (index: number, wav: Blob | null, params: PerfParams) => Promise<MultitrackSegment | null>
   onRenderPlain: (index: number, text: string) => Promise<MultitrackSegment | null>
@@ -81,6 +94,12 @@ export default function PerformanceModal({
   const [mode, setMode] = useState<Mode>(existing?.mode ?? 'character')
   // 4 is the sweet spot for character mode on most voices (the anneal25 gold standard).
   const [strength, setStrength] = useState(existing?.strength ?? 4)
+  const [transforms, setTransforms] = useState<VocalTransform>(
+    existing?.transforms ? { ...DEFAULT_TRANSFORM, ...existing.transforms } : DEFAULT_TRANSFORM,
+  )
+  // Auto pitch-match defaults ON for a fresh take on a clone track; re-editing
+  // an existing take honors whatever was saved.
+  const [autoPitch, setAutoPitch] = useState(existing ? !!existing.auto_pitch : !!targetVoice)
   const [text, setText] = useState(seg?.text ?? '')
   // Cleanup defaults ON for fresh takes (raw mic input without it sounds bad);
   // re-editing a saved take starts off so we don't double-process it.
@@ -95,7 +114,20 @@ export default function PerformanceModal({
   // Rendered output preview (trim/gain here apply to the segment on save).
   // Initial trim is copied from the take's trim lines at render time.
   const [output, setOutput] = useState<{ url: string; trimStart?: number; trimEnd?: number } | null>(null)
+  // Creative transforms baked onto the rendered output player (minimized; no
+  // auto-pitch — the output already is the target voice). Apply swaps the
+  // modulated audio onto the main output player; Reset restores the render.
+  const [outTransforms, setOutTransforms] = useState<VocalTransform>(DEFAULT_TRANSFORM)
+  const [outApplied, setOutApplied] = useState(false)
+  const outOrigUrlRef = useRef<string | null>(null)
   const outDraftRef = useRef<{ trimStart: number; trimEnd: number; gain: number } | null>(null)
+  // Take-side bake: Apply swaps the modulated take onto the main take player so
+  // the render gets exactly what you hear. takeOrigRef holds the pristine take;
+  // bakedUrlRef marks the bake so a *new* take (redub, re-record, version switch)
+  // transparently clears the applied state.
+  const [takeApplied, setTakeApplied] = useState(false)
+  const takeOrigRef = useRef<{ blob: Blob | null; url: string } | null>(null)
+  const bakedUrlRef = useRef<string | null>(null)
   // Live trim lines on the take player (raw take time). State mirror drives
   // the Stamp Trim button; the ref is read at render/comparison time.
   const takeTrimRef = useRef<{ start: number; end: number; dur: number } | null>(null)
@@ -261,6 +293,8 @@ export default function PerformanceModal({
     // against a different take would mislead, so it goes away on switch.
     setOutput(null)
     outDraftRef.current = null
+    outOrigUrlRef.current = null
+    setOutApplied(false)
     markDirty()
   }
 
@@ -270,7 +304,12 @@ export default function PerformanceModal({
     if (!output) return
     setError(null)
     try {
-      const blob = await (await fetch(output.url)).blob()
+      const raw = await (await fetch(output.url)).blob()
+      // Bake the output's dialed-in dB + trim into the new take so the loudness
+      // you set survives the round-trip (instead of snapping back to the raw,
+      // quiet render). The next pass then processes exactly what you heard.
+      const d = outDraftRef.current
+      const blob = await bakeBlob(raw, { gainDb: d?.gain ?? 0, start: d?.trimStart, end: d?.trimEnd })
       const url = URL.createObjectURL(blob)
       urlsRef.current.push(url)
       const id = nextVerRef.current++
@@ -279,16 +318,51 @@ export default function PerformanceModal({
       setTake({ blob, url })
       takeTrimRef.current = null
       setTakeTrim(null)
-      // The render is already leveled and at final tempo — reset per-take knobs.
+      // The render is already leveled, at final tempo, and carries any baked
+      // transforms — reset per-take knobs so they don't double-apply.
       setGain(0)
       setSpeed(1)
       setPreviewSpeed(1)
+      setTransforms(DEFAULT_TRANSFORM)
       setOutput(null)
       outDraftRef.current = null
+      outOrigUrlRef.current = null
+      setOutApplied(false)
       markDirty()
     } catch (e) {
       setError(`Redub failed: ${e instanceof Error ? e.message : e}`)
     }
+  }
+
+  // Bake the creative transforms onto the rendered-output player so the modulated
+  // output behaves like the plain output (A/B, download, redub, save voice all use
+  // it). Reset restores the model's render. Re-apply works from the original.
+  const applyOutTransforms = async () => {
+    if (!output) return
+    setError(null)
+    try {
+      const baseUrl = outOrigUrlRef.current ?? output.url
+      const raw = await (await fetch(baseUrl)).blob()
+      const blob = await api.transformClip(raw, transformActive(outTransforms) ? outTransforms : null)
+      const url = URL.createObjectURL(blob)
+      urlsRef.current.push(url)
+      if (!outOrigUrlRef.current) outOrigUrlRef.current = output.url
+      setOutput((o) => (o ? { ...o, url } : o))
+      setOutApplied(true)
+    } catch (e) {
+      setError(`Transform failed: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  const resetOutTransforms = () => {
+    const orig = outOrigUrlRef.current
+    if (!orig) {
+      setOutApplied(false)
+      return
+    }
+    setOutput((o) => (o ? { ...o, url: orig } : o))
+    outOrigUrlRef.current = null
+    setOutApplied(false)
   }
 
   const deleteVer = (id: number) => {
@@ -420,8 +494,53 @@ export default function PerformanceModal({
     speed,
     mode,
     strength,
+    // When the take is already baked, the model gets it as-is — don't re-apply.
+    transforms: takeApplied ? null : transformActive(transforms) ? transforms : null,
+    auto_pitch: takeApplied ? false : !!targetVoice && autoPitch,
     text: text.trim() && text.trim() !== (seg?.text ?? '') ? text.trim() : undefined,
   })
+
+  // Any take that isn't our own bake (re-record, version switch, redub, stamp)
+  // clears the applied state so Reset/render never reach for a stale original.
+  useEffect(() => {
+    if (!take || take.url === bakedUrlRef.current) return
+    takeOrigRef.current = null
+    setTakeApplied(false)
+  }, [take?.url])
+
+  const applyTakeTransforms = async () => {
+    const base = takeOrigRef.current?.blob ?? (await takeBlob())
+    if (!base) return
+    setError(null)
+    try {
+      const blob = await api.transformClip(base, transformActive(transforms) ? transforms : null, {
+        autoPitch: !!targetVoice && autoPitch,
+        voice: targetVoice,
+      })
+      const url = URL.createObjectURL(blob)
+      urlsRef.current.push(url)
+      if (!takeOrigRef.current && take) takeOrigRef.current = take
+      bakedUrlRef.current = url
+      setTake({ blob, url })
+      setTakeApplied(true)
+      markDirty()
+    } catch (e) {
+      setError(`Transform failed: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  const resetTakeTransforms = () => {
+    const orig = takeOrigRef.current
+    bakedUrlRef.current = null
+    if (!orig) {
+      setTakeApplied(false)
+      return
+    }
+    takeOrigRef.current = null
+    setTake(orig)
+    setTakeApplied(false)
+    markDirty()
+  }
 
   const whisper = async () => {
     const b = await takeBlob()
@@ -460,6 +579,9 @@ export default function PerformanceModal({
         trimEnd = tt.end / spd
       }
       outDraftRef.current = null
+      outOrigUrlRef.current = null
+      setOutApplied(false)
+      setOutTransforms(DEFAULT_TRANSFORM)
       setOutput({ url, trimStart, trimEnd })
     } catch (e) {
       setError(`Render failed: ${e instanceof Error ? e.message : e}`)
@@ -924,6 +1046,27 @@ export default function PerformanceModal({
             />
           </label>
           <div className="hint" style={{ opacity: 0.8 }}>{STRENGTH_HINT[mode][strength - 1]}</div>
+
+          <VocalTransforms
+            value={transforms}
+            onChange={(t) => {
+              setTransforms(t)
+              markDirty()
+            }}
+            autoPitch={targetVoice ? autoPitch : undefined}
+            onAutoPitch={
+              targetVoice
+                ? (v) => {
+                    setAutoPitch(v)
+                    markDirty()
+                  }
+                : undefined
+            }
+            applied={takeApplied}
+            target="take"
+            onApply={applyTakeTransforms}
+            onReset={resetTakeTransforms}
+          />
         </div>
       )}
 
@@ -1034,6 +1177,16 @@ export default function PerformanceModal({
               }
             }}
           />
+          <VocalTransforms
+            value={outTransforms}
+            onChange={setOutTransforms}
+            defaultOpen={false}
+            target="output"
+            applyLabel="🎧 Apply to output"
+            applied={outApplied}
+            onApply={applyOutTransforms}
+            onReset={resetOutTransforms}
+          />
         </div>
       )}
 
@@ -1060,150 +1213,6 @@ export default function PerformanceModal({
           onSaved={onVoiceSaved}
           onClose={() => setSaveVoiceOpen(false)}
         />
-      )}
-    </ToolModal>
-  )
-}
-
-/** Sub-modal: export the take (your voice) or the rendered output straight into
- * the Voice Lab library, with the same cleanup options the Lab offers. */
-function SaveVoiceModal({
-  take,
-  output,
-  defaultName,
-  onSaved,
-  onClose,
-}: {
-  take: { blob: Blob | null; url: string } | null
-  output: { url: string } | null
-  defaultName: string
-  onSaved?: () => void
-  onClose: () => void
-}) {
-  const [source, setSource] = useState<'output' | 'take'>(output ? 'output' : 'take')
-  const [name, setName] = useState(defaultName)
-  const [isolate, setIsolate] = useState(false)
-  const [normalize, setNormalize] = useState(true)
-  const [trim, setTrim] = useState(true)
-  const [dereverb, setDereverb] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [done, setDone] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  const save = async () => {
-    const nm = name.trim()
-    if (!nm) {
-      setError('Give the voice a name (folders work too, e.g. "Cast/Alice")')
-      return
-    }
-    setBusy(true)
-    setError(null)
-    try {
-      const src = source === 'output' ? output : take
-      if (!src) throw new Error('No audio to save')
-      const blob = source === 'take' && take?.blob ? take.blob : await (await fetch(src.url)).blob()
-      const up = await api.uploadVoice(new File([blob], 'voice.wav', { type: blob.type || 'audio/wav' }))
-      const saved = await api.processVoice({
-        source: up.upload_id,
-        is_upload: true,
-        isolate,
-        normalize,
-        trim,
-        dereverb,
-        gain_db: 0,
-        save_as: nm,
-      })
-      onSaved?.()
-      setDone(saved.name || nm)
-    } catch (e) {
-      setError(`Save failed: ${e instanceof Error ? e.message : e}`)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <ToolModal
-      open
-      width={480}
-      title={<span>📚 Save voice to library</span>}
-      onClose={onClose}
-      actions={
-        done ? undefined : (
-          <button className="btn sm primary" disabled={busy} onClick={save}>
-            {busy ? <span className="spinner sm" /> : '💾'} Save voice
-          </button>
-        )
-      }
-    >
-      {done ? (
-        <div>
-          <div style={{ fontSize: 14, marginBottom: 8 }}>
-            ✅ Saved <strong>{done}</strong> to the voice library.
-          </div>
-          <div className="hint">It's available right away in the Voices panel and every speaker picker.</div>
-          <div className="row" style={{ marginTop: 12 }}>
-            <button className="btn sm primary" onClick={onClose}>Done</button>
-          </div>
-        </div>
-      ) : (
-        <>
-          {output && take && (
-            <div className="row" style={{ gap: 8, marginBottom: 12 }}>
-              <span className="hint" style={{ minWidth: 50 }}>Source</span>
-              <button
-                className={`btn sm${source === 'output' ? ' on' : ''}`}
-                title="The rendered output — the character's voice performing the line"
-                onClick={() => setSource('output')}
-              >
-                ⚡ Rendered output
-              </button>
-              <button
-                className={`btn sm${source === 'take' ? ' on' : ''}`}
-                title="Your raw take — your own voice"
-                onClick={() => setSource('take')}
-              >
-                🎬 Take (your voice)
-              </button>
-            </div>
-          )}
-          <label className="field">
-            <span>Voice name (use “/” for folders, e.g. Cast/Alice)</span>
-            <input
-              className="input"
-              autoFocus
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void save()
-              }}
-              placeholder="e.g. Cast/Alice"
-            />
-          </label>
-          <div className="row wrap" style={{ gap: 14, marginTop: 4 }}>
-            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
-              <input type="checkbox" checked={isolate} onChange={(e) => setIsolate(e.target.checked)} />
-              Isolate vocals
-            </label>
-            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
-              <input type="checkbox" checked={normalize} onChange={(e) => setNormalize(e.target.checked)} />
-              Normalize
-            </label>
-            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
-              <input type="checkbox" checked={trim} onChange={(e) => setTrim(e.target.checked)} />
-              Trim silence
-            </label>
-            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
-              <input type="checkbox" checked={dereverb} onChange={(e) => setDereverb(e.target.checked)} />
-              Dereverb
-            </label>
-          </div>
-          <div className="hint" style={{ marginTop: 10, opacity: 0.8 }}>
-            The audio is processed and saved like a Voice Lab import — it lands in the library immediately,
-            ready to cast on any speaker.
-          </div>
-          {error && <div className="hint" style={{ color: 'var(--bad, #e66)', marginTop: 8 }}>{error}</div>}
-        </>
       )}
     </ToolModal>
   )

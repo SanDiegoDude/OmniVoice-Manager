@@ -34,6 +34,18 @@ Workflow niceties:
 - **⚡ Render in-modal** — hear the result immediately, with the output's trim/gain applying back to the clip on Save. Renders auto-play.
 - **💾 Save** stores the take + settings on the clip (gold box). If you've already rendered, the clip is done — it only re-arms (pulses) when settings change *after* the last render.
 
+## Vocal transforms — reshape the take before the clone
+
+A collapsible **🎚 Vocal transforms** box (in both the performance modal and the Voice Clone tab) reshapes your take *before* it's tokenized, so the model clones a performance already in the target's range instead of fighting a big register gap. Everything is baked at render time and persisted on the clip, so Redub and channel regenerate reproduce it.
+
+- **Pitch** and **Formant** (semitones, independent) ride the WORLD vocoder, so timing and prosody survive. Formant up = smaller/younger, down = bigger/darker — the difference between a believable child voice and a chipmunk.
+- **🎯 Auto pitch-match to target** estimates your take's median f0 vs. the cast voice's and sets the pitch slider to bridge them — the fastest way to map a deep voice onto a high target.
+- Creative colours behind weight sliders: **Sub-octave** (Vader/monster body), **Drive** (growl/grit), **Ring mod** (robot/demon), **Vibrato**.
+- **Presets** (Vader, Monster, Demon, Child, Chipmunk, Robot) are one-click slider combos — a starting point to tweak by ear.
+- **🎧 Apply** bakes the transforms (plus auto pitch-match) straight onto the **main player** — no second mini-player to juggle. The take you hear is exactly what the model is handed; **↺ Reset** restores the pristine take. The same minimized box (**🎧 Apply to output**) sits under the rendered output, so the modulated output becomes a first-class output: **Redub**, **Save voice**, **Import to ADR Studio**, and download all act on what you hear. Apply works from the original each time (it never stacks), and any fresh take/render clears it.
+
+> Take loudness is auto-leveled by the transfer (the take's dB control is for monitoring); the **output** gain is the real loudness lever and is applied to the clip on Save.
+
 ## Redub — chain processing passes
 
 Some voices won't take cleanly at high strength in one pass. The fix: **run a gentle voice round first, then a character round on top**. That's what **⟳ Redub** is for — it promotes the current render to the active take so the next render processes *it*.
@@ -42,6 +54,16 @@ Some voices won't take cleanly at high strength in one pass. The fix: **run a ge
 - Redubs carry an **×** to prune dead ends; an accidental delete has a one-step **↩ Undo**.
 - On Save, **only the active take is kept** — it becomes the clip's ground-truth performance. The trail is scratch space and dies with the modal.
 - The original is pinned into memory when the modal opens, so walking back is always faithful. Cleanup toggles lock while a redub is active (they re-process the original source).
+- Redub bakes the output's dialed-in **dB + trim** into the new take, so the level you set survives the round-trip instead of snapping back to the raw render.
+- The **Voice Clone tab** now has Redub too (**⟳ Redub (use as take)** next to the render): it promotes the finished render to the capture panel as the new take for another pass.
+
+## Rerolling: the render button when minimized
+
+The Script / Text-to-speak card can be collapsed to get it out of the way. In the **Voice Clone tab** the **🎙 Render** button stays pinned to the collapsed header so you can reroll the same line over and over while you play with voices. On the **ADR Studio** side it's hidden by default (a stray re-render there can wipe scene work) — flip the small **show when minimized** checkbox next to *Generate audio* if you want it pinned there too.
+
+## Save voice to library
+
+Both the performance modal and the Voice Clone tab carry **📚 Save voice…** — export the **rendered output** (the character performing) or your **raw take** straight into the voice library with the usual Lab cleanup (isolate / normalize / trim / dereverb). Made a fun voice? It's one click from being castable on any speaker. Use `/` in the name for folders (e.g. `Cast/Alice`).
 
 ## Inspecting & demoing results
 
@@ -49,6 +71,8 @@ With both a take and a render loaded:
 
 - **▶ A/B** — your take, then the render, back-to-back (both trimmed, level- and speed-matched).
 - **▶ Split L/R** — both *simultaneously*, take hard-left and render hard-right. The fastest way to hear how tightly the output rides your delivery.
+
+The **Voice Clone tab** carries the same **A/B**, **Split L/R**, and their **⬇ downloads** under the output player (whenever a take is loaded), plus an **Output speed** slider and **✂ Stamp trim/speed** that bakes the trim window + (pitch-preserving) speed into the ground-truth output — so the stamped result is what Redub / Save / Import / download all use.
 - **⬇** next to each — export the comparison as a WAV (the split export is true stereo). Great for sharing.
 - Both the take and the render have individual **Download** buttons too.
 

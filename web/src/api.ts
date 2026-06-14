@@ -85,11 +85,50 @@ export interface Job {
   meta: { title?: string; multitrack?: boolean; regen?: number; channel_regen?: string }
 }
 
+/** Render-time vocal transforms applied to the take before the V2V transfer.
+ * pitch/formant in semitones; the rest are 0..1 weights (+ optional rates). */
+export interface VocalTransform {
+  pitch: number
+  formant: number
+  sub: number
+  drive: number
+  ringmod: number
+  ringmod_hz: number
+  vibrato: number
+  vibrato_hz: number
+}
+
+export const DEFAULT_TRANSFORM: VocalTransform = {
+  pitch: 0,
+  formant: 0,
+  sub: 0,
+  drive: 0,
+  ringmod: 0,
+  ringmod_hz: 80,
+  vibrato: 0,
+  vibrato_hz: 5,
+}
+
+/** Everything that defines a take's render — shared by the ADR Studio
+ * performance modal and the Voice Clone tab so the two stay in lockstep. */
+export interface PerfParams {
+  gain_db: number
+  speed: number
+  mode: 'character' | 'voice'
+  strength: number
+  text?: string
+  transforms?: VocalTransform | null
+  /** Transparent take→target f0 match applied at render (no UI knob). */
+  auto_pitch?: boolean
+}
+
 export interface PerformInfo {
   mode: 'character' | 'voice'
   strength: number
   gain_db: number
   speed: number
+  transforms?: VocalTransform | null
+  auto_pitch?: boolean
   dirty: boolean
   url: string
 }
@@ -121,6 +160,9 @@ export interface MultitrackTrack {
   speaker_id: string
   name: string
   voice_name?: string
+  /** Library voice id (relative path) for clone-mode tracks — used to auto
+   * pitch-match a take to this voice. Null for auto/design/audio channels. */
+  voice?: string | null
   custom_name?: string | null
   gain_db?: number
   muted?: boolean
@@ -242,7 +284,7 @@ export const api = {
   async generatePerform(
     body: GenerateBody,
     take: Blob,
-    perf: { mode: 'character' | 'voice'; strength: number; gain_db: number; speed: number },
+    perf: { mode: 'character' | 'voice'; strength: number; gain_db: number; speed: number; transforms?: VocalTransform | null; auto_pitch?: boolean },
   ): Promise<{ job_id: string }> {
     const fd = new FormData()
     fd.append('file', take, 'take.wav')
@@ -334,7 +376,7 @@ export const api = {
     sid: string,
     index: number,
     wav: Blob | null,
-    params: { gain_db: number; speed: number; mode: 'character' | 'voice'; strength: number; text?: string },
+    params: PerfParams,
   ): Promise<MultitrackSession> {
     const fd = new FormData()
     if (wav) fd.append('file', wav, 'performance.wav')
@@ -343,8 +385,60 @@ export const api = {
     fd.append('mode', params.mode)
     fd.append('strength', String(params.strength))
     if (params.text) fd.append('text', params.text)
+    if (params.transforms) fd.append('transforms', JSON.stringify(params.transforms))
+    fd.append('auto_pitch', String(!!params.auto_pitch))
     const res = await fetch(`/api/multitrack/${sid}/segment/${index}/performance`, { method: 'POST', body: fd })
     if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Save failed')
+    return res.json()
+  },
+  async transformClip(
+    clip: Blob,
+    transforms: VocalTransform | null,
+    opts?: { autoPitch?: boolean; voice?: string | null },
+  ): Promise<Blob> {
+    const fd = new FormData()
+    fd.append('file', clip, 'clip.wav')
+    if (transforms) fd.append('transforms', JSON.stringify(transforms))
+    fd.append('auto_pitch', String(!!opts?.autoPitch))
+    if (opts?.voice) fd.append('voice', opts.voice)
+    const res = await fetch('/api/perform/transform-clip', { method: 'POST', body: fd })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Transform failed')
+    return res.blob()
+  },
+  async transformOutputFile(
+    clip: Blob,
+    transforms: VocalTransform | null,
+    title = 'transformed',
+  ): Promise<{ filename: string; audio_url: string; duration_s: number }> {
+    const fd = new FormData()
+    fd.append('file', clip, 'clip.wav')
+    if (transforms) fd.append('transforms', JSON.stringify(transforms))
+    fd.append('persist', 'true')
+    fd.append('title', title)
+    const res = await fetch('/api/perform/transform-clip', { method: 'POST', body: fd })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Transform failed')
+    return res.json()
+  },
+  async stampOutput(
+    clip: Blob,
+    opts: { trimStart?: number; trimEnd?: number; speed?: number; title?: string },
+  ): Promise<{ filename: string; audio_url: string; duration_s: number }> {
+    const fd = new FormData()
+    fd.append('file', clip, 'clip.wav')
+    fd.append('trim_start', String(opts.trimStart ?? 0))
+    fd.append('trim_end', String(opts.trimEnd ?? 0))
+    fd.append('speed', String(opts.speed ?? 1))
+    fd.append('title', opts.title ?? 'clone')
+    const res = await fetch('/api/perform/stamp-output', { method: 'POST', body: fd })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Stamp failed')
+    return res.json()
+  },
+  async pitchMatch(take: Blob, voice: string): Promise<{ semitones: number; take_hz: number; target_hz: number }> {
+    const fd = new FormData()
+    fd.append('file', take, 'take.wav')
+    fd.append('voice', voice)
+    const res = await fetch('/api/perform/pitch-match', { method: 'POST', body: fd })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Pitch-match failed')
     return res.json()
   },
   clearPerformance: (sid: string, index: number) =>
