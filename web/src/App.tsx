@@ -13,10 +13,21 @@ import { claimPlayback, releasePlayback } from './audioBus'
 
 export default function App() {
   const [info, setInfo] = useState<SystemInfo | null>(null)
+  // Persisted track-1 template (processing settings new tracks inherit).
+  // undefined = still loading prefs; an object (possibly {}) = loaded.
+  const [trackTemplate, setTrackTemplate] = useState<Partial<SpeakerConfig> | undefined>(undefined)
+  const tplSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [busy, setBusy] = useState(false)
+  // True from the instant a generate submit starts until the job lands in state
+  // (or errors). Disables the Generate button through the async-submit gap.
+  const [submitting, setSubmitting] = useState(false)
   const [voices, setVoices] = useState<Voice[]>([])
   const [tree, setTree] = useState<VoiceNode | null>(null)
+  const [folders, setFolders] = useState<string[]>([])
   const [selectedVoice, setSelectedVoice] = useState<string>()
+  // Studio exposes its cast-voice action through this ref so the library can
+  // load a clicked voice into a track without lifting all of Studio's state.
+  const castRef = useRef<((voiceId: string, opts?: { newTrack?: boolean }) => void) | null>(null)
   const [labOpen, setLabOpen] = useState(false)
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [outputs, setOutputs] = useState<OutputFile[]>([])
@@ -74,6 +85,7 @@ export default function App() {
       const v = await api.voices()
       setVoices(v.flat)
       setTree(v.tree)
+      setFolders(v.folders ?? [])
     } catch (e) {
       notify(String(e), 'error')
     }
@@ -244,11 +256,53 @@ export default function App() {
       notify(String(e), 'error')
     }
   }
+  const toggleTrimSilence = async (v: boolean) => {
+    try {
+      setInfo(await api.setTrimSilence(v))
+      notify(`Auto-trim silence ${v ? 'enabled' : 'disabled'}`)
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const toggleFormat = async (format: string) => {
+    try {
+      setInfo(await api.setOutputFormat(format))
+      notify(`Output format: ${format === 'mp3' ? 'MP3 (compact)' : 'FLAC (lossless)'}`)
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+
+  // Load the persisted track-1 template once on mount.
+  useEffect(() => {
+    let cancelled = false
+    api
+      .getPrefs()
+      .then((doc) => {
+        if (cancelled) return
+        const tracks = (doc?.tracks ?? {}) as { template?: Partial<SpeakerConfig> | null }
+        setTrackTemplate(tracks.template ?? {})
+      })
+      .catch(() => {
+        if (!cancelled) setTrackTemplate({})
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Persist the track-1 template (debounced) when Studio reports a change.
+  const saveTrackTemplate = useCallback((tpl: Partial<SpeakerConfig>) => {
+    setTrackTemplate(tpl)
+    if (tplSaveRef.current) clearTimeout(tplSaveRef.current)
+    tplSaveRef.current = setTimeout(() => {
+      api.patchPrefs({ tracks: { template: tpl } }).catch(() => {})
+    }, 600)
+  }, [])
 
   // ---- voices ----
-  const playVoice = (v: Voice) => playUrl(`/api/audio/voice/${v.id}`)
+  // Delete confirmation now lives inline in the library row, so this just acts.
   const deleteVoice = async (v: Voice) => {
-    if (!confirm(`Delete voice “${v.name}”?`)) return
     try {
       await api.deleteVoice(v.id)
       refreshVoices()
@@ -256,6 +310,37 @@ export default function App() {
     } catch (e) {
       notify(String(e), 'error')
     }
+  }
+  const moveVoice = async (id: string, folder: string) => {
+    try {
+      const r = await api.moveVoice(id, folder)
+      refreshVoices()
+      notify(`Moved to ${r.folder || 'the library root'}`)
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const renameVoiceFn = async (id: string, name: string) => {
+    try {
+      await api.renameVoice(id, name)
+      refreshVoices()
+      notify('Voice renamed')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const createFolderFn = async (path: string) => {
+    try {
+      await api.createVoiceFolder(path)
+      refreshVoices()
+      notify(`Folder created`)
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const castVoice = (voiceId: string, opts?: { newTrack?: boolean }) => {
+    if (!castRef.current) return
+    castRef.current(voiceId, opts)
   }
 
   const stopPlayback = () => {
@@ -282,7 +367,25 @@ export default function App() {
   }
 
   // ---- generation ----
+  // Guard against rapid-fire duplicate submits. The button disables only once a
+  // job lands in state, but on slow machines the async submit (esp. perform,
+  // which does heavy audio prep before returning) leaves a window where extra
+  // clicks queue duplicate renders. `submitting` disables the button the instant
+  // a submit starts; the ref blocks re-entry synchronously, before any await.
+  const submittingRef = useRef(false)
+  const beginSubmit = (): boolean => {
+    if (submittingRef.current) return false
+    submittingRef.current = true
+    setSubmitting(true)
+    return true
+  }
+  const endSubmit = () => {
+    submittingRef.current = false
+    setSubmitting(false)
+  }
+
   const startGenerate = async (body: GenerateBody, _title: string, multitrack = false) => {
+    if (!beginSubmit()) return
     try {
       if (multitrack) {
         // Keep any current skeleton up until the populated scene arrives, then
@@ -295,6 +398,8 @@ export default function App() {
       setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: { multitrack } })
     } catch (e) {
       notify(String(e), 'error')
+    } finally {
+      endSubmit()
     }
   }
 
@@ -303,6 +408,7 @@ export default function App() {
     body: GenerateBody,
     perf: PerfCaptureState,
   ) => {
+    if (!beginSubmit()) return
     try {
       const { job_id } = await api.generatePerform(body, perf.blob, {
         mode: perf.mode,
@@ -315,6 +421,8 @@ export default function App() {
       setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: {} })
     } catch (e) {
       notify(String(e), 'error')
+    } finally {
+      endSubmit()
     }
   }
 
@@ -441,7 +549,23 @@ export default function App() {
   const splitSegment = async (index: number, at_s: number) => {
     if (!session) return
     try {
-      setSession(await api.splitSegment(session.id, index, at_s))
+      const before = new Set<number>()
+      session.tracks.forEach((t) => t.segments.forEach((s) => before.add(s.index)))
+      const next = await api.splitSegment(session.id, index, at_s)
+      setSession(next)
+      // A manual slice duplicates the source text into both halves; re-transcribing
+      // each side is almost always the next step, so do it automatically (same flow
+      // as the per-segment Whisper button). The right half is the only new index.
+      let newIndex: number | null = null
+      next.tracks.forEach((t) =>
+        t.segments.forEach((s) => {
+          if (!before.has(s.index)) newIndex = s.index
+        }),
+      )
+      for (const i of newIndex != null ? [index, newIndex] : [index]) {
+        const text = await transcribeSegment(i)
+        if (text != null) await setSegmentText(i, text)
+      }
     } catch (e) {
       notify(String(e), 'error')
     }
@@ -720,10 +844,10 @@ export default function App() {
     }
   }
 
-  const uploadChannel = async (file: File, name: string) => {
+  const uploadChannel = async (file: File, name: string, startS = 0) => {
     if (!session) return
     try {
-      setSession(await api.uploadChannel(session.id, file, name))
+      setSession(await api.uploadChannel(session.id, file, name, startS))
       notify('Audio channel added', 'success')
     } catch (e) {
       notify(String(e), 'error')
@@ -823,16 +947,25 @@ export default function App() {
         onUnload={unloadModel}
         onToggleLod={toggleLod}
         onToggleLowVram={toggleLowVram}
+        onToggleTrimSilence={toggleTrimSilence}
+        onToggleFormat={toggleFormat}
       />
       <div className={`workspace${leftOpen ? '' : ' no-left'}${rightOpen ? '' : ' no-right'}`}>
         <div className="col side-left">
           <VoiceLibrary
             tree={tree}
+            flat={voices}
+            folders={folders}
             count={voices.length}
             selected={selectedVoice}
-            onPlay={playVoice}
+            playingUrl={playingUrl}
+            onPlay={(v) => togglePlay(`/api/audio/voice/${v.id}`)}
             onPick={(v) => setSelectedVoice(v.id)}
+            onCast={castVoice}
             onDelete={deleteVoice}
+            onMove={moveVoice}
+            onRename={renameVoiceFn}
+            onCreateFolder={createFolderFn}
             onRefresh={refreshVoices}
             onOpenLab={() => setLabOpen(true)}
           />
@@ -893,6 +1026,11 @@ export default function App() {
           onUploadChannel={uploadChannel}
           onFinalize={finalizeSession}
           notify={notify}
+          submitting={submitting}
+          trimSilence={!!info?.trim_silence}
+          trackTemplate={trackTemplate}
+          onTrackTemplate={saveTrackTemplate}
+          castRef={castRef}
         />
 
         <div className="col side-right">
@@ -937,7 +1075,7 @@ export default function App() {
       )}
 
       {labOpen && (
-        <VoiceLab voices={voices} onClose={() => setLabOpen(false)} onSaved={refreshVoices} notify={notify} />
+          <VoiceLab voices={voices} folders={folders} onClose={() => setLabOpen(false)} onSaved={refreshVoices} notify={notify} />
       )}
       <Toasts items={toasts} />
     </div>

@@ -34,7 +34,7 @@ from .audio_utils import (
     save_wav,
     time_stretch,
 )
-from .config import OUTPUT_DIR
+from .config import OUTPUT_DIR, settings
 
 SESSIONS_DIR = OUTPUT_DIR / "sessions"
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -335,6 +335,8 @@ def public(session: Dict[str, Any]) -> Dict[str, Any]:
                         "speed": float(s["perform"].get("speed", 1.0) or 1.0),
                         "transforms": s["perform"].get("transforms") or None,
                         "auto_pitch": bool(s["perform"].get("auto_pitch", False)),
+                        "clean_isolate": bool(s["perform"].get("clean_isolate", False)),
+                        "clean_dereverb": bool(s["perform"].get("clean_dereverb", False)),
                         "dirty": bool(s["perform"].get("dirty", False)),
                         "url": seg_url(s["perform"]["file"]),
                     }
@@ -533,6 +535,8 @@ def regen_payload(
                 "speakers": {ipkey: _inpaint_worker(session, seg, ipkey, sr)},
                 "params": session.get("params", {}),
                 "gap_ms": session.get("gap_ms", 250),
+                "low_vram": settings.low_vram,
+                "trim_silence": settings.trim_silence,
                 "multitrack": True,
             }
         spk_id = seg["speaker_id"]
@@ -557,6 +561,8 @@ def regen_payload(
             "speakers": {spk_id: spk},
             "params": session.get("params", {}),
             "gap_ms": session.get("gap_ms", 250),
+            "low_vram": settings.low_vram,
+            "trim_silence": settings.trim_silence,
             "multitrack": True,
         }
 
@@ -582,6 +588,8 @@ def insert_payload(sid: str, speaker_id: str, text: str, new_index: int) -> Dict
         "speakers": {str(speaker_id): _speaker_worker(session, str(speaker_id), sr)},
         "params": session.get("params", {}),
         "gap_ms": session.get("gap_ms", 250),
+        "low_vram": settings.low_vram,
+        "trim_silence": settings.trim_silence,
         "multitrack": True,
     }
 
@@ -1010,7 +1018,9 @@ def set_channel(sid: str, pos: str, name: Optional[str] = None, gain_db: Optiona
         return public(session)
 
 
-def add_audio_channel(sid: str, name: str, audio: np.ndarray, in_sr: int) -> Dict[str, Any]:
+def add_audio_channel(
+    sid: str, name: str, audio: np.ndarray, in_sr: int, start_s: float = 0.0
+) -> Dict[str, Any]:
     """Add an uploaded audio file (soundtrack / SFX) as its own channel: a single
     long clip on a non-speaker track that's layered into the mix (no leveling)."""
     with _lock:
@@ -1053,7 +1063,7 @@ def add_audio_channel(sid: str, name: str, audio: np.ndarray, in_sr: int) -> Dic
                 "trim_end_s": dur,
                 "speed": 1.0,
                 "gain_db": 0.0,
-                "start_s": 0.0,
+                "start_s": round(max(0.0, float(start_s)), 3),
             }
         )
         _stitch(session)
@@ -1105,6 +1115,8 @@ def channel_regen_payload(sid: str, pos: str) -> Dict[str, Any]:
         "speakers": speakers,
         "params": session.get("params", {}),
         "gap_ms": session.get("gap_ms", 250),
+        "low_vram": settings.low_vram,
+        "trim_silence": settings.trim_silence,
         "multitrack": True,
     }
 
@@ -1619,6 +1631,8 @@ def set_performance(
     text: Optional[str] = None,
     transforms: Optional[Dict[str, Any]] = None,
     auto_pitch: bool = False,
+    clean_isolate: bool = False,
+    clean_dereverb: bool = False,
 ) -> Dict[str, Any]:
     """Attach (or update) a recorded vocal performance on a segment. With audio,
     the take is stored and the segment enters perform mode; without audio, only
@@ -1649,6 +1663,8 @@ def set_performance(
                 "strength": max(1, min(5, int(strength))),
                 "transforms": norm_tf,
                 "auto_pitch": bool(auto_pitch),
+                "clean_isolate": bool(clean_isolate),
+                "clean_dereverb": bool(clean_dereverb),
                 "dirty": True,
             }
         )

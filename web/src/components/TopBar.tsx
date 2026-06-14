@@ -8,6 +8,8 @@ export function TopBar({
   onUnload,
   onToggleLod,
   onToggleLowVram,
+  onToggleTrimSilence,
+  onToggleFormat,
 }: {
   info: SystemInfo | null
   busy: boolean
@@ -15,10 +17,13 @@ export function TopBar({
   onUnload: () => void
   onToggleLod: (v: boolean) => void
   onToggleLowVram: (v: boolean) => void
+  onToggleTrimSilence: (v: boolean) => void
+  onToggleFormat: (format: string) => void
 }) {
   const gpu = info?.gpu
   const pct = gpu && gpu.used_mb && gpu.total_mb ? (gpu.used_mb / gpu.total_mb) * 100 : 0
   const loaded = info?.loaded
+  const lossless = (info?.output_format ?? 'mp3') !== 'mp3'
 
   return (
     <div className="topbar">
@@ -58,11 +63,53 @@ export function TopBar({
         {busy ? 'Working…' : loaded ? 'Model loaded' : 'Model idle'}
       </div>
 
-      <Toggle checked={!!info?.load_on_demand} onChange={onToggleLod} label="LOD" />
+      <Toggle
+        checked={lossless}
+        onChange={(v) => onToggleFormat(v ? 'flac' : 'mp3')}
+        label={lossless ? 'FLAC' : 'MP3'}
+        title={
+          'Output file format for finished renders & downloads.\n\n' +
+          'MP3: small, universally shareable; fine for speech, but lossy.\n' +
+          'FLAC: lossless, ~2× the size — the industry-standard master format ' +
+          'for professional audio. Toggle on for FLAC.'
+        }
+      />
+      <Toggle
+        checked={!!info?.load_on_demand}
+        onChange={onToggleLod}
+        label="LOD"
+        title={
+          'Load-on-Demand.\n\n' +
+          'Loads the voice model only while a render is running and frees your ' +
+          'graphics-card memory (VRAM) the moment it finishes. Slower per ' +
+          'render (reloads each time), but leaves your GPU free for other apps. ' +
+          'Best if VRAM is tight or you render only occasionally.'
+        }
+      />
       <Toggle
         checked={!!info?.low_vram}
         onChange={onToggleLowVram}
         label="Low VRAM"
+        title={
+          'Low-VRAM mode.\n\n' +
+          'Loads helper steps (voice isolation, de-reverb) one at a time and ' +
+          'frees each before the main model, lowering the peak memory a render ' +
+          'needs. A bit slower, but lets smaller graphics cards handle jobs ' +
+          'that would otherwise run out of memory.'
+        }
+      />
+      <Toggle
+        checked={!!info?.trim_silence}
+        onChange={onToggleTrimSilence}
+        label="Trim silence"
+        title={
+          'Auto-trim silence.\n\n' +
+          'Automatically removes dead air from the start and end of every ' +
+          'generated clip and recorded take (leaving a small natural pad), so ' +
+          'you stop hand-trimming the empty space the model and human timing ' +
+          'leave behind. Applies to segment generations/regenerations, the ' +
+          'Voice Clone render, and recorded performances.'
+        }
       />
 
       {loaded ? (

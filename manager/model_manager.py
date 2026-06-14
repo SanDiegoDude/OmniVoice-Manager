@@ -206,6 +206,8 @@ class ModelManager:
             "worker_alive": alive,
             "load_on_demand": self.settings.load_on_demand,
             "low_vram": self.settings.low_vram,
+            "trim_silence": self.settings.trim_silence,
+            "output_format": self.settings.output_format,
             "device": self._resolved_device or self.settings.device,
             "dtype": self._resolved_dtype or self.settings.dtype,
             "uptime_s": round(time.time() - self._started_at, 1) if self._started_at else None,

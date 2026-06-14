@@ -56,6 +56,11 @@ def encode_audio(
     if fmt == "wav":
         sf.write(str(path), audio, sr)
         return path
+    if fmt == "flac":
+        # Lossless, ~half of WAV, pro-audio standard. Written straight through
+        # libsndfile (no ffmpeg dependency); 24-bit preserves the model output.
+        sf.write(str(path), audio, sr, subtype="PCM_24")
+        return path
     try:
         from pydub import AudioSegment
 
@@ -234,6 +239,28 @@ def trim_silence(audio: np.ndarray, top_db: float = 30.0) -> np.ndarray:
         return audio
     trimmed, _ = librosa.effects.trim(audio, top_db=top_db)
     return trimmed if trimmed.size else audio
+
+
+def trim_silence_edges(
+    audio: np.ndarray, sr: int, top_db: float = 35.0, pad_ms: float = 40.0
+) -> np.ndarray:
+    """Trim near-silence (incl. low-level hiss/artifacts) from both ends, keeping
+    a small pad so soft onsets/plosives and natural breaths aren't clipped.
+
+    Used for generated TTS clips and recorded takes — the auto dead-air killer.
+    A higher ``top_db`` only trims quieter material, so 35 dB is safe for speech
+    while still catching faint room/codec hiss that sits well below the voice.
+    """
+    if audio.size == 0:
+        return audio
+    _, idx = librosa.effects.trim(audio, top_db=top_db)
+    start, end = int(idx[0]), int(idx[1])
+    if end <= start:
+        return audio  # all silence (or detection failed) — leave it untouched
+    pad = int(sr * pad_ms / 1000.0)
+    start = max(0, start - pad)
+    end = min(audio.size, end + pad)
+    return audio[start:end].astype(np.float32)
 
 
 def peak_normalize(audio: np.ndarray, peak: float = 0.95) -> np.ndarray:

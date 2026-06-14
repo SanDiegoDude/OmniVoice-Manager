@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import history, scripts_ai, service, sessions, voices
+from . import history, prefs, scripts_ai, service, sessions, voices
 from .audio_utils import (
     apply_gain_db,
     duration_seconds,
@@ -31,6 +31,7 @@ from .audio_utils import (
     peak_normalize,
     save_wav,
     trim_silence,
+    trim_silence_edges,
 )
 from .config import (
     DATA_DIR,
@@ -44,7 +45,7 @@ from .config import (
     set_active_provider,
     settings,
 )
-from .jobs import JobManager
+from .jobs import DuplicateJobError, JobManager
 from .model_manager import ModelManager, query_gpu_memory
 from .schemas import (
     AddSpaceRequest,
@@ -179,6 +180,7 @@ def system_unload():
 def system_lod(payload: dict):
     enabled = bool(payload.get("enabled", False))
     settings.load_on_demand = enabled
+    prefs.update({"system": {"load_on_demand": enabled}})
     if enabled:
         model_manager.unload()
     return model_manager.info()
@@ -186,8 +188,46 @@ def system_lod(payload: dict):
 
 @app.post("/api/system/low-vram")
 def system_low_vram(payload: dict):
-    settings.low_vram = bool(payload.get("enabled", False))
+    enabled = bool(payload.get("enabled", False))
+    settings.low_vram = enabled
+    prefs.update({"system": {"low_vram": enabled}})
     return model_manager.info()
+
+
+@app.post("/api/system/trim-silence")
+def system_trim_silence(payload: dict):
+    """Toggle auto-trim of near-silence on generations + recordings (persisted)."""
+    enabled = bool(payload.get("enabled", False))
+    settings.trim_silence = enabled
+    prefs.update({"system": {"trim_silence": enabled}})
+    return model_manager.info()
+
+
+@app.post("/api/system/output-format")
+def system_output_format(payload: dict):
+    """Switch finished-render encoding between compact MP3 and lossless FLAC."""
+    fmt = str(payload.get("format", "") or "").lower()
+    if fmt not in ("mp3", "flac", "wav"):
+        raise HTTPException(400, "format must be one of: mp3, flac, wav")
+    settings.output_format = fmt
+    prefs.update({"output": {"format": fmt}})
+    return model_manager.info()
+
+
+# ---------------------------------------------------------------------------
+# Preferences (persistent, namespaced settings store)
+# ---------------------------------------------------------------------------
+@app.get("/api/prefs")
+def get_prefs():
+    return prefs.load()
+
+
+@app.patch("/api/prefs")
+def patch_prefs(payload: dict):
+    """Deep-merge a partial prefs document and persist it. Returns the full doc."""
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "prefs patch must be an object")
+    return prefs.update(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +235,38 @@ def system_low_vram(payload: dict):
 # ---------------------------------------------------------------------------
 @app.get("/api/voices")
 def get_voices():
-    return {"tree": voices.voice_tree(), "flat": voices.list_voices()}
+    return {"tree": voices.voice_tree(), "flat": voices.list_voices(), "folders": voices.list_folders()}
+
+
+@app.post("/api/voices/folder")
+def create_voice_folder(payload: dict):
+    """Create a new (possibly nested) folder in the voice library."""
+    try:
+        return voices.create_folder(str(payload.get("path", "")))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/voices/move")
+def move_voice_endpoint(payload: dict):
+    """Move a voice into another library folder (root = "")."""
+    try:
+        return voices.move_voice(str(payload.get("id", "")), str(payload.get("folder", "")))
+    except FileNotFoundError:
+        raise HTTPException(404, "Voice not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/voices/rename")
+def rename_voice_endpoint(payload: dict):
+    """Rename a voice (base name) within its current folder."""
+    try:
+        return voices.rename_voice(str(payload.get("id", "")), str(payload.get("name", "")))
+    except FileNotFoundError:
+        raise HTTPException(404, "Voice not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.delete("/api/voices/{voice_id:path}")
@@ -356,7 +427,10 @@ def generate(req: GenerateRequest):
         job_fn = service.make_generation_job(model_manager, req, title)
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(400, str(e))
-    job_id = job_manager.submit(job_fn, meta={"title": title})
+    try:
+        job_id = job_manager.submit(job_fn, meta={"title": title}, dedup_group="generate")
+    except DuplicateJobError:
+        raise HTTPException(409, "A generation was just started — ignoring the duplicate click.")
     return {"job_id": job_id}
 
 
@@ -416,7 +490,10 @@ async def generate_perform(file: UploadFile = File(...), payload: str = Form(...
         job_fn = service.make_generation_job(model_manager, req, title, perform=perform)
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(400, str(e))
-    job_id = job_manager.submit(job_fn, meta={"title": title})
+    try:
+        job_id = job_manager.submit(job_fn, meta={"title": title}, dedup_group="generate")
+    except DuplicateJobError:
+        raise HTTPException(409, "A generation was just started — ignoring the duplicate click.")
     return {"job_id": job_id}
 
 
@@ -436,7 +513,10 @@ def multitrack_generate(req: GenerateRequest):
         job_fn = service.make_multitrack_job(model_manager, req, title)
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(400, str(e))
-    job_id = job_manager.submit(job_fn, meta={"title": title, "multitrack": True})
+    try:
+        job_id = job_manager.submit(job_fn, meta={"title": title, "multitrack": True}, dedup_group="generate")
+    except DuplicateJobError:
+        raise HTTPException(409, "A generation was just started — ignoring the duplicate click.")
     return {"job_id": job_id}
 
 
@@ -749,6 +829,8 @@ async def multitrack_set_performance(
     text: str = Form(""),
     transforms: str = Form(""),
     auto_pitch: bool = Form(False),
+    clean_isolate: bool = Form(False),
+    clean_dereverb: bool = Form(False),
 ):
     """Attach a recorded vocal performance to a segment (V2V mode). With a file
     the take is (re)stored; without one, only the params update."""
@@ -779,6 +861,7 @@ async def multitrack_set_performance(
             sid, index, wav, int(in_sr) if in_sr else None,
             gain_db=gain_db, speed=speed, mode=mode, strength=strength,
             text=text or None, transforms=tf, auto_pitch=auto_pitch,
+            clean_isolate=clean_isolate, clean_dereverb=clean_dereverb,
         )
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
@@ -801,9 +884,11 @@ async def process_clip(
     isolate: bool = Form(False),
     dereverb: bool = Form(False),
     dereverb_method: str = Form("roformer"),
+    trim: bool = Form(False),
 ):
-    """Clean an arbitrary clip (vocal isolation / dereverb) and return the
-    processed WAV — used by the performance modal's input-cleanup toggles."""
+    """Clean an arbitrary clip (vocal isolation / dereverb / silence trim) and
+    return the processed WAV — used by the performance modal's input-cleanup
+    toggles and the global auto-trim setting for recorded takes."""
     import librosa
 
     data = await file.read()
@@ -823,6 +908,10 @@ async def process_clip(
             {"waveform": wav, "sample_rate": sr, "method": dereverb_method}
         )
         wav = np.asarray(res["waveform"], dtype=np.float32)
+    if trim:
+        # Dead-air kill on the take itself (head/tail), so the seed + whisper +
+        # stored take all start tight without the user hand-trimming.
+        wav = trim_silence_edges(np.asarray(wav, dtype=np.float32), sr)
     out = TMP_DIR / f"pclip_{uuid.uuid4().hex}.wav"
     save_wav(out, np.asarray(wav, dtype=np.float32), sr)
     return FileResponse(str(out), media_type="audio/wav", filename="processed.wav")
@@ -1143,7 +1232,9 @@ def multitrack_channel_regen(sid: str, pos: str):
 
 
 @app.post("/api/multitrack/{sid}/upload-channel")
-async def multitrack_upload_channel(sid: str, file: UploadFile = File(...), name: str = Form("")):
+async def multitrack_upload_channel(
+    sid: str, file: UploadFile = File(...), name: str = Form(""), start_s: float = Form(0.0)
+):
     """Add an uploaded audio file as a new layered channel (soundtrack / SFX)."""
     import librosa
 
@@ -1158,7 +1249,7 @@ async def multitrack_upload_channel(sid: str, file: UploadFile = File(...), name
     tmp.unlink(missing_ok=True)
     label = (name or "").strip() or Path(file.filename or "Audio").stem
     try:
-        return sessions.add_audio_channel(sid, label, audio, int(in_sr))
+        return sessions.add_audio_channel(sid, label, audio, int(in_sr), start_s=float(start_s))
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
 
@@ -1447,7 +1538,18 @@ def main() -> int:
     settings.port = args.port
     settings.model_id = args.model
     settings.device = args.device
-    settings.load_on_demand = args.lod
+    # Persisted prefs form the baseline; CLI flags override (and --lod can only
+    # force LOD *on* for this launch, never off — flags are enable-only).
+    _pref = prefs.load()
+    _sys = _pref.get("system", {}) if isinstance(_pref.get("system"), dict) else {}
+    _out = _pref.get("output", {}) if isinstance(_pref.get("output"), dict) else {}
+    settings.load_on_demand = bool(args.lod) or bool(_sys.get("load_on_demand", False))
+    settings.low_vram = bool(_sys.get("low_vram", False))
+    settings.trim_silence = bool(_sys.get("trim_silence", False))
+    _fmt = str(_out.get("format") or settings.output_format).lower()
+    if _fmt in ("mp3", "flac", "wav", "m4a", "ogg"):
+        settings.output_format = _fmt
+    settings.output_bitrate = str(_out.get("bitrate") or settings.output_bitrate)
     settings.eager_load = args.eager
     settings.load_asr = args.preload_asr
     settings.debug = args.debug

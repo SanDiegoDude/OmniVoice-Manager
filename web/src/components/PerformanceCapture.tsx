@@ -60,7 +60,9 @@ export const PerformanceCapture = forwardRef<PerfCaptureHandle, {
   targetVoice?: string | null
   /** Refresh the voice library after a take is saved into it. */
   onVoiceSaved?: () => void
-}>(function PerformanceCapture({ onState, onWhisperText, notify, targetVoice, onVoiceSaved }, ref) {
+  /** Global auto-trim: when on, recorded takes get dead-air trimmed on capture. */
+  trimSilence?: boolean
+}>(function PerformanceCapture({ onState, onWhisperText, notify, targetVoice, onVoiceSaved, trimSilence }, ref) {
   const [take, setTake] = useState<{ blob: Blob; url: string } | null>(null)
   const [recording, setRecording] = useState(false)
   const [recElapsed, setRecElapsed] = useState(0)
@@ -179,13 +181,14 @@ export const PerformanceCapture = forwardRef<PerfCaptureHandle, {
 
   const applyCleanup = useCallback(
     async (base: Blob, isolate: boolean, dereverb: boolean): Promise<Blob> => {
-      if (!isolate && !dereverb) {
+      const trim = !!trimSilence
+      if (!isolate && !dereverb && !trim) {
         setTakeBlob(base)
         return base
       }
       setProcessing(true)
       try {
-        const processed = await api.processClip(base, { isolate, dereverb })
+        const processed = await api.processClip(base, { isolate, dereverb, trim })
         setTakeBlob(processed)
         return processed
       } catch (e) {
@@ -196,7 +199,7 @@ export const PerformanceCapture = forwardRef<PerfCaptureHandle, {
         setProcessing(false)
       }
     },
-    [setTakeBlob, notify],
+    [setTakeBlob, notify, trimSilence],
   )
 
   const whisperBlob = useCallback(

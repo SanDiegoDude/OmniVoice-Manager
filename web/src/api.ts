@@ -13,6 +13,8 @@ export interface SystemInfo {
   worker_alive: boolean
   load_on_demand: boolean
   low_vram: boolean
+  trim_silence?: boolean
+  output_format?: string
   device: string
   dtype: string
   uptime_s: number | null
@@ -120,6 +122,9 @@ export interface PerfParams {
   transforms?: VocalTransform | null
   /** Transparent take→target f0 match applied at render (no UI knob). */
   auto_pitch?: boolean
+  /** Input-cleanup toggles, persisted so re-editing restores the same state. */
+  clean_isolate?: boolean
+  clean_dereverb?: boolean
 }
 
 export interface PerformInfo {
@@ -129,6 +134,10 @@ export interface PerformInfo {
   speed: number
   transforms?: VocalTransform | null
   auto_pitch?: boolean
+  /** Input-cleanup toggles used when the take was captured, so re-editing the
+   * performance restores the same checkbox state. */
+  clean_isolate?: boolean
+  clean_dereverb?: boolean
   dirty: boolean
   url: string
 }
@@ -247,9 +256,28 @@ export const api = {
     jfetch<SystemInfo>('/api/system/lod', { method: 'POST', body: JSON.stringify({ enabled }) }),
   setLowVram: (enabled: boolean) =>
     jfetch<SystemInfo>('/api/system/low-vram', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  setTrimSilence: (enabled: boolean) =>
+    jfetch<SystemInfo>('/api/system/trim-silence', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  setOutputFormat: (format: string) =>
+    jfetch<SystemInfo>('/api/system/output-format', { method: 'POST', body: JSON.stringify({ format }) }),
+  getPrefs: () => jfetch<Record<string, unknown>>('/api/prefs'),
+  patchPrefs: (patch: Record<string, unknown>) =>
+    jfetch<Record<string, unknown>>('/api/prefs', { method: 'PATCH', body: JSON.stringify(patch) }),
 
-  voices: () => jfetch<{ tree: VoiceNode; flat: Voice[] }>('/api/voices'),
+  voices: () => jfetch<{ tree: VoiceNode; flat: Voice[]; folders: string[] }>('/api/voices'),
   deleteVoice: (id: string) => jfetch<{ ok: boolean }>(`/api/voices/${id}`, { method: 'DELETE' }),
+  createVoiceFolder: (path: string) =>
+    jfetch<{ folder: string }>('/api/voices/folder', { method: 'POST', body: JSON.stringify({ path }) }),
+  moveVoice: (id: string, folder: string) =>
+    jfetch<{ id: string; name: string; folder: string; filename: string }>('/api/voices/move', {
+      method: 'POST',
+      body: JSON.stringify({ id, folder }),
+    }),
+  renameVoice: (id: string, name: string) =>
+    jfetch<{ id: string; name: string; folder: string; filename: string }>('/api/voices/rename', {
+      method: 'POST',
+      body: JSON.stringify({ id, name }),
+    }),
   async uploadVoice(file: File) {
     const fd = new FormData()
     fd.append('file', file)
@@ -387,6 +415,8 @@ export const api = {
     if (params.text) fd.append('text', params.text)
     if (params.transforms) fd.append('transforms', JSON.stringify(params.transforms))
     fd.append('auto_pitch', String(!!params.auto_pitch))
+    fd.append('clean_isolate', String(!!params.clean_isolate))
+    fd.append('clean_dereverb', String(!!params.clean_dereverb))
     const res = await fetch(`/api/multitrack/${sid}/segment/${index}/performance`, { method: 'POST', body: fd })
     if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Save failed')
     return res.json()
@@ -445,13 +475,14 @@ export const api = {
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/performance`, { method: 'DELETE' }),
   async processClip(
     wav: Blob,
-    opts: { isolate: boolean; dereverb: boolean; dereverb_method?: string },
+    opts: { isolate: boolean; dereverb: boolean; dereverb_method?: string; trim?: boolean },
   ): Promise<Blob> {
     const fd = new FormData()
     fd.append('file', wav, 'clip.wav')
     fd.append('isolate', String(opts.isolate))
     fd.append('dereverb', String(opts.dereverb))
     fd.append('dereverb_method', opts.dereverb_method || 'roformer')
+    fd.append('trim', String(!!opts.trim))
     const res = await fetch('/api/process-clip', { method: 'POST', body: fd })
     if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Processing failed')
     return res.blob()
@@ -463,10 +494,11 @@ export const api = {
     if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Transcription failed')
     return ((await res.json()).text || '').trim()
   },
-  async uploadChannel(sid: string, file: File, name: string): Promise<MultitrackSession> {
+  async uploadChannel(sid: string, file: File, name: string, startS = 0): Promise<MultitrackSession> {
     const fd = new FormData()
     fd.append('file', file)
     fd.append('name', name)
+    fd.append('start_s', String(startS))
     const res = await fetch(`/api/multitrack/${sid}/upload-channel`, { method: 'POST', body: fd })
     if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Upload failed')
     return res.json()

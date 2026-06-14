@@ -205,11 +205,30 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 .tree-folder > .folder-label { display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: 6px; color: var(--text-dim); cursor: pointer; }
 .tree-folder > .folder-label:hover { background: var(--bg-elev); }
 .tree-children { margin-left: 12px; border-left: 1px solid var(--border-soft); padding-left: 6px; }
-.voice-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; color: var(--text); }
+/* Names/folders are click/shift-click targets, so kill native text range-select
+   (shift-click would otherwise highlight everything between rows). Inputs below
+   re-enable selection so search/rename still behave normally. */
+.vlib { user-select: none; -webkit-user-select: none; }
+.vlib input, .vlib select { user-select: text; -webkit-user-select: text; }
+.voice-item { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 6px; cursor: pointer; color: var(--text); }
 .voice-item:hover { background: var(--bg-elev); }
 .voice-item.sel { background: rgba(109,139,255,.14); }
-.voice-item .vname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.voice-item .vplay { color: var(--text-faint); }
+.voice-item .vname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+/* Play/stop & row actions: bare icon buttons. Play is green, Stop is red. */
+.voice-item .vplay { color: var(--text-faint); background: none; border: none; padding: 1px 3px; cursor: pointer; font-size: 13px; line-height: 1; border-radius: 4px; }
+.voice-item .vplay:hover { background: var(--bg-elev); color: var(--text); }
+.voice-item .vplay.go { color: #34d399; }
+.voice-item .vplay.stop { color: #ef4444; }
+.voice-item .vplay.danger { color: #ef4444; }
+.vrow-actions, .vrow-confirm { display: inline-flex; align-items: center; gap: 2px; }
+.vrow-actions { opacity: 0; transition: opacity .12s; }
+.voice-item:hover .vrow-actions { opacity: 1; }
+.vrow-confirm .hint { font-size: 11px; }
+.vname-edit { flex: 1; padding: 2px 6px; height: 24px; font-size: 12.5px; }
+.vmove-select { flex: 1; padding: 2px 4px; height: 24px; font-size: 12px; }
+.vlib-search { display: flex; align-items: center; gap: 6px; padding: 8px 10px 4px; }
+.vlib-search .input { flex: 1; height: 28px; padding: 2px 8px; font-size: 12.5px; }
+.tag-lib-head { display: flex; align-items: center; gap: 6px; }
 .empty { color: var(--text-faint); font-size: 12.5px; text-align: center; padding: 20px 10px; }
 
 /* ---------- Speaker cards ---------- */
@@ -471,12 +490,16 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 .mtk-seg-edit:focus { outline: none; }
 .mtk-seg.dirty { box-shadow: 0 0 0 1px var(--warn) inset; }
 .mtk-ic.warn { background: var(--warn); border-color: var(--warn); color: #1b1300; }
+/* Mic icon when a vocal performance is pinned to the clip. */
+.mtk-ic.perf-on { color: #f5c542; border-color: #f5c542; box-shadow: 0 0 6px rgba(245, 197, 66, 0.5); }
 .mtk-head { position: absolute; top: 0; width: 2px; background: var(--bad); pointer-events: none; z-index: 3; box-shadow: 0 0 6px rgba(255,107,125,.6); }
 .mtk-edge { position: absolute; top: 0; width: 1px; background: rgba(255,255,255,.18); pointer-events: none; z-index: 1; }
 .mtk-edge.on { width: 2px; background: var(--accent-2); box-shadow: 0 0 6px var(--accent-2); z-index: 3; }
 .mtk-seg { cursor: grab; }
 .mtk-seg.dragging { cursor: grabbing; z-index: 4; box-shadow: var(--shadow); }
 .mtk-seg.trimming { outline: 2px solid var(--accent-2); outline-offset: -1px; }
+.mtk-seg.slice-armed { cursor: crosshair; outline: 2px dashed var(--warn); outline-offset: -1px; }
+.mtk-slice-cursor { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--warn); box-shadow: 0 0 6px var(--warn); pointer-events: none; z-index: 6; }
 .mtk-seg.selected { outline: 2px solid var(--accent-2); outline-offset: 1px; box-shadow: 0 0 0 2px rgba(0,0,0,.35), 0 0 8px var(--accent-2); }
 .mtk-seg.selected::before { content: '✓'; position: absolute; top: 2px; left: 4px; font-size: 10px; font-weight: 700; color: var(--accent-2); pointer-events: none; }
 .mtk-badge { font-size: 9.5px; padding: 0 4px; border-radius: 3px; background: rgba(155,109,255,.3); color: #d7c7ff; font-variant-numeric: tabular-nums; }

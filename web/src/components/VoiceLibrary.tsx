@@ -1,23 +1,114 @@
 import { useState } from 'react'
 import type { Voice, VoiceNode } from '../api'
 
-function FolderNode({
-  node,
-  depth,
-  onPlay,
-  onPick,
-  onDelete,
-  selected,
-}: {
-  node: VoiceNode
-  depth: number
+// Windows Explorer-style ordering: case-insensitive and number-aware, so
+// "clip2" sorts before "clip10" and casing doesn't fragment the list.
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+const natCmp = (a: string, b: string) => collator.compare(a, b)
+
+const baseName = (v: Voice) => v.filename.replace(/\.[^.]+$/, '')
+
+interface RowActions {
+  selected?: string
+  playingUrl: string | null
   onPlay: (v: Voice) => void
+  onCast: (voiceId: string, opts?: { newTrack?: boolean }) => void
   onPick: (v: Voice) => void
   onDelete: (v: Voice) => void
-  selected?: string
-}) {
+  onMove: (id: string, folder: string) => void
+  onRename: (id: string, name: string) => void
+  folders: string[]
+}
+
+function VoiceRow({
+  v,
+  selected,
+  playingUrl,
+  onPlay,
+  onCast,
+  onPick,
+  onDelete,
+  onMove,
+  onRename,
+  folders,
+}: { v: Voice } & RowActions) {
+  const [renaming, setRenaming] = useState<string | null>(null)
+  const [confirmDel, setConfirmDel] = useState(false)
+  const [moving, setMoving] = useState(false)
+  const playing = playingUrl === `/api/audio/voice/${v.id}`
+
+  const commitRename = () => {
+    const name = (renaming ?? '').trim()
+    setRenaming(null)
+    if (name && name !== baseName(v)) onRename(v.id, name)
+  }
+
+  return (
+    <div className={`voice-item ${selected === v.id ? 'sel' : ''}`} title={`${v.id}\nClick to cast · Shift-click for a new track`}>
+      <button
+        className={`vplay ${playing ? 'stop' : 'go'}`}
+        onClick={(e) => { e.stopPropagation(); onPlay(v) }}
+        title={playing ? 'Stop' : 'Play'}
+      >
+        {playing ? '■' : '▶'}
+      </button>
+      {renaming != null ? (
+        <input
+          className="input vname-edit"
+          autoFocus
+          value={renaming}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => setRenaming(e.target.value)}
+          onKeyDown={(e) => {
+            e.stopPropagation()
+            if (e.key === 'Enter') commitRename()
+            else if (e.key === 'Escape') setRenaming(null)
+          }}
+          onBlur={commitRename}
+        />
+      ) : (
+        <span
+          className="vname"
+          onClick={(e) => { onPick(v); onCast(v.id, { newTrack: e.shiftKey }) }}
+        >
+          {baseName(v)}
+        </span>
+      )}
+      {confirmDel ? (
+        <span className="vrow-confirm" onClick={(e) => e.stopPropagation()}>
+          <span className="hint">Delete?</span>
+          <button className="vplay danger" title="Confirm delete" onClick={() => { setConfirmDel(false); onDelete(v) }}>✓</button>
+          <button className="vplay" title="Cancel" onClick={() => setConfirmDel(false)}>✕</button>
+        </span>
+      ) : moving ? (
+        <select
+          className="input vmove-select"
+          autoFocus
+          defaultValue={v.folder}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => { setMoving(false); if (e.target.value !== v.folder) onMove(v.id, e.target.value) }}
+          onBlur={() => setMoving(false)}
+        >
+          <option value="">(library root)</option>
+          {folders.map((f) => (
+            <option key={f} value={f}>{f}</option>
+          ))}
+        </select>
+      ) : (
+        <span className="vrow-actions" onClick={(e) => e.stopPropagation()}>
+          <button className="vplay" title="Move to folder…" onClick={() => setMoving(true)}>📂</button>
+          <button className="vplay" title="Rename" onClick={() => setRenaming(baseName(v))}>✎</button>
+          <button className="vplay" title="Delete" onClick={() => setConfirmDel(true)}>🗑</button>
+        </span>
+      )}
+    </div>
+  )
+}
+
+function FolderNode({ node, depth, actions }: { node: VoiceNode; depth: number; actions: RowActions }) {
   const [open, setOpen] = useState(depth < 1)
-  const folderNames = Object.keys(node.folders).sort()
+  const folderNames = Object.keys(node.folders).sort(natCmp)
+  const voices = [...node.voices].sort((a, b) => natCmp(baseName(a), baseName(b)))
   return (
     <div className="tree-folder">
       {node.name && (
@@ -28,44 +119,10 @@ function FolderNode({
       {open && (
         <div className={node.name ? 'tree-children' : ''}>
           {folderNames.map((f) => (
-            <FolderNode
-              key={f}
-              node={node.folders[f]}
-              depth={depth + 1}
-              onPlay={onPlay}
-              onPick={onPick}
-              onDelete={onDelete}
-              selected={selected}
-            />
+            <FolderNode key={f} node={node.folders[f]} depth={depth + 1} actions={actions} />
           ))}
-          {node.voices.map((v) => (
-            <div
-              key={v.id}
-              className={`voice-item ${selected === v.id ? 'sel' : ''}`}
-              onClick={() => onPick(v)}
-              title={v.id}
-            >
-              <span
-                className="vplay"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onPlay(v)
-                }}
-              >
-                ▶
-              </span>
-              <span className="vname">{v.filename.replace(/\.[^.]+$/, '')}</span>
-              <span
-                className="vplay"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onDelete(v)
-                }}
-                title="Delete"
-              >
-                🗑
-              </span>
-            </div>
+          {voices.map((v) => (
+            <VoiceRow key={v.id} v={v} {...actions} />
           ))}
         </div>
       )}
@@ -75,37 +132,113 @@ function FolderNode({
 
 export function VoiceLibrary({
   tree,
+  flat,
+  folders,
   count,
   selected,
+  playingUrl,
   onPlay,
   onPick,
+  onCast,
   onDelete,
+  onMove,
+  onRename,
+  onCreateFolder,
   onRefresh,
   onOpenLab,
 }: {
   tree: VoiceNode | null
+  flat: Voice[]
+  folders: string[]
   count: number
   selected?: string
+  playingUrl: string | null
   onPlay: (v: Voice) => void
   onPick: (v: Voice) => void
+  onCast: (voiceId: string, opts?: { newTrack?: boolean }) => void
   onDelete: (v: Voice) => void
+  onMove: (id: string, folder: string) => void
+  onRename: (id: string, name: string) => void
+  onCreateFolder: (path: string) => void
   onRefresh: () => void
   onOpenLab: () => void
 }) {
+  const [query, setQuery] = useState('')
+  const [newFolder, setNewFolder] = useState<string | null>(null)
+
+  const actions: RowActions = { selected, playingUrl, onPlay, onCast, onPick, onDelete, onMove, onRename, folders }
+
+  const q = query.trim().toLowerCase()
+  const matches = q
+    ? flat
+        .filter((v) => v.name.toLowerCase().includes(q))
+        .sort((a, b) => natCmp(baseName(a), baseName(b)))
+        .slice(0, 60)
+    : []
+
+  const submitFolder = () => {
+    const name = (newFolder ?? '').trim()
+    setNewFolder(null)
+    if (name) onCreateFolder(name)
+  }
+
   return (
-    // min-height keeps the library usable (head + a few voices + the Voice Lab
-    // button) on short viewports; the tag library below shrinks/scrolls instead.
-    <div className="card flush col" style={{ flex: 1, minHeight: 240 }}>
+    <div className="card flush col vlib" style={{ flex: 1, minHeight: 240 }}>
       <div className="card-head">
         <h3>Voice Library ({count})</h3>
-        <button className="btn ghost sm" onClick={onRefresh} title="Refresh">
-          ↻
-        </button>
+        <div className="row" style={{ gap: 4 }}>
+          <button className="btn ghost sm" onClick={() => setNewFolder(newFolder == null ? '' : null)} title="New folder">
+            📁+
+          </button>
+          <button className="btn ghost sm" onClick={onRefresh} title="Refresh">
+            ↻
+          </button>
+        </div>
       </div>
+
+      <div className="vlib-search">
+        <input
+          className="input"
+          placeholder="🔍 Search voices…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        {query && (
+          <button className="btn ghost sm" onClick={() => setQuery('')} title="Clear">✕</button>
+        )}
+      </div>
+
+      {newFolder != null && (
+        <div className="vlib-search">
+          <input
+            className="input"
+            autoFocus
+            placeholder="New folder (e.g. movies/Heroes)"
+            value={newFolder}
+            onChange={(e) => setNewFolder(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') submitFolder()
+              else if (e.key === 'Escape') setNewFolder(null)
+            }}
+            onBlur={submitFolder}
+          />
+        </div>
+      )}
+
       <div className="card-body" style={{ overflowY: 'auto', flex: 1 }}>
-        {tree && (count > 0) ? (
+        {q ? (
+          matches.length ? (
+            <div className="tree">
+              {matches.map((v) => (
+                <VoiceRow key={v.id} v={v} {...actions} />
+              ))}
+            </div>
+          ) : (
+            <div className="empty">No voices match “{query}”.</div>
+          )
+        ) : tree && count > 0 ? (
           <div className="tree">
-            <FolderNode node={tree} depth={0} onPlay={onPlay} onPick={onPick} onDelete={onDelete} selected={selected} />
+            <FolderNode node={tree} depth={0} actions={actions} />
           </div>
         ) : (
           <div className="empty">

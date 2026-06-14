@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { type MutableRefObject, useEffect, useRef, useState } from 'react'
 import type { GenParams, GenerateBody, Job, MultitrackSegment, MultitrackSession, Provider, SpeakerConfig, Voice, VocalTransform } from '../api'
 import { api, DEFAULT_TRANSFORM } from '../api'
 import { audioBufferToWavMulti } from '../audio-encode'
@@ -30,6 +30,16 @@ const defaultSpeaker = (): SpeakerConfig => ({
   dereverb: false,
   dereverb_method: 'roformer',
 })
+
+// The track-1 "template": processing settings new tracks inherit and that
+// persist across reloads. Voice / ref text / instruct are intentionally NOT
+// part of it — those are per-track identity, not shared defaults.
+const TEMPLATE_FIELDS = ['mode', 'language', 'isolate', 'normalize', 'dereverb', 'dereverb_method'] as const
+const templateOf = (cfg: SpeakerConfig): Partial<SpeakerConfig> => {
+  const out: Partial<SpeakerConfig> = {}
+  for (const k of TEMPLATE_FIELDS) (out as Record<string, unknown>)[k] = cfg[k]
+  return out
+}
 
 const defaultParams: GenParams = {
   num_step: 32,
@@ -111,6 +121,11 @@ export function Studio({
   onTranscribeClip,
   onFinalize,
   notify,
+  submitting,
+  trackTemplate,
+  onTrackTemplate,
+  castRef,
+  trimSilence,
 }: {
   playCue: { nonce: number; index?: number; channel?: string; at?: number } | null
   voices: Voice[]
@@ -151,7 +166,7 @@ export function Studio({
   onTranscribeSegment: (index: number, draft?: { trim_start_s?: number; trim_end_s?: number; speed?: number }) => Promise<string | null | undefined>
   onSetChannel: (pos: string, fields: { name?: string | null; gain_db?: number }) => void
   onRegenChannel: (pos: string) => void
-  onUploadChannel: (file: File, name: string) => void
+  onUploadChannel: (file: File, name: string, startS?: number) => void
   onAutoSlice: (index: number) => Promise<void>
   onSetInpaint: (index: number, enabled: boolean) => Promise<void>
   onSetPreserveNonvocal: (index: number, enabled: boolean) => Promise<void>
@@ -186,6 +201,16 @@ export function Studio({
   onTranscribeClip: (wav: Blob) => Promise<string>
   onFinalize: () => void
   notify: (m: string, k?: 'info' | 'error' | 'success') => void
+  // True during the async generate-submit gap, so the button locks immediately.
+  submitting?: boolean
+  // Persisted track-1 template: undefined while prefs load, then the stored
+  // processing settings (or {} if none saved yet).
+  trackTemplate?: Partial<SpeakerConfig>
+  onTrackTemplate?: (tpl: Partial<SpeakerConfig>) => void
+  // The Voice Library casts a clicked voice into a track through this ref.
+  castRef?: MutableRefObject<((voiceId: string, opts?: { newTrack?: boolean }) => void) | null>
+  // Global auto-trim toggle: when on, recorded takes get dead-air trimmed too.
+  trimSilence?: boolean
 }) {
   // ADR Studio (multitrack) is home: one speaker, one track, ready to act.
   const [mode, setMode] = useState<'single' | 'multi'>('multi')
@@ -223,6 +248,33 @@ export function Studio({
   // but always on in the Voice Clone tab for fast rerolls while playing with voices.
   const [showGenWhenMin, setShowGenWhenMin] = useState(false)
 
+  // ---- Track-1 template: new tracks inherit it; track 1 persists across reloads ----
+  const tplRef = useRef<Partial<SpeakerConfig>>(trackTemplate ?? {})
+  const makeSpeaker = (): SpeakerConfig => ({ ...defaultSpeaker(), ...tplRef.current })
+  const tplReadyRef = useRef(false)
+  const lastTplKeyRef = useRef('')
+  // Seed track 1 from the stored template once prefs arrive — only on a fresh,
+  // session-less roster, so we never stomp a loaded scene.
+  useEffect(() => {
+    if (trackTemplate === undefined || tplReadyRef.current) return
+    tplReadyRef.current = true
+    tplRef.current = trackTemplate
+    lastTplKeyRef.current = JSON.stringify(templateOf(makeSpeaker()))
+    if (!session && speakers.length === 1) setSpeakers([makeSpeaker()])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trackTemplate])
+  // Persist track 1's processing settings whenever they change.
+  useEffect(() => {
+    if (!tplReadyRef.current || !onTrackTemplate) return
+    const tpl = templateOf(speakers[0])
+    const key = JSON.stringify(tpl)
+    if (key === lastTplKeyRef.current) return
+    lastTplKeyRef.current = key
+    tplRef.current = tpl
+    onTrackTemplate(tpl)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speakers, onTrackTemplate])
+
   useEffect(() => {
     if (injected.nonce > 0) {
       setScript(injected.script)
@@ -236,11 +288,11 @@ export function Studio({
       // Rebuild the speaker list to exactly N, restoring per-speaker configs ("1".."n").
       if (keys.length || injected.num_speakers) {
         setSpeakers((prev) => {
-          const arr: SpeakerConfig[] = Array.from({ length: n }, (_, i) => prev[i] ?? defaultSpeaker())
+          const arr: SpeakerConfig[] = Array.from({ length: n }, (_, i) => prev[i] ?? makeSpeaker())
           if (injected.speakers) {
             Object.entries(injected.speakers).forEach(([key, cfg]) => {
               const i = parseInt(key, 10) - 1
-              if (i >= 0 && i < arr.length) arr[i] = { ...defaultSpeaker(), ...cfg }
+              if (i >= 0 && i < arr.length) arr[i] = { ...makeSpeaker(), ...cfg }
             })
           }
           return arr
@@ -325,7 +377,7 @@ export function Studio({
     if (s) {
       const genCount = s.tracks.filter((t) => t.kind !== 'audio').length
       setSpeakers((prev) =>
-        genCount > prev.length ? [...prev, ...Array.from({ length: genCount - prev.length }, () => defaultSpeaker())] : prev,
+        genCount > prev.length ? [...prev, ...Array.from({ length: genCount - prev.length }, () => makeSpeaker())] : prev,
       )
     }
     return s
@@ -349,7 +401,7 @@ export function Studio({
     const s = await onReorderTracks(order)
     if (s) {
       const numeric = order.filter((id) => /^\d+$/.test(id))
-      setSpeakers((prev) => numeric.map((id) => prev[parseInt(id, 10) - 1] ?? defaultSpeaker()))
+      setSpeakers((prev) => numeric.map((id) => prev[parseInt(id, 10) - 1] ?? makeSpeaker()))
       setScript(scriptFromSession(s)) // "Speaker N:" labels follow the new order
     }
     return s
@@ -376,10 +428,48 @@ export function Studio({
   }
 
   const addSpeaker = () => {
-    const cfg = defaultSpeaker()
+    const cfg = makeSpeaker()
     setSpeakers((prev) => [...prev, cfg])
     if (liveSync) onAddSpeaker(cfg)
   }
+
+  // Cast a library voice into the roster. Plain click: fill the first empty
+  // clone slot (current track order), else swap the last speaker. Shift-click
+  // in ADR mode: append a brand-new track from the track-1 template.
+  // The Voice Clone tab (single mode) has no track stack — shift-click there is
+  // treated as a plain click so it can never silently spawn ADR tracks offscreen.
+  const voiceLabel = (id: string) => id.replace(/\.[^.]+$/, '').split('/').pop() || id
+  const castVoice = (voiceId: string, opts?: { newTrack?: boolean }) => {
+    const newTrack = !!opts?.newTrack && mode === 'multi'
+    if (newTrack) {
+      const cfg: SpeakerConfig = { ...makeSpeaker(), mode: 'clone', voice: voiceId }
+      setSpeakers((prev) => [...prev, cfg])
+      if (session) onAddSpeaker(cfg)
+      notify(`🎙 Added ${voiceLabel(voiceId)} as a new track`, 'success')
+      return
+    }
+    if (mode === 'single') {
+      setSpeakers((prev) => {
+        const next = [...prev]
+        next[0] = { ...next[0], mode: 'clone', voice: voiceId }
+        return next
+      })
+      notify(`🎙 Cast ${voiceLabel(voiceId)}`, 'success')
+      return
+    }
+    setSpeakers((prev) => {
+      let idx = prev.findIndex((s) => s.mode === 'clone' && !s.voice)
+      if (idx < 0) idx = prev.length - 1
+      const next = [...prev]
+      next[idx] = { ...next[idx], mode: 'clone', voice: voiceId }
+      if (liveSync) onUpdateSpeaker(String(idx + 1), next[idx])
+      notify(`🎙 Cast ${voiceLabel(voiceId)} into Speaker ${idx + 1}`, 'success')
+      return next
+    })
+  }
+  useEffect(() => {
+    if (castRef) castRef.current = castVoice
+  })
   // +Speaker track button inside the editor: append a fully-configured speaker
   // and grow the local roster in lockstep, so the scene stays multi-speaker
   // (otherwise the script writer sees a 1-speaker roster and goes monologue).
@@ -445,7 +535,7 @@ export function Studio({
   // normal one-shot output (the toggle is hidden in single mode).
   const useMultitrack = mode === 'multi' && multitrack
 
-  const running = job?.status === 'running' || job?.status === 'queued'
+  const running = !!submitting || job?.status === 'running' || job?.status === 'queued'
   const prog = job?.progress
   const audioUrl = job?.status === 'done' ? job.result?.audio_url : null
 
@@ -698,6 +788,7 @@ export function Studio({
             notify={notify}
             targetVoice={speakers[0]?.mode === 'clone' ? speakers[0]?.voice ?? null : null}
             onVoiceSaved={onVoiceSaved}
+            trimSilence={trimSilence}
           />
         </Collapsible>
       )}
@@ -929,6 +1020,7 @@ export function Studio({
             onPromoteChannel={handlePromote}
             onRemoveTrack={handleRemoveTrack}
             onAddSpeaker={addSpeakerFromEditor}
+            newTrackDefaults={templateOf(speakers[0])}
             voices={voices}
             onMergeSegments={onMergeSegments}
             onCollapseTrack={onCollapseTrack}
@@ -947,6 +1039,7 @@ export function Studio({
             busy={running}
             onFinalize={onFinalize}
             finalizing={finalizing}
+            trimSilence={trimSilence}
           />
         </Collapsible>
       )}

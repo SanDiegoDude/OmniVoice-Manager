@@ -9,16 +9,39 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Optional
 
 
+class DuplicateJobError(Exception):
+    """Raised when a job is submitted within the dedup cooldown of an identical
+    group — i.e. rapid-fire duplicate clicks. Callers map this to HTTP 409."""
+
+
 class JobManager:
     def __init__(self) -> None:
         self._jobs: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         # Single worker => generation jobs run one at a time.
         self._pool = ThreadPoolExecutor(max_workers=1)
+        # Per-group timestamp of the last accepted submit, for the dedup cooldown.
+        self._last_submit: Dict[str, float] = {}
 
-    def submit(self, fn: Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]], meta: Optional[Dict[str, Any]] = None) -> str:
+    def submit(
+        self,
+        fn: Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]],
+        meta: Optional[Dict[str, Any]] = None,
+        dedup_group: Optional[str] = None,
+        cooldown_s: float = 1.0,
+    ) -> str:
+        """Queue a job. If ``dedup_group`` is set, reject (DuplicateJobError) a
+        second submit in the same group within ``cooldown_s`` — this swallows the
+        rapid-fire double/triple-clicks that otherwise pile up duplicate renders,
+        while still allowing an intentional re-render a moment later."""
         job_id = uuid.uuid4().hex
         with self._lock:
+            if dedup_group is not None:
+                now = time.time()
+                last = self._last_submit.get(dedup_group, 0.0)
+                if now - last < cooldown_s:
+                    raise DuplicateJobError(dedup_group)
+                self._last_submit[dedup_group] = now
             self._jobs[job_id] = {
                 "id": job_id,
                 "status": "queued",

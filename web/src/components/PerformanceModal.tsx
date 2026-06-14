@@ -8,7 +8,7 @@ import SaveVoiceModal from './SaveVoiceModal'
 import ToolModal from './ToolModal'
 
 type Mode = 'character' | 'voice'
-type PerfParams = { gain_db: number; speed: number; mode: Mode; strength: number; text?: string; transforms?: VocalTransform | null; auto_pitch?: boolean }
+type PerfParams = { gain_db: number; speed: number; mode: Mode; strength: number; text?: string; transforms?: VocalTransform | null; auto_pitch?: boolean; clean_isolate?: boolean; clean_dereverb?: boolean }
 
 const transformActive = (t: VocalTransform) =>
   Math.abs(t.pitch) > 0.01 ||
@@ -57,6 +57,7 @@ export default function PerformanceModal({
   onApplyOutput,
   onWhisper,
   onVoiceSaved,
+  trimSilence,
   onClose,
 }: {
   seg: MultitrackSegment | null
@@ -76,6 +77,8 @@ export default function PerformanceModal({
   onApplyOutput: (index: number, fields: { trim_start_s?: number; trim_end_s?: number; gain_db?: number }) => void
   onWhisper: (wav: Blob) => Promise<string>
   onVoiceSaved?: () => void
+  /** Global auto-trim: when on, recorded takes get dead-air trimmed on capture. */
+  trimSilence?: boolean
   onClose: () => void
 }) {
   const existing = seg?.perform || null
@@ -102,9 +105,12 @@ export default function PerformanceModal({
   const [autoPitch, setAutoPitch] = useState(existing ? !!existing.auto_pitch : !!targetVoice)
   const [text, setText] = useState(seg?.text ?? '')
   // Cleanup defaults ON for fresh takes (raw mic input without it sounds bad);
-  // re-editing a saved take starts off so we don't double-process it.
-  const [cleanIsolate, setCleanIsolate] = useState(!existing)
-  const [cleanDereverb, setCleanDereverb] = useState(!existing)
+  // re-editing a saved take restores whatever was saved so the UI matches the
+  // baked-in state (older takes predating this flag fall back to off). Toggling
+  // either re-processes the current take, so the initial value is just display —
+  // an untouched edit reuses the already-cleaned take with no double-processing.
+  const [cleanIsolate, setCleanIsolate] = useState(existing ? !!existing.clean_isolate : true)
+  const [cleanDereverb, setCleanDereverb] = useState(existing ? !!existing.clean_dereverb : true)
   const [autoWhisper, setAutoWhisper] = useState(true)
   const autoWhisperRef = useRef(true)
   autoWhisperRef.current = autoWhisper
@@ -226,14 +232,15 @@ export default function PerformanceModal({
 
   const applyCleanup = useCallback(
     async (base: Blob, isolate: boolean, dereverb: boolean): Promise<Blob> => {
-      if (!isolate && !dereverb) {
+      const trim = !!trimSilence
+      if (!isolate && !dereverb && !trim) {
         setTakeBlob(base)
         return base
       }
       setProcessing(true)
       setError(null)
       try {
-        const processed = await api.processClip(base, { isolate, dereverb })
+        const processed = await api.processClip(base, { isolate, dereverb, trim })
         setTakeBlob(processed)
         return processed
       } catch (e) {
@@ -244,7 +251,7 @@ export default function PerformanceModal({
         setProcessing(false)
       }
     },
-    [setTakeBlob],
+    [setTakeBlob, trimSilence],
   )
 
   const whisperBlob = useCallback(
@@ -497,6 +504,9 @@ export default function PerformanceModal({
     // When the take is already baked, the model gets it as-is — don't re-apply.
     transforms: takeApplied ? null : transformActive(transforms) ? transforms : null,
     auto_pitch: takeApplied ? false : !!targetVoice && autoPitch,
+    // Persisted purely so re-editing this take shows the same toggle state.
+    clean_isolate: cleanIsolate,
+    clean_dereverb: cleanDereverb,
     text: text.trim() && text.trim() !== (seg?.text ?? '') ? text.trim() : undefined,
   })
 

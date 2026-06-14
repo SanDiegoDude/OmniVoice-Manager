@@ -7,11 +7,13 @@ import { claimPlayback } from '../audioBus'
 
 export function VoiceLab({
   voices,
+  folders,
   onClose,
   onSaved,
   notify,
 }: {
   voices: Voice[]
+  folders: string[]
   onClose: () => void
   onSaved: () => void
   notify: (m: string, k?: 'info' | 'error' | 'success') => void
@@ -24,6 +26,8 @@ export function VoiceLab({
   const [dereverb, setDereverb] = useState(false)
   const [dereverbMethod, setDereverbMethod] = useState<'roformer' | 'deepfilternet'>('roformer')
   const [gain, setGain] = useState(0)
+  // Destination = folder (dropdown, from the library) + leaf name.
+  const [saveFolder, setSaveFolder] = useState('')
   const [saveAs, setSaveAs] = useState('')
   const [overwrite, setOverwrite] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
@@ -56,8 +60,14 @@ export function VoiceLab({
     trim_start: trimStart > 0.02 ? trimStart : 0,
     trim_end: clipDur > 0 && trimEnd < clipDur - 0.02 ? trimEnd : 0,
     overwrite: overwrite && isLibrary,
-    save_as: overwrite && isLibrary ? source!.label : saveAs || source!.label,
+    save_as: overwrite && isLibrary ? source!.label : composedSaveAs(),
   })
+
+  // Compose the destination path from the folder dropdown + leaf name.
+  const composedSaveAs = () => {
+    const leaf = (saveAs.trim() || (source ? source.label.split('/').pop() || '' : '')).replace(/^\/+/, '')
+    return saveFolder ? `${saveFolder}/${leaf}` : leaf
+  }
 
   function pickSource(s: { id: string; isUpload: boolean; label: string }, url: string) {
     setSource(s)
@@ -139,7 +149,8 @@ export function VoiceLab({
             const v = voices.find((x) => x.id === e.target.value)
             if (v) {
               pickSource({ id: v.id, isUpload: false, label: v.name }, `/api/audio/voice/${v.id}`)
-              setSaveAs(v.name + '_clean')
+              setSaveFolder(v.folder || '')
+              setSaveAs((v.name.split('/').pop() || v.name) + '_clean')
             }
           }}
         >
@@ -221,16 +232,32 @@ export function VoiceLab({
         </div>
       )}
 
-      <label className="field">
-        <span>Save as (path inside library, e.g. personal/my-voice)</span>
-        <input
-          className="input"
-          value={overwrite && isLibrary ? source!.label : saveAs}
-          onChange={(e) => setSaveAs(e.target.value)}
-          placeholder="folder/name"
-          disabled={overwrite && isLibrary}
-        />
-      </label>
+      <div className="field">
+        <span>Save to library</span>
+        <div className="row" style={{ gap: 6 }}>
+          <select
+            className="input"
+            style={{ maxWidth: 200 }}
+            value={overwrite && isLibrary ? source!.label.split('/').slice(0, -1).join('/') : saveFolder}
+            onChange={(e) => setSaveFolder(e.target.value)}
+            disabled={overwrite && isLibrary}
+            title="Destination folder (pick from your library)"
+          >
+            <option value="">📁 (library root)</option>
+            {folders.map((f) => (
+              <option key={f} value={f}>📁 {f}</option>
+            ))}
+          </select>
+          <input
+            className="input"
+            style={{ flex: 1 }}
+            value={overwrite && isLibrary ? source!.label.split('/').pop() || source!.label : saveAs}
+            onChange={(e) => setSaveAs(e.target.value)}
+            placeholder="voice name"
+            disabled={overwrite && isLibrary}
+          />
+        </div>
+      </div>
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
         <span className="hint">{hasTrim ? `Trim: ${trimStart.toFixed(1)}s – ${trimEnd.toFixed(1)}s` : 'No trim applied'}</span>
         <div className="row">

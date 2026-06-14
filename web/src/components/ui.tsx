@@ -40,9 +40,19 @@ export function Collapsible({
   )
 }
 
-export function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+export function Toggle({
+  checked,
+  onChange,
+  label,
+  title,
+}: {
+  checked: boolean
+  onChange: (v: boolean) => void
+  label: string
+  title?: string
+}) {
   return (
-    <label className="toggle">
+    <label className="toggle" title={title}>
       <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
       <span className="track" />
       <span>{label}</span>

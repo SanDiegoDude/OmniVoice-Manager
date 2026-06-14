@@ -243,8 +243,14 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
         params: Dict[str, Any] = payload.get("params", {})
         low_vram = bool(payload.get("low_vram", False))
         multitrack = bool(payload.get("multitrack", False))
+        trim_sil = bool(payload.get("trim_silence", False))
 
-        from manager.audio_utils import match_loudness, normalize_rms, peak_limit
+        from manager.audio_utils import (
+            match_loudness,
+            normalize_rms,
+            peak_limit,
+            trim_silence_edges,
+        )
 
         REF_SR = 24000  # references arrive resampled to 24 kHz from the server
 
@@ -350,6 +356,8 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
                     language=language,
                     gen_params=params,
                 ).astype(np.float32)
+                if trim_sil:
+                    audio = trim_silence_edges(audio, sr)
                 speech.append(audio)
                 segments_out.append(
                     {"index": int(line.get("index", idx)), "speaker_id": sid, "text": text, "waveform": audio}
@@ -360,6 +368,8 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
                 ("progress", rid, {"stage": "generating", "line": idx + 1, "total": total, "text": text[:80]})
             )
             audio = model.generate(**kw)[0].astype(np.float32)
+            if trim_sil:
+                audio = trim_silence_edges(audio, sr)
             speech.append(audio)
             segments_out.append(
                 {"index": int(line.get("index", idx)), "speaker_id": sid, "text": text, "waveform": audio}

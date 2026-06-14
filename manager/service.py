@@ -89,6 +89,7 @@ def build_generation_payload(req: GenerateRequest) -> Dict[str, Any]:
         "params": req.params.model_dump(),
         "gap_ms": req.params.gap_ms,
         "low_vram": settings.low_vram,
+        "trim_silence": settings.trim_silence,
     }
 
 
