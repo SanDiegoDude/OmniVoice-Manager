@@ -3,7 +3,9 @@
 # Uses the local .venv directly so `uv` does not need to be on your PATH.
 #
 # Script-level flags (consumed here, NOT passed to the server):
-#   --rebuild    Force a fresh web UI build even if one already exists.
+#   --rebuild    Sync Python deps (uv sync) AND force a fresh web UI build,
+#                even if a build already exists. Catches libraries added during
+#                active development.
 #   --forceup    Kill any process already listening on the port first.
 # Everything else is passed through, e.g.: ./run_manager.sh --ssl --lod
 set -euo pipefail
@@ -41,6 +43,19 @@ if [ "$FORCEUP" = "1" ]; then
       [ -n "$pids" ] && kill -9 $pids 2>/dev/null || true
     fi
     sleep 1
+  fi
+fi
+
+# --- Sync Python deps on --rebuild (catches libs added during active dev) ---
+# Best-effort: the launcher is designed to run off .venv without uv on PATH, so
+# if uv isn't available we just warn and carry on with the existing env.
+if [ "$REBUILD" = "1" ]; then
+  if command -v uv >/dev/null 2>&1; then
+    echo "Syncing Python dependencies (uv sync) ..."
+    uv sync || echo "uv sync failed — continuing with the existing environment." >&2
+  else
+    echo "--rebuild: 'uv' not on PATH — skipping dependency sync." >&2
+    echo "  Run 'uv sync' yourself if dependencies have changed." >&2
   fi
 fi
 

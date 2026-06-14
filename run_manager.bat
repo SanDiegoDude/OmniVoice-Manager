@@ -3,7 +3,9 @@ rem Launch the OmniVoice Manager on Windows (builds the web UI if needed, then s
 rem Uses the local .venv directly so `uv` does not need to be on your PATH.
 rem
 rem Script-level flags (consumed here, NOT passed to the server):
-rem   --rebuild    Force a fresh web UI build even if one already exists.
+rem   --rebuild    Sync Python deps (uv sync) AND force a fresh web UI build,
+rem                even if a build already exists. Catches libraries added
+rem                during active development.
 rem   --forceup    Kill any process already listening on the port first.
 rem Everything else is passed through, e.g.: run_manager.bat --ssl --lod
 setlocal enabledelayedexpansion
@@ -30,6 +32,21 @@ if "%FORCEUP%"=="1" (
     for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":%PORT% " ^| findstr LISTENING') do (
         echo Killing process %%p holding port %PORT% ...
         taskkill /F /PID %%p >nul 2>nul
+    )
+)
+
+rem --- Sync Python deps on --rebuild (catches libs added during active dev) ---
+rem Best-effort: the launcher runs off .venv without uv on PATH, so if uv isn't
+rem available we just warn and carry on with the existing env.
+if "%REBUILD%"=="1" (
+    where uv >nul 2>nul
+    if errorlevel 1 (
+        echo --rebuild: 'uv' not on PATH - skipping dependency sync. 1>&2
+        echo   Run 'uv sync' yourself if dependencies have changed. 1>&2
+    ) else (
+        echo Syncing Python dependencies ^(uv sync^) ...
+        uv sync
+        if errorlevel 1 echo uv sync failed - continuing with the existing environment. 1>&2
     )
 )
 
