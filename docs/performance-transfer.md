@@ -10,7 +10,7 @@ Two pinning strategies become the two modes you see in the UI:
 
 | Mode | What you get | Under the hood |
 | --- | --- | --- |
-| **🎭 Character swap** | The target voice reads your line with **its own mannerisms and delivery** — your timing and structure survive, but Zapp sounds like Zapp | Pin-then-release ("anneal"): your tokens anchor early diffusion steps, then release so the character finishes the performance |
+| **🎭 Character swap** | The target voice reads your line with **its own mannerisms and delivery** — your timing and structure survive, but your character sounds like your character | Pin-then-release ("anneal"): your tokens anchor early diffusion steps, then release so the character finishes the performance |
 | **🎤 Voice swap** | **Your exact delivery and cadence** in the target's timbre — you, wearing their voice | Sparse persistent pins ("stride"): a lattice of your tokens stays locked the whole way through |
 
 ## Strength
