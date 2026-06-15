@@ -551,6 +551,20 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 }
 .modal-title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .modal-body { padding: 14px; overflow-y: auto; }
+
+/* Destructive-action confirmation (full regenerate wipes the scene). */
+.gen-confirm { border-top: 3px solid var(--bad, #e5484d); }
+.gen-confirm .modal-title { color: var(--bad, #e5484d); white-space: normal; }
+.gen-confirm .modal-body p { font-size: 13px; line-height: 1.45; }
+.gen-confirm-list {
+  margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 7px;
+  font-size: 13px; line-height: 1.4;
+}
+.gen-confirm-list li { color: var(--text, #e6e6e6); }
+.gen-confirm-foot {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 12px 14px; border-top: 1px solid var(--border);
+}
 /* delete-space selection */
 .mtk-sel { position: absolute; z-index: 6; background: rgba(255,77,79,.22); border: 1px solid rgba(255,107,125,.9); border-radius: 3px; cursor: grab; }
 .mtk-sel-h { position: absolute; top: 0; bottom: 0; width: 8px; cursor: ew-resize; background: rgba(255,107,125,.55); }

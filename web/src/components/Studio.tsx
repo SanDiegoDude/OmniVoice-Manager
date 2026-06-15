@@ -247,6 +247,8 @@ export function Studio({
   // Default off on the ADR (multi) side — a stray click there can wipe a scene —
   // but always on in the Voice Clone tab for fast rerolls while playing with voices.
   const [showGenWhenMin, setShowGenWhenMin] = useState(false)
+  // Confirm before a full regenerate blows away an edited / upload-bearing scene.
+  const [confirmGen, setConfirmGen] = useState(false)
 
   // ---- Track-1 template: new tracks inherit it; track 1 persists across reloads ----
   const tplRef = useRef<Partial<SpeakerConfig>>(trackTemplate ?? {})
@@ -558,11 +560,47 @@ export function Studio({
   const outFilename = outputFinal?.filename ?? outputBase?.filename ?? job?.result?.filename
 
   const genLabel = mode === 'single' && perfState ? 'Render performance' : 'Generate audio'
-  const doGenerate = () => {
+
+  // Uploaded audio channels + manual scene edits are destroyed by a full
+  // regenerate (it rebuilds the scene fresh from the script). Warn first so a
+  // stray click doesn't wipe real work.
+  const uploadTracks = useMultitrack && session ? session.tracks.filter((t) => t.kind === 'audio') : []
+  const segEdited =
+    !!session &&
+    session.tracks.some((t) =>
+      t.segments.some(
+        (s) =>
+          !!s.perform ||
+          !!s.inpaint ||
+          Math.abs(s.gain_db || 0) > 0.01 ||
+          Math.abs((s.speed ?? 1) - 1) > 0.001 ||
+          (s.fade_in_s || 0) > 0.01 ||
+          (s.fade_out_s || 0) > 0.01 ||
+          (s.trim_start_s || 0) > 0.01,
+      ),
+    )
+  const sceneEdited = !!session?.can_undo || segEdited
+  const needsGenWarn =
+    useMultitrack && !!session && session.segment_count > 0 && (uploadTracks.length > 0 || sceneEdited)
+
+  const runGenerate = () => {
     const body = buildBody()
     if (mode === 'single' && perfState) onPerformGenerate(body, perfState)
     else onGenerate(body, title || 'Untitled Scene', useMultitrack)
   }
+  const doGenerate = () => {
+    if (needsGenWarn) setConfirmGen(true)
+    else runGenerate()
+  }
+  // Esc dismisses the regenerate confirmation.
+  useEffect(() => {
+    if (!confirmGen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setConfirmGen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [confirmGen])
   const genButton = (small = false) => (
     <button
       className={`btn primary${small ? ' sm' : ''}${running ? ' busy-glow' : ''}`}
@@ -1165,6 +1203,58 @@ export function Studio({
           onSaved={onVoiceSaved}
           onClose={() => setSaveVoiceOpen(false)}
         />
+      )}
+
+      {confirmGen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" onClick={() => setConfirmGen(false)}>
+          <div
+            className="modal-panel gen-confirm"
+            style={{ width: 'min(480px, calc(100vw - 32px))' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div className="modal-title">⚠ Regenerate the whole scene?</div>
+            </div>
+            <div className="modal-body">
+              <p style={{ margin: '0 0 10px' }}>
+                Generating rebuilds the scene from scratch using the current script — it{' '}
+                <strong>resets the active project</strong>:
+              </p>
+              <ul className="gen-confirm-list">
+                <li>
+                  Every clip is re-rendered with fresh dialogue — your manual edits (trims, fades,
+                  gains, moves, performances, pinned voices) are discarded.
+                </li>
+                {uploadTracks.length > 0 && (
+                  <li>
+                    <strong>
+                      {uploadTracks.length} uploaded audio {uploadTracks.length === 1 ? 'track' : 'tracks'}
+                    </strong>{' '}
+                    ({uploadTracks.map((t) => t.name || t.custom_name || 'Audio').join(', ')}) will be{' '}
+                    <strong>deleted</strong>.
+                  </li>
+                )}
+              </ul>
+              <p className="hint" style={{ marginTop: 10 }}>
+                This can't be undone. Tip: <strong>Finalize audio</strong> first if you want to keep the current render.
+              </p>
+            </div>
+            <div className="gen-confirm-foot">
+              <button className="btn ghost" onClick={() => setConfirmGen(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn bad"
+                onClick={() => {
+                  setConfirmGen(false)
+                  runGenerate()
+                }}
+              >
+                Regenerate &amp; reset
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
