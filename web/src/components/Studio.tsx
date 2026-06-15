@@ -775,19 +775,25 @@ export function Studio({
     }
   }
 
+  // ADR Studio / Voice Clone switch — kept reachable even when the Speakers card
+  // is minimized (rendered as the collapsed-header extra below).
+  const modeTabs = (
+    <div className="segment">
+      <button className={mode === 'multi' ? 'active' : ''} onClick={() => setMode('multi')}>
+        🎬 ADR Studio
+      </button>
+      <button className={mode === 'single' ? 'active' : ''} onClick={() => setMode('single')}>
+        🎤 Voice Clone
+      </button>
+    </div>
+  )
+
   return (
     <div className="col-scroll" style={{ flex: 1 }}>
       {/* Speakers */}
-      <Collapsible className="card" title="🎤 Speakers">
+      <Collapsible className="card" title="🎤 Speakers" collapsedExtra={modeTabs}>
         <div className="flex-between" style={{ marginBottom: 12 }}>
-          <div className="segment">
-            <button className={mode === 'multi' ? 'active' : ''} onClick={() => setMode('multi')}>
-              🎬 ADR Studio
-            </button>
-            <button className={mode === 'single' ? 'active' : ''} onClick={() => setMode('single')}>
-              🎤 Voice Clone
-            </button>
-          </div>
+          {modeTabs}
           {mode === 'multi' && (
             <div className="row" style={{ gap: 8, alignItems: 'center' }}>
               <span className="hint">{speakers.length} speakers</span>

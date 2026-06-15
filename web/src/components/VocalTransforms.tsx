@@ -18,7 +18,7 @@ const PRESETS: Preset[] = [
   { label: 'Child', emoji: '🧒', values: { pitch: 5, formant: 4 } },
   { label: 'Chipmunk', emoji: '🐿', values: { pitch: 9, formant: 6 } },
   { label: 'Robot', emoji: '🤖', values: { ringmod: 0.7, ringmod_hz: 120, drive: 0.2 } },
-  { label: 'Telephone', emoji: '☎️', values: { telephone: 0.85, tel_crackle: 0.35 } },
+  { label: 'Telephone', emoji: '☎️', values: { telephone: 0.35, tel_crackle: 0.1 } },
 ]
 
 const isActive = (t: VocalTransform) =>
