@@ -4,7 +4,7 @@ Feature guides for the OmniVoice Manager studio. Start with the [main README](..
 
 | Guide | What it covers |
 | --- | --- |
-| [ADR Studio](adr-studio.md) | The multitrack timeline editor — tracks, clips, regeneration and ripple rules, Vocal Inpaint, Record Dialog, merge/collapse/mute, editing tools, transport and shortcuts |
+| [ADR Studio](adr-studio.md) | The multitrack timeline editor — tracks, clips, regeneration and ripple rules, Pin Current Voice to Segment, manual slice, per-segment vocal transforms, Record Dialog, merge/collapse/mute, editing tools, transport and shortcuts |
 | [Performance Transfer](performance-transfer.md) | Voice-to-voice (V2V): act a line yourself and paint a cloned voice over your performance. Character vs. Voice modes, strength, Redub chains, A/B inspection and exports |
 | [Voice Clone](voice-clone.md) | The single-voice tab — high-quality one-shot clones from text or a guided performance, the Voice Lab, reference cleanup, and the AI scriptwriter |
 
@@ -27,6 +27,6 @@ OmniVoice generates one utterance per call. The Manager turns that primitive int
 | **Character swap** | V2V mode: the target voice's own mannerisms take over your read (timing preserved) |
 | **Voice swap** | V2V mode: pure timbre swap — your exact delivery and cadence in the target voice |
 | **Redub** | Promote a render to the new take for another processing pass; the chips trail lets you walk back |
-| **Vocal Inpaint** | Lock a clip's own audio as a temporary clone and rewrite the line in that exact voice |
+| **Pin Current Voice to Segment** | Lock a clip's own audio as a temporary clone and rewrite the line in that exact voice (formerly "Vocal Inpaint") |
 | **Ripple** | Timeline edits that push/pull downstream clips to preserve spacing |
 | **Finalize** | Bake the timeline into a single LUFS-matched, true-peak-limited MP3 in history |

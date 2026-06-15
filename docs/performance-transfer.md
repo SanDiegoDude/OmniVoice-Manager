@@ -29,8 +29,9 @@ Open it from a clip's menu (**🎙 Record vocal performance…**) or by double-c
 
 Workflow niceties:
 
-- **Record / re-record / upload**, with **Isolate vocals** and **Dereverb** cleanup (default on for fresh takes) and client-side level normalization — quiet mics are handled.
-- **Auto-Whisper** (default on) transcribes the moment you stop recording; uncheck for long takes you'd rather transcribe manually.
+- **Record / re-record / upload**, with **Isolate vocals** and **Dereverb** cleanup (default on for fresh takes; their state is preserved when you re-open a saved performance) and client-side level normalization — quiet mics are handled.
+- **3-2-1 count-in** (optional beep countdown) and **Auto-Whisper** are both sticky preferences, synced between this modal and the Voice Clone tab — so a fluffed take no longer auto-transcribes against your wishes.
+- **Cancel** (or **Esc**) drops a take mid-record; **Space** stops recording just like clicking stop (without also triggering the player). The dialogue box holds its position while recording so the line you're reading doesn't jump.
 - **⚡ Render in-modal** — hear the result immediately, with the output's trim/gain applying back to the clip on Save. Renders auto-play.
 - **💾 Save** stores the take + settings on the clip (gold box). If you've already rendered, the clip is done — it only re-arms (pulses) when settings change *after* the last render.
 
@@ -40,8 +41,8 @@ A collapsible **🎚 Vocal transforms** box (in both the performance modal and t
 
 - **Pitch** and **Formant** (semitones, independent) ride the WORLD vocoder, so timing and prosody survive. Formant up = smaller/younger, down = bigger/darker — the difference between a believable child voice and a chipmunk.
 - **🎯 Auto pitch-match to target** estimates your take's median f0 vs. the cast voice's and sets the pitch slider to bridge them — the fastest way to map a deep voice onto a high target.
-- Creative colours behind weight sliders: **Sub-octave** (Vader/monster body), **Drive** (growl/grit), **Ring mod** (robot/demon), **Vibrato**.
-- **Presets** (Vader, Monster, Demon, Child, Chipmunk, Robot) are one-click slider combos — a starting point to tweak by ear.
+- Creative colours behind weight sliders: **Sub-octave** (Vader/monster body), **Drive** (growl/grit), **Ring mod** (robot/demon), **Vibrato**, and **☎️ Telephone** (band-limited lo-fi + crackle for that "bad phone call / old voicemail" feel).
+- **Presets** (Vader, Monster, Demon, Child, Chipmunk, Robot, Telephone) are one-click slider combos — a starting point to tweak by ear. (The same transform engine is also exposed per-segment on the ADR timeline — see [ADR Studio](adr-studio.md#the-clip-toolkit).)
 - **🎧 Apply** bakes the transforms (plus auto pitch-match) straight onto the **main player** — no second mini-player to juggle. The take you hear is exactly what the model is handed; **↺ Reset** restores the pristine take. The same minimized box (**🎧 Apply to output**) sits under the rendered output, so the modulated output becomes a first-class output: **Redub**, **Save voice**, **Import to ADR Studio**, and download all act on what you hear. Apply works from the original each time (it never stacks), and any fresh take/render clears it.
 
 > Take loudness is auto-leveled by the transfer (the take's dB control is for monitoring); the **output** gain is the real loudness lever and is applied to the clip on Save.
@@ -79,7 +80,7 @@ The **Voice Clone tab** carries the same **A/B**, **Split L/R**, and their **⬇
 ## Performance + the rest of the studio
 
 - A clip's saved performance **rides through channel regenerate-all**: re-cast the voice and every performance clip re-renders as a V2V against the new voice, while plain clips do a normal read.
-- **Word-level inpainting**: combine performance clips with [Vocal Inpaint](adr-studio.md#vocal-inpaint--per-segment-adr) to surgically replace single words inside a take.
+- **Word-level inpainting**: combine performance clips with [Pin Current Voice to Segment](adr-studio.md#pin-current-voice-to-segment--per-segment-adr) to surgically replace single words inside a take.
 - The **Voice Clone tab** has an inline capture panel for one-shot performance-guided renders without a timeline — see [Voice Clone](voice-clone.md).
 - Renders are seeded deterministically per run, so re-rolls are controlled rather than chaotic.
 

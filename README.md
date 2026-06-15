@@ -40,13 +40,15 @@ This is the heart of the Manager. Instead of one baked render, every scene is ke
 - **True additive mixing** — overlapping clips are summed, not concatenated, so speakers can talk over each other, argue in unison, and react — real, messy, human conversation.
 - **Move / trim / speed / gain per clip** — drag clips anywhere, trim with a waveform, pitch-preserving time-stretch (no "bathroom" echo), and per-clip dB. Plus split, duplicate (ripple or not), delete, and insert/delete empty time.
 - **Compose from scratch** — the moment you pick Multi-speaker you get a blank timeline. Build a whole scene by hand one clip at a time, or generate from a script and refine.
-- **Auto-slice by sentence & Whisper align** — split a monologue into one clip per sentence using word-level timestamps, or align a clip's displayed text to its actual audio — no regenerate.
-- **Vocal Inpaint (per-segment ADR)** — lock a clip's own audio as a temporary, timeline-local voice clone, then rewrite the line in that exact voice. Per-segment automated dialogue replacement. Optional **Preserve non-vocal** keeps the clip's original background (music / room / noise) isolated at lock time and mixes it back under each regenerated take, trimmed to follow the new voice's length.
-- **Uploaded audio channels** — drop in a soundtrack / SFX / recording as its own non-generative layer with independent gain, then **⭐ promote** it into a full clone voice channel (auto-transcribed, with a matching speaker added) when you want to put words in its mouth.
+- **Auto-slice by sentence, manual slice & Whisper align** — split a monologue into one clip per sentence using word-level timestamps, **Ctrl+click** a clip to slice it by hand at the exact spot you drag to, or align a clip's displayed text to its actual audio — no regenerate. Manual slices auto-whisper both halves.
+- **Pin Current Voice to Segment (per-segment ADR)** — lock a clip's own audio as a temporary, timeline-local voice clone, then rewrite the line in that exact voice. Per-segment automated dialogue replacement. Optional **Preserve non-vocal** keeps the clip's original background (music / room / noise) isolated at lock time and mixes it back under each regenerated take, trimmed to follow the new voice's length.
+- **Per-segment vocal transforms** — a dedicated **🎚 Vocal transforms** modal applies pitch / formant / creative effects (and a **☎️ Telephone** lo-fi "bad phone call" effect) to any existing clip, preview before you commit, and bake them in reversibly — the same plug-in engine the performance modal uses, now on the timeline.
+- **Uploaded audio channels** — drop in soundtracks / SFX / recordings as their own non-generative layers with independent gain. Upload **multiple files at once** (and **video files** — audio is extracted automatically); each lands at the playhead in its own track. Then **⭐ promote** any channel into a full clone voice channel (auto-transcribed, with a matching speaker added) when you want to put words in its mouth.
 - **Merge, collapse, mute** — shift-click clips on a track and merge them into one (gaps become silence); flatten an entire lane into a single re-sliceable clip; or mute a lane in the mix without touching it.
 - **Tag library** — hot-clickable OmniVoice non-verbal cues (`[laughter]`, `[whisper]`, …) injected at the cursor in any dialogue field.
-- **Zoom, pan, follow-playhead, spacebar transport, single-step undo**, magnetic selection edges, and a vertical resize to grow the rows + waveform — it feels like an editor, not a form.
-- **Finalize** stitches the timeline to a single, loudness-matched, true-peak-limited track and saves it to history.
+- **Zoom (shift+scroll or `+`/`-` keys), middle-drag pan, follow-playhead, spacebar transport, single-step undo**, a floating dB readout while you drag gain, magnetic selection edges, and a vertical resize to grow the rows + waveform — it feels like an editor, not a form.
+- **Reset-safe Generate** — re-running a full scene generation prompts for confirmation first whenever the timeline has been hand-edited or carries uploaded channels, so a stray click can't wipe work in progress.
+- **Finalize** stitches the timeline to a single, loudness-matched, true-peak-limited track (MP3 or lossless FLAC) and saves it to history.
 
 → [Full guide](docs/adr-studio.md)
 
@@ -62,17 +64,23 @@ Reference quality makes or breaks a clone. The Voice Lab can, on the fly:
 Isolation and normalization are on by default; de-reverb is opt-in per speaker.
 
 ### Smart Script writer with hot-swappable AI providers
-Generate or refine `Speaker N:` scripts from a prompt using any OpenAI-compatible endpoint. Declare multiple providers (OpenAI, Gemini, a local LLM, …) in `.env`, switch between them in the UI, and **reload them live** without restarting the server. The scriptwriter is tuned for OmniVoice's bracketed non-verbal cues and ships with a resilient parser that salvages valid output even when a model returns truncated or malformed JSON.
+Generate or refine `Speaker N:` scripts from a prompt using any OpenAI-compatible endpoint **or Google Vertex AI**. Declare multiple providers (OpenAI, Gemini, a local LLM, Vertex, …) in `.env`, switch between them in the UI, and **reload them live** without restarting the server. The scriptwriter is tuned for OmniVoice's bracketed non-verbal cues and ships with a resilient parser that salvages valid output even when a model returns truncated or malformed JSON. See [Configuration](#configuration-optional--ai-script-writer-only) for provider setup, including Vertex AI.
 
 ### A polished audio player
 The result player renders a waveform and supports **trim**, **output gain (dB)**, **reset**, **autoplay**, and **download of the processed file** reflecting your edits — all in the browser via the Web Audio API.
 
-### Lightweight, shareable outputs
-Finalized scenes are encoded to **MP3 (192k)** instead of 150 MB WAVs — small enough to drop into a message or social post without degrading the audio you actually hear.
+### Selectable output format — shareable or lossless
+A persistent **MP3 / FLAC** toggle in the top bar switches between **MP3 (192k)** — small enough to drop into a message or social post without degrading the audio you actually hear — and **lossless FLAC**, the industry-standard master format for professional audio. The choice survives restarts and reloads.
 
 ### VRAM controls for any GPU
 - **LOD (Load-On-Demand):** load the TTS model per job in an isolated worker process and free it afterwards, so the GPU sits idle between jobs.
 - **Low VRAM Mode:** within a job, load models sequentially and free each secondary model (isolation / de-reverb) before the TTS model loads — capping peak VRAM at `max(one secondary model, TTS)` instead of the sum. Slower, but runs the full pipeline on small consumer cards.
+
+### Settings that stick
+Server-side preferences mean the toggles you live in don't reset on you. **LOD**, **Low VRAM**, **output format (MP3/FLAC)**, **auto-trim silence**, and your **track 1 template** (new speaker tracks inherit it) all persist across restarts and fresh browser sessions. Record-booth preferences — the **3-2-1 count-in** and **auto-whisper** toggles — sync between the performance modal and the Voice Clone tab and remember their state too.
+
+### Auto-trim silence
+Optional, persistent silence trimming shaves dead air (and near-silent hiss/artifacting) off the head and tail of generations, regenerations, and recorded takes — so you stop hand-trimming the gap the model and your own timing leave at the start of every line.
 
 ### History that actually restores
 Every generation stores its full state — prompt, script, single/multi-speaker mode, each speaker's configuration, and all generation parameters — so one click rebuilds the exact setup. Backwards compatible with older entries.
@@ -127,7 +135,8 @@ Have these on your PATH before you start:
   downloads a managed Python 3.10 into its own cache, without touching any
   Python already on your system.
 - **`ffmpeg`** for MP3/M4A/OGG output encoding (without it, outputs fall back to
-  WAV). [ffmpeg.org/download](https://ffmpeg.org/download.html), or
+  WAV) and for extracting audio from uploaded **video** files (`.mp4`, `.mov`, …).
+  [ffmpeg.org/download](https://ffmpeg.org/download.html), or
   `winget install Gyan.FFmpeg` / `brew install ffmpeg` / `apt install ffmpeg`.
 
 ---
@@ -179,7 +188,52 @@ Declare one AI provider per line:
 AI_PROVIDER_<ID> = Label | model | base_url (blank = official OpenAI) | api_key
 ```
 
-Comment a line out to hide that provider. After editing `.env`, click **Refresh** next to the provider picker in the UI to reload — no restart needed.
+`<ID>` is any unique name (`OPENAI`, `GEMINI`, `LOCAL`, …). Leave `base_url` blank for the official OpenAI API, or point it at any OpenAI-compatible endpoint (Gemini's OpenAI shim, a local LM Studio / Ollama / vLLM server, etc.). Comment a line out to hide that provider. After editing `.env`, click **Refresh** next to the provider picker in the UI to reload — no restart needed.
+
+### Google Vertex AI (Gemini)
+
+Some Gemini keys/projects are **Vertex-only** and can't be reached through the
+OpenAI-compatible shim. For those, declare a Vertex provider with a special
+`vertex://PROJECT/LOCATION` base URL:
+
+```
+AI_PROVIDER_VERTEX = Gemini · Vertex | gemini-2.5-flash | vertex://my-gcp-project-id/global |
+```
+
+Vertex authenticates through **Google Cloud credentials**, not an inline API
+key, so the key field is left blank. Provide credentials one of two ways:
+
+- **Application Default Credentials (recommended for local use).** Install the
+  [gcloud CLI](https://cloud.google.com/sdk/docs/install) and run, once:
+
+  ```bash
+  gcloud auth application-default login
+  ```
+
+  This opens a browser, signs you in, and writes ADC to your machine. The
+  account must have the **Vertex AI User** role on the target project. The
+  Manager picks these credentials up automatically.
+
+- **Service account.** Put the path to a service-account JSON in the provider's
+  fourth field (or set `GOOGLE_APPLICATION_CREDENTIALS`):
+
+  ```
+  AI_PROVIDER_VERTEX = Gemini · Vertex | gemini-2.5-flash | vertex://my-gcp-project-id/global | /abs/path/to/service-account.json
+  ```
+
+Replace `my-gcp-project-id` with your Google Cloud project ID and pick the
+region your models are served from (e.g. `global`, `us-central1`). A Vertex
+provider also requires the `google-genai` package, which `uv sync` installs.
+
+Alternatively, the Manager honors the standard google-genai environment
+variables — set these and a `vertex` provider is auto-registered:
+
+```
+GENAI_BACKEND=vertex            # or GOOGLE_GENAI_USE_VERTEXAI=true
+GOOGLE_CLOUD_PROJECT=my-gcp-project-id
+GOOGLE_CLOUD_LOCATION=global
+VERTEX_MODEL=gemini-2.5-flash
+```
 
 ---
 
@@ -226,7 +280,7 @@ LOD and Low VRAM mode can also be toggled live from the top bar in the UI.
 
 ## Using the UI
 
-- **🎬 ADR Studio** (default tab) — write or AI-generate a script, configure speakers (clone / design / auto), set generation and loudness options, and generate straight into the timeline: regenerate / move / trim / speed / gain individual clips, split / duplicate / delete, insert or remove empty time, layer overlapping dialogue, auto-slice, Vocal Inpaint, record dialogue or vocal performances straight into clips, add uploaded audio channels and promote them to voices, then **Finalize** to commit and save. Single-step **Undo** covers any edit. **Sync dialogue from Editor** pulls the timeline's current lines back into the script box (in timeline order) without re-running Whisper.
+- **🎬 ADR Studio** (default tab) — write or AI-generate a script, configure speakers (clone / design / auto), set generation and loudness options, and generate straight into the timeline: regenerate / move / trim / speed / gain individual clips, split / duplicate / delete, slice by sentence or by hand (Ctrl+click), insert or remove empty time, layer overlapping dialogue, apply per-segment vocal transforms, Pin Current Voice to Segment, record dialogue or vocal performances straight into clips, add uploaded audio (and video) channels and promote them to voices, then **Finalize** to commit and save. Single-step **Undo** covers any edit. **Sync dialogue from Editor** pulls the timeline's current lines back into the script box (in timeline order) without re-running Whisper.
 - **🎤 Voice Clone** — single-voice takes from text or a recorded performance (inline capture panel), with the same AI scriptwriter.
 - **Voice Lab** — upload or pick a reference, manually trim it, preview isolation / de-reverb / normalization, and save (or overwrite) the cleaned voice in your library.
 - **Tag library** — a hot-clickable list of OmniVoice's supported bracket cues that inject at your cursor.
@@ -241,9 +295,10 @@ All endpoints are JSON over HTTP. Selected routes:
 
 | Method & Path | Purpose |
 | --- | --- |
-| `GET /api/system/info` | Model, GPU, AI-provider, LOD / Low-VRAM status |
-| `POST /api/system/lod` · `POST /api/system/low-vram` | Toggle VRAM modes |
-| `GET /api/script/providers` · `POST /api/script/reload` | List / hot-reload AI providers |
+| `GET /api/system/info` | Model, GPU, AI-provider, LOD / Low-VRAM / output-format / trim-silence status |
+| `POST /api/system/lod` · `POST /api/system/low-vram` | Toggle VRAM modes (persisted) |
+| `POST /api/system/output-format` · `POST /api/system/trim-silence` | Persist output format (mp3 / flac) and auto-trim silence |
+| `GET /api/script/providers` · `POST /api/script/reload` | List / hot-reload AI providers (OpenAI-compatible + Vertex) |
 | `POST /api/script` | Generate or refine a `Speaker N:` script from a prompt |
 | `POST /api/generate` | Synthesize from a script (queued; returns a job id) |
 | `POST /api/generate-perform` | One-shot performance transfer: upload a take + params, render in a target voice |
@@ -260,7 +315,8 @@ All endpoints are JSON over HTTP. Selected routes:
 | `POST /api/multitrack/generate` · `POST /api/multitrack/empty` | Generate a scene as clips, or start a blank timeline |
 | `POST /api/multitrack/{sid}/speaker` · `POST·DELETE …/speaker/{pos}` | Add / update / remove a speaker track |
 | `POST …/segment/{i}/regenerate` · `…/edit` · `…/text` | Regenerate, move/trim/speed/gain, or align a clip's text |
-| `POST …/segment/{i}/split` · `…/duplicate` · `…/delete` · `…/auto-slice` · `…/inpaint` · `…/inpaint-preserve` | Clip operations + Vocal Inpaint (and non-vocal bed) |
+| `POST …/segment/{i}/split` · `…/duplicate` · `…/delete` · `…/auto-slice` · `…/inpaint` · `…/inpaint-preserve` | Clip operations + Pin Current Voice to Segment (and non-vocal bed) |
+| `POST …/segment/{i}/transform` | Bake a vocal transform (pitch / formant / telephone / …) onto a clip (reversible) |
 | `POST …/delete-space` · `…/add-space` · `…/reflow` · `…/insert` | Timeline structure + global speed/gap |
 | `POST …/upload-channel` · `…/speaker/{pos}/promote` · `…/speaker/{pos}/regenerate` | Audio channels, promote-to-voice, re-cast a channel (honors per-clip performances) |
 | `POST·DELETE …/segment/{i}/performance` | Attach / detach a vocal performance (multipart take + mode/strength/gain/speed) |

@@ -16,7 +16,8 @@ VibeVoice setup but rebuilt as a modern, dynamic web app with a clean API.
   trim silence, and boost/level loudness, then save clean references to your
   library.
 - **Smart Script (AI)** — turn a freeform idea into a speaker-tagged dialogue +
-  title via an OpenAI-compatible API (Gemini by default, from `.env`).
+  title via any OpenAI-compatible API **or Google Vertex AI**; declare multiple
+  providers in `.env` and hot-swap them in the UI.
 - **Persistent history** of prompts, scripts and generations (JSON on disk).
 - **LOD (Load-On-Demand) mode** — the model runs in a child process that is
   killed after each job to free all VRAM (mirrors VibeVoice `--lod`).
@@ -29,7 +30,7 @@ The environment is managed with `uv`. From the repo root:
 
 ```bash
 uv sync                 # install OmniVoice + manager deps
-cp ../VibeVoice/.env .  # (already done) provides the Gemini SCRIPT_AI_* key
+cp .env_sample .env     # optional: configure AI script-writer providers
 ```
 
 The web UI build needs Node:
@@ -54,9 +55,14 @@ Then open <http://localhost:8200>.
 |------|---------|
 | `--lod` | Load model on demand; free VRAM after each job |
 | `--eager` | Load the model at startup (persistent mode) |
-| `--no-asr` | Skip Whisper ASR (reference-text auto-transcription) |
+| `--preload-asr` | Preload Whisper (otherwise it loads on first transcription) |
 | `--device auto` | Select device (`auto` picks CUDA > MPS > CPU; or pin `cuda:0` / `mps` / `cpu`) |
 | `--model k2-fsa/OmniVoice` | Model id or local path |
+| `--ssl` | Serve self-signed HTTPS (required for mic capture from other machines) |
+
+The `run_manager.sh` / `run_manager.bat` launchers also accept `--rebuild`
+(force a fresh web UI build) and `--forceup` (kill a stale server on the port);
+all other flags pass straight through to the server.
 
 ### UI dev mode (hot reload)
 
@@ -67,14 +73,35 @@ cd web && npm run dev                      # Vite on :5173, proxies /api
 
 ## Configuration (`.env`)
 
-The script-writer reads the same keys as VibeVoice:
+The AI script-writer is **optional** — every other feature works without it.
+Declare one provider per line; comment a line out to hide it. After editing
+`.env`, click **Refresh** next to the provider picker in the UI (no restart):
 
 ```
-SCRIPT_AI_URL=...        # OpenAI-compatible base url (Gemini shim by default)
-SCRIPT_AI_MODEL=...      # e.g. gemini-2.5-flash
-SCRIPT_AI_API_KEY=...    # provider key
-# Fallbacks: OPENAI_API_KEY / OPENAI_MODEL
+AI_PROVIDER_<ID> = Label | model | base_url (blank = official OpenAI) | api_key
 ```
+
+```ini
+AI_PROVIDER_OPENAI = OpenAI        | gpt-4o-mini       |                                   | sk-...
+AI_PROVIDER_GEMINI = Gemini (OAI)  | gemini-2.5-flash  | https://generativelanguage.googleapis.com/v1beta/openai/ | AI...
+AI_PROVIDER_LOCAL  = Local LLM     | llama-3.1-8b      | http://localhost:1234/v1          | not-needed
+```
+
+**Google Vertex AI** (for Vertex-only Gemini access) uses a `vertex://` base URL
+and Google Cloud credentials instead of an inline key:
+
+```ini
+AI_PROVIDER_VERTEX = Gemini · Vertex | gemini-2.5-flash | vertex://my-gcp-project-id/global |
+```
+
+Authenticate with Application Default Credentials — install the
+[gcloud CLI](https://cloud.google.com/sdk/docs/install) and run
+`gcloud auth application-default login` once (the account needs the **Vertex AI
+User** role) — or pass a service-account JSON path in the fourth field. The
+Manager also auto-registers a Vertex provider from the standard
+`GENAI_BACKEND=vertex` / `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION`
+environment variables. See the [root README](../README.md#google-vertex-ai-gemini)
+for the full walkthrough.
 
 Optional: `OMNIVOICE_MODELS="id|label,id2|label2"` to add dropdown models,
 `OMNIVOICE_MELBAND_CKPT=/path` to point at an existing isolation checkpoint.
@@ -143,7 +170,7 @@ manager/
   service.py         payload building + output saving
   voices.py          voice library scanning/saving
   audio_utils.py     load / isolate-glue / RMS boost / trim / save
-  scripts_ai.py      smart-script via OpenAI-compatible API (Gemini)
+  scripts_ai.py      smart-script via OpenAI-compatible APIs + Google Vertex AI
   history.py         persistent JSON history
   jobs.py            background job manager (progress polling)
   vocal_isolation/   ported Mel-Band-Roformer isolator

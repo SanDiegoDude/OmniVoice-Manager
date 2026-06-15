@@ -14,7 +14,7 @@ Classic mode. Pick a voice (clone / design / auto), write or AI-generate the tex
 
 The inline **vocal performance capture** panel turns the tab into a transfer booth:
 
-1. **Record** (or upload) your read of the line — Auto-Whisper transcribes it into the text box, and Isolate/Dereverb cleanup runs by default.
+1. **Record** (or upload) your read of the line — Auto-Whisper transcribes it into the text box, and Isolate/Dereverb cleanup runs by default. An optional **3-2-1 count-in**, the **auto-whisper** toggle, **Cancel**/**Esc** to discard, and **Space** to stop are all here too (settings sync with the performance modal).
 2. Pick **Character swap** or **Voice swap** and a strength (see [Performance Transfer](performance-transfer.md) for what they mean).
 3. **Generate** — the take is uploaded with the request and the clone renders *your performance* in the target voice, one shot, no session needed.
 
