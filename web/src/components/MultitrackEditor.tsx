@@ -134,7 +134,7 @@ export function MultitrackEditor({
   onTranscribe: (index: number, draft?: { trim_start_s?: number; trim_end_s?: number; speed?: number }) => Promise<string | null | undefined>
   onSetChannel: (pos: string, fields: { name?: string | null; gain_db?: number }) => void
   onRegenChannel: (pos: string) => void
-  onUploadChannel: (file: File, name: string, startS?: number) => void
+  onUploadChannel: (file: File, name: string, startS?: number) => void | Promise<void>
   onAutoSlice: (index: number) => Promise<void>
   onSetInpaint: (index: number, enabled: boolean) => Promise<void>
   onSetPreserveNonvocal: (index: number, enabled: boolean) => Promise<void>
@@ -178,6 +178,8 @@ export function MultitrackEditor({
   trimSilence?: boolean
 }) {
   const [pxPerSec, setPxPerSec] = useState(90)
+  // Floating dB readout that tracks the cursor while dragging a clip's gain line.
+  const [gainDrag, setGainDrag] = useState<{ x: number; y: number; gain: number } | null>(null)
   const [vScale, setVScale] = useState(1)
   const rowH = Math.round(ROW_H * vScale)
   const vDragRef = useRef<{ y: number; scale: number } | null>(null)
@@ -298,8 +300,8 @@ export function MultitrackEditor({
     return { atS: s.startS + frac * s.dur, localX: frac * s.width }
   }
   const startSlice = (e: React.MouseEvent, index: number, startS: number, dur: number) => {
-    // Left button (when armed) or middle button (direct slice gesture).
-    if (e.button !== 0 && e.button !== 1) return
+    // Left button only — armed via the 🪒 icon, or a direct Ctrl/Cmd+click.
+    if (e.button !== 0) return
     e.stopPropagation()
     e.preventDefault()
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -505,8 +507,11 @@ export function MultitrackEditor({
         updateTool(p.side === 'in' ? { index: p.index, fadeIn: r } : { index: p.index, fadeOut: r })
       } else if (p.kind === 'seg-gain') {
         // Vertical dB line: full row height spans ±18 dB around the leveled baseline.
-        const g = Math.max(-18, Math.min(18, p.orig - dy * (36 / p.pxRange)))
-        updateTool({ index: p.index, gain: Math.round(g * 10) / 10 })
+        const g = Math.round(Math.max(-18, Math.min(18, p.orig - dy * (36 / p.pxRange))) * 10) / 10
+        updateTool({ index: p.index, gain: g })
+        // Float the dB readout next to the cursor — the segment's own tag can be
+        // off-screen on long clips, so don't make the user eyeball line height.
+        setGainDrag({ x: e.clientX, y: e.clientY, gain: g })
       } else if (p.kind === 'ghost') {
         setInsert((i) => (i ? { ...i, start_s: snap(p.origStart + dt) } : i))
       } else if (p.kind === 'select') {
@@ -564,6 +569,7 @@ export function MultitrackEditor({
       activeRef.current = false
       setDrag(null)
       updateTool(null)
+      setGainDrag(null)
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
@@ -723,21 +729,51 @@ export function MultitrackEditor({
     pendingRef.current = { kind: 'select', origStart: magnet(Math.max(0, timeFromClientX(e.clientX))), startX: e.clientX }
   }
 
+  // Zoom by a factor, holding the time at `viewportX` (px from the scroll
+  // viewport's left edge) fixed under the anchor. Shared by shift+scroll (anchor
+  // = cursor) and the +/− keys (anchor = viewport center).
+  const zoomAt = useCallback(
+    (factor: number, viewportX: number) => {
+      const scrollEl = scrollRef.current
+      if (!scrollEl) return
+      const timeAtAnchor = (scrollEl.scrollLeft + viewportX) / pxPerSec
+      const next = clampPps(pxPerSec * factor)
+      if (next === pxPerSec) return
+      setPxPerSec(next)
+      requestAnimationFrame(() => {
+        if (scrollRef.current) scrollRef.current.scrollLeft = Math.max(0, timeAtAnchor * next - viewportX)
+      })
+    },
+    [pxPerSec],
+  )
+
   // Shift + mouse wheel zooms, keeping the time under the cursor fixed.
   const onWheelZoom = (e: React.WheelEvent) => {
     if (!e.shiftKey) return
     e.preventDefault()
     const scrollEl = scrollRef.current
     if (!scrollEl) return
-    const viewportX = e.clientX - scrollEl.getBoundingClientRect().left
-    const timeAtCursor = (scrollEl.scrollLeft + viewportX) / pxPerSec
-    const next = clampPps(pxPerSec * (e.deltaY < 0 ? 1.18 : 1 / 1.18))
-    if (next === pxPerSec) return
-    setPxPerSec(next)
-    requestAnimationFrame(() => {
-      if (scrollRef.current) scrollRef.current.scrollLeft = Math.max(0, timeAtCursor * next - viewportX)
-    })
+    zoomAt(e.deltaY < 0 ? 1.18 : 1 / 1.18, e.clientX - scrollEl.getBoundingClientRect().left)
   }
+
+  // +/= zoom in, -/_ zoom out (main row and numpad), centered on the timeline's
+  // visible middle. Ctrl/Cmd held → leave it to the browser's own page zoom.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const el = e.target as HTMLElement
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)) return
+      if (document.querySelector('.modal-overlay, .modal-backdrop')) return
+      const zoomIn = e.key === '+' || e.key === '=' || e.code === 'NumpadAdd'
+      const zoomOut = e.key === '-' || e.key === '_' || e.code === 'NumpadSubtract'
+      if (!zoomIn && !zoomOut) return
+      e.preventDefault()
+      const scrollEl = scrollRef.current
+      zoomAt(zoomIn ? 1.18 : 1 / 1.18, scrollEl ? scrollEl.clientWidth / 2 : 0)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [zoomAt])
 
   const openTrim = (seg: MultitrackSegment) => {
     setTrimIndex(seg.index)
@@ -835,6 +871,14 @@ export function MultitrackEditor({
   const working = !!busy || regenIndex != null || finalizing
   return (
     <div className={`mtk${working ? ' working' : ''}`}>
+      {gainDrag && (
+        <div
+          className="mtk-gain-float"
+          style={{ position: 'fixed', left: gainDrag.x + 16, top: gainDrag.y - 10, zIndex: 1000, pointerEvents: 'none' }}
+        >
+          {gainDrag.gain >= 0 ? '+' : ''}{gainDrag.gain.toFixed(1)} dB
+        </div>
+      )}
       <div className="flex-between" style={{ marginBottom: 10 }}>
         <div>
           <div className="section-title" style={{ margin: 0 }}>
@@ -848,7 +892,7 @@ export function MultitrackEditor({
           <Toggle checked={follow} onChange={setFollow} label="Follow" />
           <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             Zoom
-            <input type="range" min={MIN_PPS} max={MAX_PPS} step={2} value={pxPerSec} onChange={(e) => setPxPerSec(clampPps(parseInt(e.target.value, 10)))} title="Shift + scroll over the timeline to zoom" />
+            <input type="range" min={MIN_PPS} max={MAX_PPS} step={2} value={pxPerSec} onChange={(e) => setPxPerSec(clampPps(parseInt(e.target.value, 10)))} title="Zoom — shift+scroll over the timeline, or the +/− keys" />
           </label>
           {selValid.length > 0 && (
             <div className="row" style={{ gap: 6, alignItems: 'center' }}>
@@ -868,20 +912,24 @@ export function MultitrackEditor({
           <button className="btn sm ghost" onClick={onUndo} disabled={busy || !session.can_undo} title="Undo the last action (single step back — regenerate, move, trim, add, delete, etc.)">
             ↶ Undo
           </button>
-          <button className="btn sm ghost" onClick={() => uploadInputRef.current?.click()} disabled={busy} title="Upload an audio file as a new layered channel (soundtrack / SFX)">
+          <button className="btn sm ghost" onClick={() => uploadInputRef.current?.click()} disabled={busy} title="Upload audio OR video files as new layered channels (soundtrack / SFX) — pick several at once; each lands on its own track. Video audio is stripped automatically.">
             ＋🎵 Audio channel
           </button>
           <input
             ref={uploadInputRef}
             type="file"
-            accept="audio/*"
+            accept="audio/*,video/*"
+            multiple
             style={{ display: 'none' }}
-            onChange={(e) => {
-              const f = e.target.files?.[0]
-              // Drop the clip at the playhead so small foley/SFX land where you're
-              // working, not at t=0 to be fished back every time.
-              if (f) onUploadChannel(f, f.name.replace(/\.[^.]+$/, ''), Math.max(0, head.cur))
+            onChange={async (e) => {
+              const files = Array.from(e.target.files ?? [])
               e.target.value = ''
+              // Each file lands as its own channel at the playhead (small foley/SFX
+              // where you're working, not at t=0). Await sequentially so concurrent
+              // session writes don't race.
+              for (const f of files) {
+                await onUploadChannel(f, f.name.replace(/\.[^.]+$/, ''), Math.max(0, head.cur))
+              }
             }}
           />
           <button className="btn primary" onClick={onFinalize} disabled={busy || finalizing}>
@@ -979,12 +1027,7 @@ export function MultitrackEditor({
             ref={contentRef}
             style={{ width: laneWidth }}
             onClick={seekFromClick}
-            onMouseDown={(e) => {
-              // Swallow middle-click anywhere on the lanes so the browser's
-              // pan/autoscroll bubble never appears in the timeline.
-              if (e.button === 1) { e.preventDefault(); return }
-              startContentDrag(e)
-            }}
+            onMouseDown={startContentDrag}
           >
             <div className="mtk-ruler" style={{ height: RULER_H }}>
               {ruler.map((t) => (
@@ -1064,12 +1107,18 @@ export function MultitrackEditor({
                         key={seg.index}
                         className={`mtk-seg${isRegen ? ' regen' : ''}${dirty ? ' dirty' : ''}${isTrimming ? ' trimming' : ''}${seg.inpaint ? ' inpaint' : ''}${seg.perform ? ' perform' : ''}${seg.perform?.dirty ? ' perform-dirty' : ''}${selSegs.has(seg.index) ? ' selected' : ''}${drag && drag.index === seg.index ? ' dragging' : ''}${lifting ? ' lifting' : ''}${sliceArmed === seg.index ? ' slice-armed' : ''}`}
                         style={{ left, width, background: `hsl(${hue} 45% 22%)`, borderColor: dirty ? 'var(--warn)' : `hsl(${hue} 60% 45%)` }}
-                        title={sliceArmed === seg.index ? 'Press on the clip and release to slice here (Esc to cancel)' : `${text}\n(drag to move · pull up/down to another track)`}
+                        title={sliceArmed === seg.index ? 'Press on the clip and release to slice here (Esc to cancel)' : `${text}\n(drag to move · pull up/down to another track · ctrl+click to slice)`}
                         onMouseDown={(e) => {
-                          // Middle-click = jump straight into a manual slice gesture
-                          // (press-move-release). startSlice preventDefaults, which
-                          // also suppresses the browser's middle-click autoscroll.
-                          if (e.button === 1) { setSliceArmed(seg.index); startSlice(e, seg.index, live, liveDur); return }
+                          // Ctrl/Cmd+click = jump straight into a manual slice gesture
+                          // (press-move-release). startSlice preventDefaults/stops so
+                          // it won't also seek or start a segment drag.
+                          if (e.button === 0 && (e.ctrlKey || e.metaKey)) {
+                            setSliceArmed(seg.index)
+                            startSlice(e, seg.index, live, liveDur)
+                            return
+                          }
+                          // Middle-click bubbles to the lanes for canvas-style pan.
+                          if (e.button === 1) return
                           if (sliceArmed === seg.index) startSlice(e, seg.index, live, liveDur)
                           else startSegDrag(e, seg)
                         }}
@@ -1128,7 +1177,7 @@ export function MultitrackEditor({
                             <button
                               className={`mtk-ic${sliceArmed === seg.index ? ' on' : ''}`}
                               onClick={() => { setSliceArmed((v) => (v === seg.index ? null : seg.index)); setSliceX(null) }}
-                              title={sliceArmed === seg.index ? 'Slice armed — press on the clip & release to cut (Esc to cancel)' : 'Slice into two clips'}
+                              title={sliceArmed === seg.index ? 'Slice armed — press on the clip & release to cut (Esc to cancel)' : 'Slice into two clips (or ctrl+click the clip)'}
                             >
                               🪒
                             </button>
@@ -1588,10 +1637,10 @@ export function MultitrackEditor({
                   <button
                     className={`btn sm${seg.inpaint ? ' on' : ''}`}
                     disabled={inpainting != null}
-                    title="Vocal Inpaint (per-segment ADR): lock this clip's own audio as the voice, then regenerate the line in that same voice. Channel vocal-processing still applies."
+                    title="Pin this clip's own current audio as the voice reference, then regenerate the line to speak it in that same voice (per-segment ADR). Channel vocal-processing still applies."
                     onClick={async () => { const i = seg.index; const en = !seg.inpaint; setSegMenu(null); setInpainting(i); try { await onSetInpaint(i, en) } finally { setInpainting(null) } }}
                   >
-                    {inpainting === seg.index ? '… ' : seg.inpaint ? '☑ ' : '☐ '}Vocal Inpaint{seg.inpaint ? ' (locked)' : ''}
+                    {inpainting === seg.index ? '… ' : seg.inpaint ? '☑ ' : '☐ '}Pin Current Voice to Segment{seg.inpaint ? ' (pinned)' : ''}
                   </button>
                   {seg.inpaint && (
                     <button
@@ -1769,7 +1818,8 @@ export function MultitrackEditor({
         drag a clip's <strong>edges</strong> to trim, its <strong>top corners</strong> to fade in/out, the{' '}
         <strong>center line</strong> up/down for clip gain · drag the <strong>⠿ grip</strong> on a track pin to
         reorder tracks · <strong>shift+click</strong> clips to select &amp; <strong>Merge</strong> them ·
-        <strong> shift+scroll</strong> to zoom · <strong>middle-drag</strong> to pan · ⋯ for all
+        <strong> shift+scroll</strong> or <strong>+/−</strong> to zoom · <strong>middle-drag</strong> to pan ·
+        <strong> ctrl+click</strong> a clip to slice · ⋯ for all
         actions (play / regenerate / edit / trim / Whisper-align / download / split / duplicate / delete) · double-click an
         empty spot to <strong>add a line</strong>, <strong>add empty playtime</strong> or <strong>close a gap</strong> · drag
         across empty space to <strong>delete playtime</strong>. On a track pin: 🔊 mute, ⬓ collapse, ✕ delete. Spacebar
@@ -1983,8 +2033,13 @@ function SegWave({
       return
     }
     let alive = true
+    // Resolution scales with clip length: ~150 peaks/sec (min 1200, capped at
+    // 8000) so multi-minute clips don't get the blocky, stair-stepped "stretched"
+    // look that a fixed low peak count gives.
+    const dur = seg.raw_duration_s || seg.duration_s || 4
+    const want = Math.min(8000, Math.max(1200, Math.round(dur * 150)))
     api
-      .segmentPeaks(sid, seg.index)
+      .segmentPeaks(sid, seg.index, want)
       .then((r) => {
         if (!r.peaks.length || r.raw_duration_s <= 0) return
         const d = { peaks: r.peaks, rawDur: r.raw_duration_s }
@@ -1996,15 +2051,17 @@ function SegWave({
     return () => {
       alive = false
     }
-  }, [key, sid, seg.index])
+  }, [key, sid, seg.index, seg.raw_duration_s, seg.duration_s])
 
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas || !data) return
-    // Cap backing-store width: a 20s clip at max zoom would otherwise allocate a
-    // multi-MB canvas per segment. CSS stretches it; it's background texture.
-    const w = Math.max(1, Math.min(2048, Math.round(width)))
-    const h = Math.max(1, Math.round(height))
+    // Render the backing store at (device-pixel) the clip's on-screen width so the
+    // waveform stays crisp instead of a low-res canvas stretched by CSS — capped
+    // so an extreme zoom on a long clip doesn't allocate a huge per-segment canvas.
+    const dpr = Math.min(2, window.devicePixelRatio || 1)
+    const w = Math.max(1, Math.min(4096, Math.round(width * dpr)))
+    const h = Math.max(1, Math.round(height * dpr))
     canvas.width = w
     canvas.height = h
     const ctx = canvas.getContext('2d')
@@ -2019,7 +2076,7 @@ function SegWave({
     const audDur = Math.max(0.01, (te - trimStart) / (seg.speed || 1))
     const fiFrac = Math.max(0, Math.min(1, fadeIn / audDur))
     const foFrac = Math.max(0, Math.min(1, fadeOut / audDur))
-    const bw = 2
+    const bw = Math.max(1, Math.round(1.5 * dpr))
     const bars = Math.max(1, Math.floor(w / bw))
     // Ice-white reads against every track hue (clip bodies are dark ~22% lightness).
     ctx.fillStyle = 'rgba(236, 245, 255, 0.62)'

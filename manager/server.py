@@ -23,9 +23,11 @@ from fastapi.staticfiles import StaticFiles
 
 from . import history, prefs, scripts_ai, service, sessions, voices
 from .audio_utils import (
+    VIDEO_EXTS,
     apply_gain_db,
     duration_seconds,
     load_audio,
+    load_media_audio,
     media_type_for,
     normalize_rms,
     peak_normalize,
@@ -288,6 +290,11 @@ async def upload_voice(file: UploadFile = File(...)):
         audio = load_audio(dest)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(400, f"Could not read audio: {e}")
+    # Video upload: the browser player can't decode a raw container, so persist
+    # the extracted audio as a WAV and serve that instead of the original file.
+    if suffix.lower() in VIDEO_EXTS:
+        upload_id = f"{uuid.uuid4().hex}.wav"
+        save_wav(TMP_DIR / upload_id, audio)
     return {
         "upload_id": upload_id,
         "duration_s": duration_seconds(audio),
@@ -1181,7 +1188,7 @@ def multitrack_track_order(sid: str, req: TrackOrderRequest):
 
 
 @app.get("/api/multitrack/{sid}/segment/{index}/peaks")
-def multitrack_segment_peaks(sid: str, index: int, n: int = 800):
+def multitrack_segment_peaks(sid: str, index: int, n: int = 2000):
     """Amplitude bins over a segment's full raw audio (for in-clip waveforms)."""
     try:
         return sessions.segment_peaks(sid, index, n)
@@ -1235,14 +1242,12 @@ def multitrack_channel_regen(sid: str, pos: str):
 async def multitrack_upload_channel(
     sid: str, file: UploadFile = File(...), name: str = Form(""), start_s: float = Form(0.0)
 ):
-    """Add an uploaded audio file as a new layered channel (soundtrack / SFX)."""
-    import librosa
-
+    """Add an uploaded audio/video file as a new layered channel (soundtrack / SFX)."""
     data = await file.read()
     tmp = TMP_DIR / f"upload_{uuid.uuid4().hex}_{file.filename or 'audio'}"
     tmp.write_bytes(data)
     try:
-        audio, in_sr = librosa.load(str(tmp), sr=None, mono=True)
+        audio, in_sr = load_media_audio(tmp, sr=None, mono=True)
     except Exception as e:  # noqa: BLE001
         tmp.unlink(missing_ok=True)
         raise HTTPException(400, f"Could not read audio: {e}")

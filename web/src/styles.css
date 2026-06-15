@@ -429,6 +429,12 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
   position: absolute; right: 2px; top: -14px; font-size: 9px; font-variant-numeric: tabular-nums;
   color: var(--warn); background: rgba(12, 16, 28, 0.85); padding: 0 4px; border-radius: 3px; pointer-events: none;
 }
+/* Floating dB readout that follows the cursor while dragging a clip gain line. */
+.mtk-gain-float {
+  font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums;
+  color: var(--warn); background: rgba(12, 16, 28, 0.92); border: 1px solid var(--warn);
+  padding: 2px 7px; border-radius: 5px; white-space: nowrap; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
 
 /* A clip lifted off its lane (mid drag to another track) dims in place… */
 .mtk-seg.lifting { opacity: 0.35; }

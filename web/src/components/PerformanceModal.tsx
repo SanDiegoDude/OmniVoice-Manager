@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MultitrackSegment, VocalTransform } from '../api'
 import { api, DEFAULT_TRANSFORM } from '../api'
 import { audioBufferToWavMulti, bakeBlob, blobToWav, sliceBlobToWav } from '../audio-encode'
+import { startCountIn, useRecordPrefs, setRecordPref, type CountIn } from '../recordUtils'
 import { AudioPlayer, type AudioPlayerHandle } from './AudioPlayer'
 import { VocalTransforms } from './VocalTransforms'
 import SaveVoiceModal from './SaveVoiceModal'
@@ -111,9 +112,18 @@ export default function PerformanceModal({
   // an untouched edit reuses the already-cleaned take with no double-processing.
   const [cleanIsolate, setCleanIsolate] = useState(existing ? !!existing.clean_isolate : true)
   const [cleanDereverb, setCleanDereverb] = useState(existing ? !!existing.clean_dereverb : true)
-  const [autoWhisper, setAutoWhisper] = useState(true)
-  const autoWhisperRef = useRef(true)
-  autoWhisperRef.current = autoWhisper
+  // Count-in + auto-Whisper are shared, persistent prefs (synced with the Voice
+  // Clone tab's capture panel) so they survive re-opening the modal.
+  const prefs = useRecordPrefs()
+  // Mirror into a ref so the MediaRecorder onstop closure reads the live value.
+  const autoWhisperRef = useRef(prefs.autoWhisper)
+  useEffect(() => {
+    autoWhisperRef.current = prefs.autoWhisper
+  }, [prefs.autoWhisper])
+  // 3·2·1 count-in (null = idle, 3..1 = counting, 0 = the "go" instant).
+  const [countdown, setCountdown] = useState<number | null>(null)
+  const countInRef = useRef<CountIn | null>(null)
+  const cancelledRef = useRef(false)
   const [processing, setProcessing] = useState(false)
   const [busy, setBusy] = useState<'whisper' | 'save' | 'render' | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -179,6 +189,7 @@ export default function PerformanceModal({
     () => () => {
       urlsRef.current.forEach((u) => URL.revokeObjectURL(u))
       if (timerRef.current) window.clearInterval(timerRef.current)
+      countInRef.current?.cancel()
       recRef.current?.stream.getTracks().forEach((t) => t.stop())
       abCtxRef.current?.close().catch(() => {})
     },
@@ -446,7 +457,7 @@ export default function PerformanceModal({
     if (base) await applyCleanup(base, iso, der)
   }
 
-  const startRecord = async () => {
+  const beginRecording = async () => {
     setError(null)
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -457,11 +468,17 @@ export default function PerformanceModal({
       })
       const rec = new MediaRecorder(stream)
       chunksRef.current = []
+      cancelledRef.current = false
       rec.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data)
       }
       rec.onstop = () => {
         stream.getTracks().forEach((t) => t.stop())
+        // Cancelled takes are discarded — never adopt or auto-Whisper a goof.
+        if (cancelledRef.current) {
+          cancelledRef.current = false
+          return
+        }
         void adoptBlob(new Blob(chunksRef.current, { type: rec.mimeType || 'audio/webm' }), true)
       }
       recRef.current = rec
@@ -474,11 +491,47 @@ export default function PerformanceModal({
     }
   }
 
+  const startRecord = async () => {
+    if (recording || countdown !== null) return
+    setError(null)
+    if (prefs.countIn) {
+      const { promise, handle } = startCountIn(setCountdown)
+      countInRef.current = handle
+      try {
+        await promise
+      } catch {
+        return // cancelled during count-in
+      } finally {
+        countInRef.current = null
+        setCountdown(null)
+      }
+    }
+    await beginRecording()
+  }
+
   const stopRecord = () => {
     if (timerRef.current) window.clearInterval(timerRef.current)
     timerRef.current = null
     recRef.current?.stop()
     recRef.current = null
+    setRecording(false)
+  }
+
+  // Cancel: abort a pending count-in, or stop + DISCARD an in-progress take.
+  const cancelRecord = () => {
+    if (countInRef.current) {
+      countInRef.current.cancel()
+      countInRef.current = null
+      setCountdown(null)
+      return
+    }
+    if (timerRef.current) window.clearInterval(timerRef.current)
+    timerRef.current = null
+    if (recRef.current) {
+      cancelledRef.current = true
+      recRef.current.stop()
+      recRef.current = null
+    }
     setRecording(false)
   }
 
@@ -777,8 +830,25 @@ export default function PerformanceModal({
           🎙 {seg ? `${capture ? 'Vocal performance' : 'Dialogue'} — clip ${seg.index}` : draft ? `Record dialog — speaker ${draft.speakerId} @ ${draft.startS.toFixed(1)}s` : 'Record dialog'}
         </span>
       }
-      onClose={onClose}
-      onSpace={() => (outPlayerRef.current ?? takePlayerRef.current)?.toggle()}
+      onClose={() => {
+        // Esc (and the ✕) cancel an in-flight count-in / recording first, so a
+        // misfire doesn't also tear down the modal and its unsaved work.
+        if (countdown !== null || recording) {
+          cancelRecord()
+          return
+        }
+        onClose()
+      }}
+      onSpace={() => {
+        // Space stops recording (like the Stop button) instead of toggling a
+        // player; while idle it drives the output/take player as before.
+        if (recording) {
+          stopRecord()
+          return
+        }
+        if (countdown !== null) return
+        ;(outPlayerRef.current ?? takePlayerRef.current)?.toggle()
+      }}
       actions={
         <>
           <button
@@ -852,17 +922,32 @@ export default function PerformanceModal({
 
       {/* Source: record / upload / re-record */}
       <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        {withMic && micSupported && !recording && (
+        {withMic && micSupported && !recording && countdown === null && (
           <button className="btn sm" onClick={startRecord}>
             {hasTake ? '🔁 Re-record' : '🔴 Record'}
           </button>
         )}
-        {recording && (
-          <button className="btn sm bad" onClick={stopRecord}>
-            ⏹ Stop · {recElapsed.toFixed(1)}s
-          </button>
+        {countdown !== null && (
+          <>
+            <button className="btn sm" disabled style={{ minWidth: 120 }}>
+              {countdown > 0 ? `Recording in ${countdown}…` : '● Go!'}
+            </button>
+            <button className="btn sm ghost" onClick={cancelRecord} title="Cancel the count-in (Esc)">
+              ✕ Cancel
+            </button>
+          </>
         )}
-        {!recording && (
+        {recording && (
+          <>
+            <button className="btn sm bad" onClick={stopRecord} title="Stop & keep the take (Space)">
+              ⏹ Stop · {recElapsed.toFixed(1)}s
+            </button>
+            <button className="btn sm ghost" onClick={cancelRecord} title="Discard this take (Esc)">
+              ✕ Cancel
+            </button>
+          </>
+        )}
+        {!recording && countdown === null && (
           <label className="btn sm" style={{ cursor: 'pointer' }}>
             📁 {hasTake ? 'Replace from file' : 'Upload audio'}
             <input
@@ -877,13 +962,23 @@ export default function PerformanceModal({
           </label>
         )}
         {recording && <span className="rec-dot" aria-label="recording" />}
-        {!recording && (
+        {withMic && !recording && countdown === null && (
+          <label
+            className="hint"
+            style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}
+            title="Play a 3·2·1 beep count-in before recording starts, so you can get set"
+          >
+            <input type="checkbox" checked={prefs.countIn} onChange={(e) => setRecordPref('countIn', e.target.checked)} />
+            Count-in
+          </label>
+        )}
+        {!recording && countdown === null && (
           <label
             className="hint"
             style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}
             title="Transcribe automatically when a recording stops (uncheck for long takes you'd rather Whisper manually)"
           >
-            <input type="checkbox" checked={autoWhisper} onChange={(e) => setAutoWhisper(e.target.checked)} />
+            <input type="checkbox" checked={prefs.autoWhisper} onChange={(e) => setRecordPref('autoWhisper', e.target.checked)} />
             Auto-Whisper
           </label>
         )}
@@ -917,6 +1012,44 @@ export default function PerformanceModal({
           )
         })()}
       </div>
+
+      {/* Dialogue + Whisper — pinned directly under the record row (above the
+          take player) so it never jumps when the player box shows/hides. */}
+      <div className="flex-between" style={{ marginTop: 14, marginBottom: 4 }}>
+        <span className="hint">Dialogue (what the take says — drives the render)</span>
+        <div className="row" style={{ gap: 6 }}>
+          <button
+            className="btn sm"
+            disabled={!hasTake || recording || working}
+            title="Transcribe the take with Whisper (if you changed the line in the moment)"
+            onClick={whisper}
+          >
+            {busy === 'whisper' ? <span className="spinner sm" /> : '🎤'} Whisper
+          </button>
+          <button
+            className="btn sm ghost"
+            onClick={() => {
+              setText(seg?.text ?? '')
+              markDirty()
+              textDirtyRef.current = true
+            }}
+            title="Revert to the segment's text"
+          >
+            ↺ Revert
+          </button>
+        </div>
+      </div>
+      <textarea
+        className="input"
+        rows={2}
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value)
+          markDirty()
+          textDirtyRef.current = true
+        }}
+        placeholder="Dialogue for this clip…"
+      />
 
       {capture && hasTake && !recording && (
         <div style={{ marginTop: 10 }}>
@@ -1079,43 +1212,6 @@ export default function PerformanceModal({
           />
         </div>
       )}
-
-      {/* Dialogue + Whisper */}
-      <div className="flex-between" style={{ marginTop: 14, marginBottom: 4 }}>
-        <span className="hint">Dialogue (what the take says — drives the render)</span>
-        <div className="row" style={{ gap: 6 }}>
-          <button
-            className="btn sm"
-            disabled={!hasTake || recording || working}
-            title="Transcribe the take with Whisper (if you changed the line in the moment)"
-            onClick={whisper}
-          >
-            {busy === 'whisper' ? <span className="spinner sm" /> : '🎤'} Whisper
-          </button>
-          <button
-            className="btn sm ghost"
-            onClick={() => {
-              setText(seg?.text ?? '')
-              markDirty()
-              textDirtyRef.current = true
-            }}
-            title="Revert to the segment's text"
-          >
-            ↺ Revert
-          </button>
-        </div>
-      </div>
-      <textarea
-        className="input"
-        rows={2}
-        value={text}
-        onChange={(e) => {
-          setText(e.target.value)
-          markDirty()
-          textDirtyRef.current = true
-        }}
-        placeholder="Dialogue for this clip…"
-      />
 
       {/* Rendered output: trim + gain here apply to the segment on save */}
       {output && (

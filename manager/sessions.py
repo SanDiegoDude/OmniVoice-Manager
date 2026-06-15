@@ -879,7 +879,7 @@ def segment_peaks(sid: str, index: int, n: int = 800) -> Dict[str, Any]:
         raw = load_audio(_dir(sid) / seg["file"], sr=sr)
         if raw.size == 0:
             return {"index": int(index), "peaks": [], "raw_duration_s": 0.0}
-        n = max(16, min(int(n), 4000))
+        n = max(16, min(int(n), 8000))
         block = max(1, int(np.ceil(len(raw) / n)))
         m = int(np.ceil(len(raw) / block))
         a = np.abs(raw)

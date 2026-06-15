@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import librosa
 import numpy as np
@@ -11,11 +14,58 @@ import soundfile as sf
 
 TARGET_SR = 24000
 
+# Video containers we can't hand straight to libsndfile — strip the audio track
+# with ffmpeg first. (Audio containers go through librosa/audioread directly.)
+VIDEO_EXTS = {
+    ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpg", ".mpeg",
+    ".wmv", ".flv", ".ts", ".3gp", ".ogv",
+}
+
 
 def load_audio(path: str | Path, sr: int = TARGET_SR) -> np.ndarray:
     """Load an audio file as mono float32 at the target sample rate."""
-    wav, _ = librosa.load(str(path), sr=sr, mono=True)
+    wav, _ = load_media_audio(path, sr=sr, mono=True)
     return wav.astype(np.float32)
+
+
+def _ffmpeg_extract(src: Path, sr: Optional[int], mono: bool) -> Tuple[np.ndarray, int]:
+    """Strip the audio track from any media file via ffmpeg → temp WAV → load."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found — cannot extract audio from this file")
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "audio.wav"
+        cmd = [ffmpeg, "-y", "-i", str(src), "-vn", "-acodec", "pcm_s16le"]
+        if sr:
+            cmd += ["-ar", str(int(sr))]
+        if mono:
+            cmd += ["-ac", "1"]
+        cmd.append(str(out))
+        proc = subprocess.run(cmd, capture_output=True)
+        if proc.returncode != 0 or not out.exists():
+            tail = proc.stderr.decode("utf-8", "ignore")[-400:]
+            raise RuntimeError(f"ffmpeg could not extract audio: {tail}")
+        wav, in_sr = librosa.load(str(out), sr=sr, mono=mono)
+        return wav.astype(np.float32), int(in_sr)
+
+
+def load_media_audio(
+    path: str | Path, sr: Optional[int] = TARGET_SR, mono: bool = True
+) -> Tuple[np.ndarray, int]:
+    """Load audio from any media file (audio OR video) as (float32 mono, sr).
+
+    Audio files go through librosa/libsndfile directly; video containers (and
+    anything libsndfile/audioread chokes on) get their audio stripped by ffmpeg
+    into a temp WAV first. ``sr=None`` keeps the file's native rate."""
+    p = Path(path)
+    if p.suffix.lower() in VIDEO_EXTS:
+        return _ffmpeg_extract(p, sr, mono)
+    try:
+        wav, in_sr = librosa.load(str(p), sr=sr, mono=mono)
+        return wav.astype(np.float32), int(in_sr)
+    except Exception:
+        # Unknown/odd container — last resort is ffmpeg (handles most things).
+        return _ffmpeg_extract(p, sr, mono)
 
 
 def save_wav(path: str | Path, audio: np.ndarray, sr: int = TARGET_SR) -> None:

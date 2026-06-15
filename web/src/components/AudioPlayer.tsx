@@ -320,16 +320,34 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   const tick = useCallback(() => {
     const el = audioElRef.current
     if (!el) return
-    if (el.currentTime >= end) {
+    // Clamp the stop point to the media element's real duration: the decoded
+    // AudioBuffer can run a hair longer than the <audio> element (codec/encoder
+    // padding on MP3s especially), so currentTime may never reach `end` — the
+    // element just fires 'ended' and we'd otherwise never flip `playing` off.
+    const stopAt = el.duration ? Math.min(end, el.duration) : end
+    if (el.ended || el.currentTime >= stopAt) {
       el.pause()
       el.currentTime = start
       setPlaying(false)
       setCur(start)
+      releasePlayback(busIdRef.current)
       return
     }
     setCur(el.currentTime)
     rafRef.current = requestAnimationFrame(tick)
   }, [start, end])
+
+  // Safety net: if the element ends on its own (duration mismatch, rAF throttled
+  // in a background tab), reset the button instead of leaving it stuck on Stop.
+  const handleEnded = useCallback(() => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    rafRef.current = null
+    const el = audioElRef.current
+    if (el) el.currentTime = start
+    setPlaying(false)
+    setCur(start)
+    releasePlayback(busIdRef.current)
+  }, [start])
 
   const stop = useCallback(() => {
     const el = audioElRef.current
@@ -629,7 +647,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
         trim · shift+scroll to zoom
       </div>
 
-      <audio ref={audioElRef} src={url} preload="auto" crossOrigin="anonymous" style={{ display: 'none' }} />
+      <audio ref={audioElRef} src={url} preload="auto" crossOrigin="anonymous" onEnded={handleEnded} style={{ display: 'none' }} />
 
       <div className="row wrap" style={{ gap: 16, marginTop: 10 }}>
         <div style={{ flex: 1, minWidth: 180 }}>

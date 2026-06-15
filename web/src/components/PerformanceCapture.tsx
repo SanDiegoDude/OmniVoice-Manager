@@ -1,6 +1,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { api, DEFAULT_TRANSFORM, type VocalTransform } from '../api'
 import { blobToWav, sliceBlobToWav } from '../audio-encode'
+import { startCountIn, useRecordPrefs, setRecordPref, type CountIn } from '../recordUtils'
 import { AudioPlayer } from './AudioPlayer'
 import SaveVoiceModal from './SaveVoiceModal'
 import { VocalTransforms } from './VocalTransforms'
@@ -86,10 +87,19 @@ export const PerformanceCapture = forwardRef<PerfCaptureHandle, {
   const [cleanDereverb, setCleanDereverb] = useState(true)
   const [processing, setProcessing] = useState(false)
   const [whispering, setWhispering] = useState(false)
-  const [autoWhisper, setAutoWhisper] = useState(true)
-  const autoWhisperRef = useRef(true)
-  autoWhisperRef.current = autoWhisper
+  // Count-in + auto-Whisper are shared, persistent prefs (synced with the ADR
+  // performance modal) so they survive panel re-opens and match everywhere.
+  const prefs = useRecordPrefs()
+  // Mirror into a ref so the MediaRecorder onstop closure reads the live value.
+  const autoWhisperRef = useRef(prefs.autoWhisper)
+  useEffect(() => {
+    autoWhisperRef.current = prefs.autoWhisper
+  }, [prefs.autoWhisper])
   const [takeTrim, setTakeTrim] = useState<{ start: number; end: number; dur: number } | null>(null)
+  // 3·2·1 count-in (null = idle, 3..1 = counting, 0 = the "go" instant).
+  const [countdown, setCountdown] = useState<number | null>(null)
+  const countInRef = useRef<CountIn | null>(null)
+  const cancelledRef = useRef(false)
 
   const recRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
@@ -104,6 +114,7 @@ export const PerformanceCapture = forwardRef<PerfCaptureHandle, {
       if (urlRef.current) URL.revokeObjectURL(urlRef.current)
       if (origTakeRef.current) URL.revokeObjectURL(origTakeRef.current.url)
       if (timerRef.current) window.clearInterval(timerRef.current)
+      countInRef.current?.cancel()
       recRef.current?.stream.getTracks().forEach((t) => t.stop())
     },
     [],
@@ -239,18 +250,24 @@ export const PerformanceCapture = forwardRef<PerfCaptureHandle, {
     if (rawRef.current) await applyCleanup(rawRef.current, iso, der)
   }
 
-  const startRecord = async () => {
+  const beginRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true },
       })
       const rec = new MediaRecorder(stream)
       chunksRef.current = []
+      cancelledRef.current = false
       rec.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data)
       }
       rec.onstop = () => {
         stream.getTracks().forEach((t) => t.stop())
+        // Cancelled takes are discarded — never adopt or auto-Whisper a goof.
+        if (cancelledRef.current) {
+          cancelledRef.current = false
+          return
+        }
         void adoptBlob(new Blob(chunksRef.current, { type: rec.mimeType || 'audio/webm' }), true)
       }
       recRef.current = rec
@@ -263,6 +280,23 @@ export const PerformanceCapture = forwardRef<PerfCaptureHandle, {
     }
   }
 
+  const startRecord = async () => {
+    if (recording || countdown !== null) return
+    if (prefs.countIn) {
+      const { promise, handle } = startCountIn(setCountdown)
+      countInRef.current = handle
+      try {
+        await promise
+      } catch {
+        return // cancelled during count-in
+      } finally {
+        countInRef.current = null
+        setCountdown(null)
+      }
+    }
+    await beginRecording()
+  }
+
   const stopRecord = () => {
     if (timerRef.current) window.clearInterval(timerRef.current)
     timerRef.current = null
@@ -270,6 +304,43 @@ export const PerformanceCapture = forwardRef<PerfCaptureHandle, {
     recRef.current = null
     setRecording(false)
   }
+
+  // Cancel: abort a pending count-in, or stop + DISCARD an in-progress take.
+  const cancelRecord = () => {
+    if (countInRef.current) {
+      countInRef.current.cancel()
+      countInRef.current = null
+      setCountdown(null)
+      return
+    }
+    if (timerRef.current) window.clearInterval(timerRef.current)
+    timerRef.current = null
+    if (recRef.current) {
+      cancelledRef.current = true
+      recRef.current.stop()
+      recRef.current = null
+    }
+    setRecording(false)
+  }
+
+  // While counting in or recording: Esc cancels, Space stops (capture-phase so
+  // it never reaches the page/player or scrolls).
+  useEffect(() => {
+    if (!recording && countdown === null) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        cancelRecord()
+      } else if (e.code === 'Space') {
+        e.preventDefault()
+        e.stopPropagation()
+        if (recording) stopRecord()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [recording, countdown])
 
   const clearTake = () => {
     if (urlRef.current) URL.revokeObjectURL(urlRef.current)
@@ -336,17 +407,32 @@ export const PerformanceCapture = forwardRef<PerfCaptureHandle, {
       )}
 
       <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        {micSupported && !recording && (
+        {micSupported && !recording && countdown === null && (
           <button className="btn sm" onClick={startRecord}>
             {take ? '🔁 Re-record' : '🔴 Record performance'}
           </button>
         )}
-        {recording && (
-          <button className="btn sm bad" onClick={stopRecord}>
-            ⏹ Stop · {recElapsed.toFixed(1)}s
-          </button>
+        {countdown !== null && (
+          <>
+            <button className="btn sm" disabled style={{ minWidth: 130 }}>
+              {countdown > 0 ? `Recording in ${countdown}…` : '● Go!'}
+            </button>
+            <button className="btn sm ghost" onClick={cancelRecord} title="Cancel the count-in (Esc)">
+              ✕ Cancel
+            </button>
+          </>
         )}
-        {!recording && (
+        {recording && (
+          <>
+            <button className="btn sm bad" onClick={stopRecord} title="Stop & keep the take (Space)">
+              ⏹ Stop · {recElapsed.toFixed(1)}s
+            </button>
+            <button className="btn sm ghost" onClick={cancelRecord} title="Discard this take (Esc)">
+              ✕ Cancel
+            </button>
+          </>
+        )}
+        {!recording && countdown === null && (
           <label className="btn sm" style={{ cursor: 'pointer' }}>
             📁 {take ? 'Replace from file' : 'Upload performance'}
             <input
@@ -362,15 +448,25 @@ export const PerformanceCapture = forwardRef<PerfCaptureHandle, {
           </label>
         )}
         {recording && <span className="rec-dot" aria-label="recording" />}
-        {!recording && (
-          <label
-            className="hint"
-            style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}
-            title="Transcribe automatically when a recording stops (uncheck for long takes you'd rather Whisper manually)"
-          >
-            <input type="checkbox" checked={autoWhisper} onChange={(e) => setAutoWhisper(e.target.checked)} />
-            Auto-Whisper
-          </label>
+        {!recording && countdown === null && (
+          <>
+            <label
+              className="hint"
+              style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}
+              title="Play a 3·2·1 beep count-in before recording starts, so you can get set"
+            >
+              <input type="checkbox" checked={prefs.countIn} onChange={(e) => setRecordPref('countIn', e.target.checked)} />
+              Count-in
+            </label>
+            <label
+              className="hint"
+              style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}
+              title="Transcribe automatically when a recording stops (uncheck for long takes you'd rather Whisper manually)"
+            >
+              <input type="checkbox" checked={prefs.autoWhisper} onChange={(e) => setRecordPref('autoWhisper', e.target.checked)} />
+              Auto-Whisper
+            </label>
+          </>
         )}
         {take && !recording && (
           <>

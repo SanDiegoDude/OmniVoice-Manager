@@ -130,13 +130,13 @@ export function VoiceLab({
 
       <div className="section-title">1 · Source sample</div>
       <div className="row" style={{ marginBottom: 8 }}>
-        <button className="btn sm" onClick={() => fileRef.current?.click()} disabled={busy}>
+        <button className="btn sm" onClick={() => fileRef.current?.click()} disabled={busy} title="Upload an audio or video file — video audio is stripped automatically">
           ⬆ Upload file
         </button>
         <input
           ref={fileRef}
           type="file"
-          accept="audio/*"
+          accept="audio/*,video/*"
           style={{ display: 'none' }}
           onChange={(e) => e.target.files?.[0] && handleUpload(e.target.files[0])}
         />
