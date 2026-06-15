@@ -41,6 +41,10 @@ _LIMITS = {
     "ringmod_hz": (10.0, 800.0),
     "vibrato": (0.0, 1.0),
     "vibrato_hz": (0.5, 12.0),
+    # "Bad telephone call" lo-fi: band-limit + sample-rate/bit crush. Weight 0..1.
+    "telephone": (0.0, 1.0),
+    # Crackle / line-noise riding on top of the telephone effect. Weight 0..1.
+    "tel_crackle": (0.0, 1.0),
 }
 
 _DEFAULTS = {
@@ -52,6 +56,8 @@ _DEFAULTS = {
     "ringmod_hz": 80.0,
     "vibrato": 0.0,
     "vibrato_hz": 5.0,
+    "telephone": 0.0,
+    "tel_crackle": 0.0,
 }
 
 
@@ -82,6 +88,7 @@ def has_effect(t: Optional[Dict[str, Any]]) -> bool:
         or n["drive"] > 1e-3
         or n["ringmod"] > 1e-3
         or n["vibrato"] > 1e-3
+        or n["telephone"] > 1e-3
     )
 
 
@@ -153,6 +160,80 @@ def _ringmod(wav: np.ndarray, sr: int, amount: float, hz: float) -> np.ndarray:
     return (1.0 - amount) * wav + amount * wet
 
 
+def _telephone(wav: np.ndarray, sr: int, amount: float, crackle: float) -> np.ndarray:
+    """"Bad telephone call" / old-voicemail lo-fi.
+
+    Three stages stacked the way a real phone line degrades a voice, scaled by
+    ``amount`` so the slider sweeps from a hint of compression to full GSM-grade
+    mush:
+      1. Band-limit to the classic 300 Hz–3.4 kHz telephone passband (the band
+         tightens as the weight climbs), killing the lows/airy highs that make
+         speech sound full.
+      2. Crush the resolution — drop the effective sample rate (zero-order hold,
+         giving that aliased digital edge) and the bit depth — for the "low Hz
+         quality" the user is after.
+      3. Soft-clip/compress so it sits squashed and loud like a phone earpiece.
+    ``crackle`` rides faint static + sparse pops on top for the dodgy-line feel.
+
+    Wet/dry is mixed by ``amount`` (full weight = fully degraded). Best-effort:
+    if SciPy's filters aren't available the band-limit step is skipped."""
+    a = float(np.clip(amount, 0.0, 1.0))
+    if a <= 1e-3 or wav.size == 0:
+        return np.asarray(wav, dtype=np.float32)
+    dry = np.asarray(wav, dtype=np.float32)
+
+    band = dry
+    try:
+        from scipy.signal import butter, sosfilt
+
+        low = 300.0
+        high = 3400.0 - 1000.0 * a  # narrows toward 2.4 kHz at full weight
+        nyq = sr * 0.5
+        high = min(high, nyq * 0.98)
+        if high > low:
+            sos = butter(4, [low / nyq, high / nyq], btype="band", output="sos")
+            band = sosfilt(sos, dry).astype(np.float32)
+    except Exception:  # noqa: BLE001 — SciPy missing / filter blew up → skip band-limit
+        band = dry
+
+    # Sample-rate crush via zero-order hold (decimate, then repeat-hold back up).
+    crush_sr = float(np.interp(a, [0.0, 1.0], [12000.0, 5000.0]))
+    step = max(1, int(round(sr / crush_sr)))
+    crushed = band
+    if step > 1:
+        held = np.repeat(band[::step], step)[: band.size]
+        if held.size < band.size:  # pad the tail so lengths match exactly
+            held = np.concatenate([held, np.full(band.size - held.size, held[-1] if held.size else 0.0, dtype=np.float32)])
+        crushed = held.astype(np.float32)
+
+    # Bit-depth crush (10 bits → 6 bits at full weight).
+    bits = float(np.interp(a, [0.0, 1.0], [11.0, 6.0]))
+    levels = float(2.0 ** bits)
+    crushed = np.round(crushed * levels) / levels
+
+    # Squashed earpiece loudness.
+    crushed = np.tanh(crushed * (1.0 + 2.5 * a)).astype(np.float32)
+
+    c = float(np.clip(crackle, 0.0, 1.0))
+    if c > 1e-3:
+        rng = np.random.default_rng()
+        n = crushed.size
+        crushed = crushed + (rng.standard_normal(n).astype(np.float32) * 0.012 * c)
+        # Sparse pops/clicks — a dying connection.
+        k = int((6.0 + 50.0 * c) * n / sr)
+        if k > 0:
+            idx = rng.integers(0, n, size=k)
+            crushed[idx] += rng.standard_normal(k).astype(np.float32) * 0.6 * c
+
+    # Re-match the crushed signal to the dry clip's level before the wet/dry mix.
+    wet_peak = float(np.max(np.abs(crushed))) or 1.0
+    dry_peak = float(np.max(np.abs(dry))) or 1.0
+    crushed = crushed / wet_peak * dry_peak
+
+    m = min(crushed.size, dry.size)
+    return ((1.0 - a) * dry[:m] + a * crushed[:m]).astype(np.float32)
+
+
 def apply_transforms(
     wav: np.ndarray, sr: int, transforms: Optional[Dict[str, Any]]
 ) -> np.ndarray:
@@ -183,6 +264,10 @@ def apply_transforms(
         out = _drive(out, n["drive"])
     if n["ringmod"] > 1e-3:
         out = _ringmod(out, sr, n["ringmod"], n["ringmod_hz"])
+    # Telephone last: it models the transmission channel, so it colours whatever
+    # voice the earlier stages produced.
+    if n["telephone"] > 1e-3:
+        out = _telephone(out, sr, n["telephone"], n["tel_crackle"])
 
     peak = float(np.max(np.abs(out))) if out.size else 0.0
     if peak > 1.0:

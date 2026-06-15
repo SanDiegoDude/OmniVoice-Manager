@@ -98,6 +98,10 @@ export interface VocalTransform {
   ringmod_hz: number
   vibrato: number
   vibrato_hz: number
+  /** "Bad telephone call" lo-fi: band-limit + sample-rate/bit crush. 0..1. */
+  telephone: number
+  /** Crackle / line-noise riding on top of the telephone effect. 0..1. */
+  tel_crackle: number
 }
 
 export const DEFAULT_TRANSFORM: VocalTransform = {
@@ -109,6 +113,8 @@ export const DEFAULT_TRANSFORM: VocalTransform = {
   ringmod_hz: 80,
   vibrato: 0,
   vibrato_hz: 5,
+  telephone: 0,
+  tel_crackle: 0,
 }
 
 /** Everything that defines a take's render — shared by the ADR Studio
@@ -160,6 +166,8 @@ export interface MultitrackSegment {
   inpaint?: boolean
   has_bed?: boolean
   preserve_nonvocal?: boolean
+  /** Baked-in per-segment vocal transforms (null = clip is original). */
+  fx?: Partial<VocalTransform> | null
   perform?: PerformInfo | null
   url: string
   clip_url: string
@@ -434,6 +442,22 @@ export const api = {
     const res = await fetch('/api/perform/transform-clip', { method: 'POST', body: fd })
     if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Transform failed')
     return res.blob()
+  },
+  /** Bake creative vocal transforms onto an existing multitrack segment's audio
+   * (reversible — a no-op transform restores the clip's original). Returns the
+   * refreshed session. Covered by single-step undo server-side. */
+  async applySegmentTransform(
+    sid: string,
+    index: number,
+    transforms: VocalTransform,
+  ): Promise<MultitrackSession> {
+    const res = await fetch(`/api/multitrack/${sid}/segment/${index}/transform`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transforms }),
+    })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Transform failed')
+    return res.json()
   },
   async transformOutputFile(
     clip: Blob,

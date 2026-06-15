@@ -136,6 +136,12 @@ class SplitSegmentRequest(BaseModel):
     at_s: float
 
 
+class SegmentTransformRequest(BaseModel):
+    """Bake creative vocal transforms onto a segment's own audio (a no-op
+    transform restores the clip's original audio)."""
+    transforms: Dict[str, float] = Field(default_factory=dict)
+
+
 class DeleteSpaceRequest(BaseModel):
     start_s: float
     amount: float

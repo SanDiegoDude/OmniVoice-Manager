@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
-import type { GenParams, GenerateBody, HistoryEntry, Job, MultitrackSegment, MultitrackSession, OutputFile, Provider, SpeakerConfig, SystemInfo, Voice, VoiceNode } from './api'
+import type { GenParams, GenerateBody, HistoryEntry, Job, MultitrackSegment, MultitrackSession, OutputFile, Provider, SpeakerConfig, SystemInfo, Voice, VocalTransform, VoiceNode } from './api'
 import { SidePanel } from './components/SidePanel'
 import { Studio, type Injected } from './components/Studio'
 import type { PerfCaptureState } from './components/PerformanceCapture'
@@ -714,6 +714,16 @@ export default function App() {
       notify(String(e), 'error')
     }
   }
+  const applyTransform = async (index: number, transforms: VocalTransform) => {
+    if (!session) return
+    try {
+      setSession(await api.applySegmentTransform(session.id, index, transforms))
+      notify('Vocal transforms applied to segment', 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+      throw e
+    }
+  }
   const transcribeClip = (wav: Blob) => api.transcribeClip(wav)
   const promoteChannel = async (pos: string, name: string) => {
     if (!session) return null
@@ -1015,6 +1025,7 @@ export default function App() {
           onRegenAndWait={regenSegmentAndWait}
           onInsertAndRender={insertAndRender}
           onClearPerformance={clearPerformance}
+          onApplyTransform={applyTransform}
           onTranscribeClip={transcribeClip}
           onDeleteSpace={deleteSpace}
           onAddSpace={addSpace}

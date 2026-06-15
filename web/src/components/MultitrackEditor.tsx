@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
-import type { MultitrackSegment, MultitrackSession, MultitrackTrack, SpeakerConfig, Voice } from '../api'
+import type { MultitrackSegment, MultitrackSession, MultitrackTrack, SpeakerConfig, Voice, VocalTransform } from '../api'
 import { AudioPlayer, type AudioPlayerHandle } from './AudioPlayer'
 import { Toggle } from './ui'
 import { blurTag, focusTag } from '../tagInject'
 import { claimPlayback, releasePlayback } from '../audioBus'
 import PerformanceModal from './PerformanceModal'
+import SegmentTransformModal from './SegmentTransformModal'
 import ToolModal from './ToolModal'
 import { SpeakerCard } from './SpeakerCard'
 
@@ -111,6 +112,7 @@ export function MultitrackEditor({
   onRegenAndWait,
   onInsertAndRender,
   onClearPerformance,
+  onApplyTransform,
   onTranscribeClip,
   regenIndex,
   busy,
@@ -170,6 +172,7 @@ export function MultitrackEditor({
     } | null,
   ) => Promise<MultitrackSegment | null>
   onClearPerformance: (index: number) => Promise<void>
+  onApplyTransform: (index: number, transforms: VocalTransform) => Promise<void>
   onTranscribeClip: (wav: Blob) => Promise<string>
   regenIndex: number | null
   busy: boolean
@@ -211,6 +214,8 @@ export function MultitrackEditor({
   >(null)
   const [slicing, setSlicing] = useState<number | null>(null)
   const [inpainting, setInpainting] = useState<number | null>(null)
+  // Index of the segment whose Vocal Transforms plug-in is open; null = closed.
+  const [fxModal, setFxModal] = useState<number | null>(null)
   const [promoting, setPromoting] = useState<string | null>(null)
   // Add-track flyout: a draft speaker config edited in-place; null = closed.
   const [addTrack, setAddTrack] = useState<SpeakerConfig | null>(null)
@@ -1631,6 +1636,14 @@ export function MultitrackEditor({
               >
                 ⧉ Duplicate…
               </button>
+              <div className="mtk-menu-sep" />
+              <button
+                className={`btn sm${seg.fx ? ' on' : ''}`}
+                title="Vocal transforms plug-in: reshape this clip — pitch, formant, growl, robot, and a 'bad telephone call' lo-fi — baked onto the clip (reversible)"
+                onClick={() => { setFxModal(seg.index); setSegMenu(null) }}
+              >
+                🎚 Vocal transforms…{seg.fx ? ' (applied)' : ''}
+              </button>
               {!isAudioChan && (
                 <>
                   <div className="mtk-menu-sep" />
@@ -1784,6 +1797,14 @@ export function MultitrackEditor({
           />
         )
       })()}
+
+      <SegmentTransformModal
+        key={fxModal ?? 'closed'}
+        open={fxModal != null}
+        seg={fxModal != null ? flatSegs.find((s) => s.index === fxModal) ?? null : null}
+        onApply={onApplyTransform}
+        onClose={() => setFxModal(null)}
+      />
 
       {addTrack && (
         <ToolModal

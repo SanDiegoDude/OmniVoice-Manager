@@ -18,6 +18,7 @@ const PRESETS: Preset[] = [
   { label: 'Child', emoji: '🧒', values: { pitch: 5, formant: 4 } },
   { label: 'Chipmunk', emoji: '🐿', values: { pitch: 9, formant: 6 } },
   { label: 'Robot', emoji: '🤖', values: { ringmod: 0.7, ringmod_hz: 120, drive: 0.2 } },
+  { label: 'Telephone', emoji: '☎️', values: { telephone: 0.85, tel_crackle: 0.35 } },
 ]
 
 const isActive = (t: VocalTransform) =>
@@ -26,7 +27,8 @@ const isActive = (t: VocalTransform) =>
   t.sub > 0.01 ||
   t.drive > 0.01 ||
   t.ringmod > 0.01 ||
-  t.vibrato > 0.01
+  t.vibrato > 0.01 ||
+  (t.telephone ?? 0) > 0.01
 
 function summary(t: VocalTransform): string {
   const bits: string[] = []
@@ -36,6 +38,7 @@ function summary(t: VocalTransform): string {
   if (t.drive > 0.01) bits.push('drive')
   if (t.ringmod > 0.01) bits.push('ring')
   if (t.vibrato > 0.01) bits.push('vibrato')
+  if ((t.telephone ?? 0) > 0.01) bits.push('telephone')
   return bits.join(' · ')
 }
 
@@ -190,6 +193,15 @@ export function VocalTransforms({
           {value.ringmod > 0.01 && row('  ↳ carrier', 'ringmod_hz', 10, 400, 5, (v) => `${v} Hz`)}
           {row('Vibrato', 'vibrato', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`)}
           {value.vibrato > 0.01 && row('  ↳ rate', 'vibrato_hz', 0.5, 12, 0.5, (v) => `${v} Hz`)}
+          {row('☎️ Telephone', 'telephone', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`)}
+          {(value.telephone ?? 0) > 0.01 && (
+            <>
+              {row('  ↳ crackle', 'tel_crackle', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`)}
+              <div className="hint" style={{ opacity: 0.65, margin: '2px 0 4px 0' }}>
+                Band-limits + crushes the audio to a phone-line / old-voicemail sound; crackle adds line noise.
+              </div>
+            </>
+          )}
 
           {onApply && (
             <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid var(--border-soft)' }}>

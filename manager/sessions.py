@@ -327,6 +327,8 @@ def public(session: Dict[str, Any]) -> Dict[str, Any]:
                 "inpaint": bool(s.get("inpaint", False)),
                 "has_bed": bool(s.get("inpaint_bed")),
                 "preserve_nonvocal": bool(s.get("preserve_nonvocal", False)),
+                # Baked-in per-segment vocal transforms (None = clip is original).
+                "fx": s.get("transforms") or None,
                 "perform": (
                     {
                         "mode": s["perform"].get("mode", "character"),
@@ -672,6 +674,11 @@ def apply_regen(
 
         wav = _apply_bed(sid, target, wav, sr)  # Vocal Inpaint: re-add non-vocal bed
         save_wav(_dir(sid) / target["file"], wav, sr)
+        # Fresh take → any baked per-segment transforms (and their stash) are stale.
+        if target.get("fx_orig"):
+            (_dir(sid) / target["fx_orig"]).unlink(missing_ok=True)
+        target.pop("fx_orig", None)
+        target.pop("transforms", None)
         dur = duration_seconds(wav, sr)
         target["raw_duration_s"] = dur
         target["trim_start_s"] = 0.0
@@ -1597,6 +1604,63 @@ def set_inpaint(
                 seg["preserve_nonvocal"] = False
         else:
             seg["inpaint"] = False  # leave inpaint_ref + cleaned ref on disk (lazy)
+        _write(session)
+        return public(session)
+
+
+def apply_segment_transform(sid: str, index: int, transforms: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Bake creative vocal transforms (pitch/formant/…/telephone) onto a segment's
+    own audio — the same engine the performance modal uses, applied directly to an
+    existing clip instead of a take.
+
+    Destructive but reversible: the first time a clip is transformed its pristine
+    audio is stashed (``fx_orig``) and every later apply re-derives from that
+    stash, so the sliders never stack on an already-mangled clip. Passing a
+    no-op transform restores the original and clears the stash. The whole thing
+    sits under the standard single-step undo (the route middleware checkpoints
+    before we run)."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
+        if seg is None:
+            raise FileNotFoundError(f"Segment {index} not found")
+
+        from .voice_transforms import apply_transforms, has_effect, normalize_transforms
+
+        sr = int(session["sample_rate"])
+        d = _dir(sid)
+        orig_fn = seg.get("fx_orig")
+        orig_path = (d / orig_fn) if orig_fn else None
+
+        if has_effect(transforms):
+            # Establish (once) the pristine source to transform from.
+            if not orig_path or not orig_path.exists():
+                orig_fn = f"{Path(seg['file']).stem}_fxorig.wav"
+                shutil.copyfile(d / seg["file"], d / orig_fn)
+                seg["fx_orig"] = orig_fn
+            base = load_audio(d / orig_fn, sr=sr)
+            out = apply_transforms(np.asarray(base, dtype=np.float32), sr, transforms)
+            save_wav(d / seg["file"], np.asarray(out, dtype=np.float32), sr)
+            rdur = len(out) / sr if sr else 0.0
+            seg["raw_duration_s"] = round(rdur, 4)
+            # Transforms preserve length; keep the trim window inside the clip.
+            seg["trim_start_s"] = min(float(seg.get("trim_start_s", 0.0) or 0.0), rdur)
+            te = seg.get("trim_end_s")
+            seg["trim_end_s"] = min(float(te) if te else rdur, rdur)
+            seg["transforms"] = normalize_transforms(transforms)
+        else:
+            # No-op transform → restore the pristine clip and drop the stash.
+            if orig_path and orig_path.exists():
+                shutil.copyfile(orig_path, d / seg["file"])
+                orig_path.unlink(missing_ok=True)
+                base = load_audio(d / seg["file"], sr=sr)
+                seg["raw_duration_s"] = round(len(base) / sr if sr else 0.0, 4)
+            seg.pop("fx_orig", None)
+            seg.pop("transforms", None)
+
+        _stitch(session)
         _write(session)
         return public(session)
 

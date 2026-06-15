@@ -70,6 +70,7 @@ from .schemas import (
     RegenSegmentRequest,
     ScriptAndSpeakRequest,
     ScriptRequest,
+    SegmentTransformRequest,
     SetChannelRequest,
     SetSegmentTextRequest,
     SpeakerConfig,
@@ -821,6 +822,19 @@ def multitrack_inpaint_preserve(sid: str, index: int, req: InpaintRequest):
     try:
         return sessions.set_preserve_nonvocal(sid, index, req.enabled)
     except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/multitrack/{sid}/segment/{index}/transform")
+def multitrack_segment_transform(sid: str, index: int, req: SegmentTransformRequest):
+    """Bake creative vocal transforms onto an existing segment's audio (pitch,
+    formant, growl, robot, telephone…). Reversible: a no-op transform restores
+    the clip's original audio. Covered by the standard single-step undo."""
+    try:
+        return sessions.apply_segment_transform(sid, index, req.transforms)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
         raise HTTPException(400, str(e))
 
 
