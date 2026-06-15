@@ -49,6 +49,9 @@ dependencies = [
     "fastapi>=0.135.2",
     "python-multipart>=0.0.9",
     "openai>=1.40",
+    # Google Vertex AI backend for the Smart Script writer (Gemini keys that are
+    # Vertex-only and can't be reached through the OpenAI-compatible shim).
+    "google-genai>=1.0",
     "python-dotenv>=1.2.2",
     "uvicorn[standard]>=0.42.0",
     "einops>=0.8.2",

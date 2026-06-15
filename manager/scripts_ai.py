@@ -8,9 +8,10 @@ connector can drive the full smart-script pipeline (not just raw TTS).
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from typing import Optional as _Optional
 
@@ -303,6 +304,87 @@ def _chat_create(client, model: str, messages: list, max_tokens: int, temperatur
     return client.chat.completions.create(**kwargs)
 
 
+def _openai_complete(
+    provider: dict, system_message: str, user_message: str, max_tokens: int, temperature: float
+) -> Tuple[str, Optional[str]]:
+    """Run one completion against an OpenAI-compatible endpoint."""
+    client = _client(provider)
+    messages = [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_message},
+    ]
+    resp = _chat_create(client, provider["model"], messages, max_tokens, temperature)
+    choice = resp.choices[0] if resp.choices else None
+    content = (getattr(getattr(choice, "message", None), "content", None) or "") if choice else ""
+    finish = getattr(choice, "finish_reason", None)
+    return content, finish
+
+
+def _vertex_complete(
+    provider: dict, system_message: str, user_message: str, max_tokens: int, temperature: float
+) -> Tuple[str, Optional[str]]:
+    """Run one completion against Google Vertex AI (Gemini) via the google-genai
+    SDK. Auth is Application Default Credentials, or a service-account JSON when
+    the provider's key field points at one. The actual generate_content call is
+    left to raise normally so the caller's retry/grow-budget loop can handle
+    transient errors and truncation just like the OpenAI path."""
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as e:  # noqa: BLE001
+        raise ScriptAIError(
+            "The 'google-genai' package is required for Vertex AI script generation. "
+            "Run `uv sync` (or pip install google-genai) and try again."
+        ) from e
+
+    project = (provider.get("project") or "").strip()
+    location = (provider.get("location") or "global").strip() or "global"
+    if not project:
+        raise ScriptAIError(
+            "Vertex provider is missing a Google Cloud project — set it via "
+            "vertex://PROJECT/LOCATION in the provider line or GOOGLE_CLOUD_PROJECT in .env."
+        )
+
+    # Optional service-account credentials file (otherwise Application Default
+    # Credentials — e.g. `gcloud auth application-default login` — are used).
+    key = (provider.get("key") or "").strip()
+    if key and os.path.isfile(key):
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key
+
+    client = genai.Client(vertexai=True, project=project, location=location)
+    resp = client.models.generate_content(
+        model=provider["model"],
+        contents=user_message,
+        config=types.GenerateContentConfig(
+            system_instruction=system_message,
+            temperature=temperature,
+            top_p=0.9,
+            max_output_tokens=max_tokens,
+            response_mime_type="application/json",
+        ),
+    )
+
+    content = getattr(resp, "text", None) or ""
+    finish: Optional[str] = None
+    cands = getattr(resp, "candidates", None) or []
+    if cands:
+        fr = getattr(cands[0], "finish_reason", None)
+        name = (getattr(fr, "name", None) or str(fr or "")).upper()
+        # Normalize the truncation signal so the caller's grow-budget retry fires.
+        finish = "length" if name in ("MAX_TOKENS", "MAX_TOKEN") else name.lower() or None
+    return content, finish
+
+
+def _complete(
+    provider: dict, system_message: str, user_message: str, max_tokens: int, temperature: float
+) -> Tuple[str, Optional[str]]:
+    """Dispatch one completion to the right backend, returning (content,
+    finish_reason). finish_reason == 'length' means the output was truncated."""
+    if provider.get("endpoint") == "vertex":
+        return _vertex_complete(provider, system_message, user_message, max_tokens, temperature)
+    return _openai_complete(provider, system_message, user_message, max_tokens, temperature)
+
+
 # Token ceiling for the grow-on-truncation retry. Reasoning models (GPT-5 /
 # Gemini flash) spend hidden reasoning tokens from this same budget, so we start
 # generous and double up to this cap if the response is cut off.
@@ -322,14 +404,9 @@ def generate_script(
     monologue: Optional[bool] = None,
 ) -> Dict[str, Any]:
     provider = _resolve(provider_id)
-    client = _client(provider)
     system_message = _build_system(num_speakers, speakers, monologue)
     user_message = _build_user(prompt, existing_script, previous)
     model = provider["model"]
-    messages = [
-        {"role": "system", "content": system_message},
-        {"role": "user", "content": user_message},
-    ]
 
     def _result(parsed: Dict[str, str]) -> Dict[str, Any]:
         return {
@@ -346,10 +423,7 @@ def generate_script(
     cur_tokens = max(1024, max_tokens)
     for attempt in range(max_retries):
         try:
-            resp = _chat_create(client, model, messages, cur_tokens, temperature)
-            choice = resp.choices[0] if resp.choices else None
-            content = (getattr(getattr(choice, "message", None), "content", None) or "") if choice else ""
-            finish = getattr(choice, "finish_reason", None)
+            content, finish = _complete(provider, system_message, user_message, cur_tokens, temperature)
         except ScriptAIError:
             raise
         except Exception as e:  # noqa: BLE001

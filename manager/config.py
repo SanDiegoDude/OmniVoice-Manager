@@ -106,9 +106,35 @@ _active_provider_id: Optional[str] = None
 def _endpoint_kind(url: str) -> str:
     if not url:
         return "openai"
+    # Vertex AI is NOT OpenAI-compatible — it uses Google Cloud auth (ADC /
+    # service account) and the google-genai SDK, configured via a vertex:// URL
+    # that carries the project + location.
+    if url.startswith("vertex://") or "aiplatform.googleapis.com" in url:
+        return "vertex"
     if "generativelanguage.googleapis.com" in url:
         return "gemini"
     return "custom"
+
+
+def _parse_vertex_url(url: str) -> tuple[str, str]:
+    """Pull (project, location) out of a ``vertex://PROJECT/LOCATION`` URL.
+    Location defaults to "global" when omitted."""
+    if not url.startswith("vertex://"):
+        return "", ""
+    rest = url[len("vertex://") :].strip("/")
+    parts = [p for p in rest.split("/") if p]
+    project = parts[0] if parts else ""
+    location = parts[1] if len(parts) > 1 else "global"
+    return project, location
+
+
+def _augment_vertex(p: Dict[str, str]) -> Dict[str, str]:
+    """Fill project/location on a Vertex provider from its vertex:// URL."""
+    if p.get("endpoint") == "vertex" and not p.get("project"):
+        project, location = _parse_vertex_url(p.get("url", ""))
+        p["project"] = project
+        p["location"] = location or "global"
+    return p
 
 
 def _resolve_providers() -> List[Dict[str, str]]:
@@ -162,13 +188,43 @@ def _resolve_providers() -> List[Dict[str, str]]:
                 "endpoint": "openai",
             }
         )
-    return providers
+
+    # Vertex AI from the standard google-genai env vars (the style a Google Cloud
+    # setup hands you). Active when GOOGLE_GENAI_USE_VERTEXAI / GENAI_BACKEND asks
+    # for Vertex and a project is set. Credentials come from Application Default
+    # Credentials (gcloud auth) or GOOGLE_APPLICATION_CREDENTIALS service account.
+    use_vertex = _v("GOOGLE_GENAI_USE_VERTEXAI").lower() in ("1", "true", "yes") or _v("GENAI_BACKEND").lower() == "vertex"
+    vertex_project = _v("GOOGLE_CLOUD_PROJECT")
+    if use_vertex and vertex_project and "vertex" not in seen_ids:
+        location = _v("VERTEXAI_LOCATION") or _v("GOOGLE_CLOUD_LOCATION") or "global"
+        model = _v("VERTEX_MODEL") or _v("SCRIPT_AI_MODEL") or "gemini-2.5-flash"
+        providers.append(
+            {
+                "id": "vertex",
+                "label": f"Gemini · Vertex ({model})",
+                "model": model,
+                "url": f"vertex://{vertex_project}/{location}",
+                "key": _v("GOOGLE_APPLICATION_CREDENTIALS"),
+                "endpoint": "vertex",
+                "project": vertex_project,
+                "location": location,
+            }
+        )
+
+    return [_augment_vertex(p) for p in providers]
 
 
 def list_providers_public() -> List[Dict[str, object]]:
     """Provider list for the UI (no secrets)."""
+    # Vertex auth is ADC/service-account rather than an inline key, so a Vertex
+    # provider counts as "configured" once it has a project (key is optional).
+    def _configured(p: Dict[str, str]) -> bool:
+        if p["endpoint"] == "vertex":
+            return bool(p.get("project"))
+        return bool(p["key"])
+
     return [
-        {"id": p["id"], "label": p["label"], "model": p["model"], "endpoint": p["endpoint"], "has_key": bool(p["key"])}
+        {"id": p["id"], "label": p["label"], "model": p["model"], "endpoint": p["endpoint"], "has_key": _configured(p)}
         for p in _resolve_providers()
     ]
 
