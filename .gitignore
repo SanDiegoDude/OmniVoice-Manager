@@ -44,6 +44,8 @@ web/dist/
 
 # ── Local-only planning notes (keep private) ──────────────────────────────────
 ROADMAP.md
+agent.md
+AGENTS.md
 
 # ── Research: local test media + experiment outputs (never commit) ────────────
 examples/box-of-chocolates.wav

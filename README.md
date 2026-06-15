@@ -10,7 +10,7 @@ https://github.com/user-attachments/assets/69f211b9-c8ae-49dd-a050-cddcd7ee8bdf
 
 OmniVoice generates a single utterance per call. The Manager wraps it with everything needed to turn that primitive into finished audio: a full **multitrack timeline editor (ADR Studio)**, **vocal performance transfer** (act a line yourself, hear it in a cloned voice — timing, emphasis, and emotion preserved), multi-speaker dialogue stitching, reference-audio cleanup, perceptual loudness matching, an AI scriptwriter, a rich audio editor, and a clean API for automation.
 
-**📚 Full feature documentation lives in [`docs/`](docs/README.md):** [ADR Studio](docs/adr-studio.md) · [Performance Transfer](docs/performance-transfer.md) · [Voice Clone](docs/voice-clone.md)
+**📚 Full feature documentation lives in [`docs/`](docs/README.md):** [ADR Studio](docs/adr-studio.md) · [Performance Transfer](docs/performance-transfer.md) · [Voice Clone](docs/voice-clone.md) · [HTTP API](docs/api.md)
 
 ---
 
@@ -291,39 +291,7 @@ LOD and Low VRAM mode can also be toggled live from the top bar in the UI.
 
 ## API
 
-All endpoints are JSON over HTTP. Selected routes:
-
-| Method & Path | Purpose |
-| --- | --- |
-| `GET /api/system/info` | Model, GPU, AI-provider, LOD / Low-VRAM / output-format / trim-silence status |
-| `POST /api/system/lod` · `POST /api/system/low-vram` | Toggle VRAM modes (persisted) |
-| `POST /api/system/output-format` · `POST /api/system/trim-silence` | Persist output format (mp3 / flac) and auto-trim silence |
-| `GET /api/script/providers` · `POST /api/script/reload` | List / hot-reload AI providers (OpenAI-compatible + Vertex) |
-| `POST /api/script` | Generate or refine a `Speaker N:` script from a prompt |
-| `POST /api/generate` | Synthesize from a script (queued; returns a job id) |
-| `POST /api/generate-perform` | One-shot performance transfer: upload a take + params, render in a target voice |
-| `POST /api/generate/script-and-speak` | Smart Script **and** synthesis in one call |
-| `POST /api/process-clip` · `POST /api/transcribe-clip` | Isolate/de-reverb or Whisper any uploaded clip |
-| `GET /api/jobs/{job_id}` | Poll job status / result |
-| `GET /api/voices` · `POST /api/voices/upload` · `POST /api/voices/process` | Voice library + Voice Lab |
-| `GET /api/outputs` · `GET /api/history` | Browse results and history |
-
-### Multitrack timeline
-
-| Method & Path | Purpose |
-| --- | --- |
-| `POST /api/multitrack/generate` · `POST /api/multitrack/empty` | Generate a scene as clips, or start a blank timeline |
-| `POST /api/multitrack/{sid}/speaker` · `POST·DELETE …/speaker/{pos}` | Add / update / remove a speaker track |
-| `POST …/segment/{i}/regenerate` · `…/edit` · `…/text` | Regenerate, move/trim/speed/gain, or align a clip's text |
-| `POST …/segment/{i}/split` · `…/duplicate` · `…/delete` · `…/auto-slice` · `…/inpaint` · `…/inpaint-preserve` | Clip operations + Pin Current Voice to Segment (and non-vocal bed) |
-| `POST …/segment/{i}/transform` | Bake a vocal transform (pitch / formant / telephone / …) onto a clip (reversible) |
-| `POST …/delete-space` · `…/add-space` · `…/reflow` · `…/insert` | Timeline structure + global speed/gap |
-| `POST …/upload-channel` · `…/speaker/{pos}/promote` · `…/speaker/{pos}/regenerate` | Audio channels, promote-to-voice, re-cast a channel (honors per-clip performances) |
-| `POST·DELETE …/segment/{i}/performance` | Attach / detach a vocal performance (multipart take + mode/strength/gain/speed) |
-| `POST …/merge` · `…/speaker/{pos}/collapse` | Merge selected clips, collapse a track to one clip |
-| `POST …/segment/{i}/transcribe` · `…/{sid}/undo` · `…/{sid}/finalize` | Whisper a clip, single-step undo, commit to history |
-
-Generation is asynchronous: submit to `/api/generate` (or `/api/multitrack/generate`), then poll `/api/jobs/{job_id}` until `status` is `done`. Most timeline edits are synchronous and return the updated session.
+Every UI capability is also an HTTP endpoint, so you can drive generation from your own tools (a ComfyUI connector, batch scripts, CI) and not just basic synthesis. The full route map — system, scripts, synthesis, voices, and the multitrack timeline — lives in the **[HTTP API guide](docs/api.md)**, and a running server exposes an always-current interactive reference at `/docs`.
 
 ---
 
