@@ -45,6 +45,10 @@ dependencies = [
     # WORLD vocoder: independent pitch/formant manipulation with prosody
     # preserved, used by the vocal-transform pre-processing on performance takes.
     "pyworld>=0.3.4",
+    # pyworld imports `pkg_resources` at runtime, which ships in setuptools.
+    # Modern torch only pulls setuptools in on Python >=3.12, so on the pinned
+    # 3.10 it would otherwise be missing. Capped <81 (pkg_resources removed in 81).
+    "setuptools>=68,<81",
     "pyloudnorm>=0.1.1",
     "fastapi>=0.135.2",
     "python-multipart>=0.0.9",
@@ -93,25 +97,49 @@ Repository = "https://github.com/SanDiegoDude/OmniVoice-Manager"
 # Install PyTorch with CUDA support on Linux/Windows (CUDA doesn't exist for Mac).
 # NOTE: We must explicitly request them as `dependencies` above. These improved
 # versions will not be selected if they're only third-party dependencies.
+#
+# Two CUDA wheel indexes are used depending on the GPU/CPU architecture:
+#  * x86_64 (and Windows): CUDA 12.8 (cu128) — the broadly-tested build.
+#  * Linux ARM (aarch64): CUDA 13.0 (cu130). NVIDIA Grace-Blackwell parts such
+#    as the GB10 in the "DGX Spark" report compute capability sm_121, which the
+#    cu128 wheels do NOT ship kernels for (they top out at sm_120) — loading
+#    them surfaces as a misleading "CUDA out of memory" on the first kernel.
+#    The cu130 build includes sm_121 and runs on the CUDA 13 driver.
 torch = [
-  { index = "pytorch-cuda", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { index = "pytorch-cu128", marker = "(sys_platform == 'linux' or sys_platform == 'win32') and platform_machine != 'aarch64'" },
 ]
 torchaudio = [
-  { index = "pytorch-cuda", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { index = "pytorch-cu128", marker = "(sys_platform == 'linux' or sys_platform == 'win32') and platform_machine != 'aarch64'" },
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cuda"
-# Use PyTorch built for NVIDIA Toolkit version 12.8.
+name = "pytorch-cu128"
+# PyTorch built for NVIDIA CUDA Toolkit 12.8 (x86_64 / Windows).
 # Available versions: https://pytorch.org/get-started/locally/
 url = "https://download.pytorch.org/whl/cu128"
 # Only use this index when explicitly requested by `tool.uv.sources`.
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cu130"
+# PyTorch built for NVIDIA CUDA Toolkit 13.0 (Linux aarch64 / Grace-Blackwell).
+url = "https://download.pytorch.org/whl/cu130"
+# Only use this index when explicitly requested by `tool.uv.sources`.
+explicit = true
+
 [tool.uv]
 constraint-dependencies = [
-    "torch==2.8.0",
-    "torchaudio==2.8.0",
+    # Pin the known-good PyTorch on x86_64 (Linux/Windows) and macOS (arm64).
+    "torch==2.8.0; platform_machine != 'aarch64'",
+    "torchaudio==2.8.0; platform_machine != 'aarch64'",
+    # Linux on ARM (NVIDIA Grace/GB10 "DGX Spark", GH200, …): pulled from the
+    # cu130 index (see [tool.uv.sources]). 2.8.0 has no aarch64 CUDA wheels at
+    # all (the index jumps 2.7.x -> 2.9.x), and the first version shipping both
+    # torch and torchaudio aarch64 wheels is 2.10.0.
+    "torch==2.10.0; platform_machine == 'aarch64'",
+    "torchaudio==2.10.0; platform_machine == 'aarch64'",
     # pyworld imports pkg_resources, removed from setuptools>=81.
     "setuptools<81",
 ]

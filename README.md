@@ -112,7 +112,8 @@ All GPU work runs in a dedicated child process. This isolates the CUDA context, 
 
 ## Requirements
 
-Linux, Windows, and macOS (Apple Silicon) are supported.
+Linux (x86_64 and ARM64), Windows, and macOS (Apple Silicon) are supported.
+This includes NVIDIA ARM systems such as the DGX Spark (GB10) and GH200.
 
 > ⚠️ **macOS performance:** the Mac build is fully functional but **much slower
 > than an NVIDIA GPU** — PyTorch's MPS backend only accelerates part of the
@@ -125,7 +126,8 @@ Bring your own tooling — the installer never installs or modifies system-level
 tools (Node, Python, ffmpeg), so it can't break your existing environments.
 Have these on your PATH before you start:
 
-- An NVIDIA GPU with CUDA, or an Apple Silicon Mac with MPS (CPU works but is slow)
+- An NVIDIA GPU with CUDA (x86_64 or ARM64, including Grace-Blackwell parts like
+  the DGX Spark), or an Apple Silicon Mac with MPS (CPU works but is slow)
 - **Node.js 18+** with npm — used only for a one-time build of the web UI, never
   installed for you. Get it from [nodejs.org](https://nodejs.org) or a package
   manager (`winget install OpenJS.NodeJS.LTS` / `brew install node` /
@@ -163,6 +165,12 @@ cd web && npm install && npm run build && cd ..
 ```
 
 (`uv sync` automatically pulls the CUDA build of PyTorch on Linux and Windows, and the standard PyPI build — with Metal/MPS support — on macOS.)
+
+> **NVIDIA ARM systems (DGX Spark / GB10, GH200, Grace-Blackwell):** these are
+> auto-detected. On Linux `aarch64` the installer pulls the CUDA 13.0 PyTorch
+> build (PyTorch 2.10), which ships the `sm_121` kernels these GPUs need —
+> x86_64 and Windows keep the CUDA 12.8 build. No flags or manual steps required;
+> just run the same `uv sync --python 3.10` above.
 
 Model weights for OmniVoice, the vocal isolation checkpoint, and (when used) Whisper are downloaded automatically on first use into `./models` and the Hugging Face cache.
 

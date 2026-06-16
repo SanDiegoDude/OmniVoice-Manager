@@ -23,12 +23,38 @@ from .worker import gpu_worker
 ProgressCb = Optional[Callable[[Dict[str, Any]], None]]
 
 
+def _linux_system_memory_mb() -> Optional[tuple[int, int]]:
+    """Return (used_mb, total_mb) of system RAM from /proc/meminfo.
+
+    Used as the GPU memory figure on NVIDIA unified-memory parts, where the GPU
+    draws from system RAM. "used" mirrors what tools like `free` show:
+    MemTotal - MemAvailable.
+    """
+    try:
+        info: Dict[str, int] = {}
+        with open("/proc/meminfo", encoding="ascii") as f:
+            for ln in f:
+                key, _, rest = ln.partition(":")
+                if rest:
+                    info[key.strip()] = int(rest.strip().split()[0])  # values are in kB
+        total_kb = info["MemTotal"]
+        avail_kb = info.get("MemAvailable", info.get("MemFree", total_kb))
+        used_kb = max(0, total_kb - avail_kb)
+        return used_kb // 1024, total_kb // 1024
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def query_gpu_memory() -> Dict[str, Any]:
     """Return GPU memory usage without importing torch in the server process.
 
-    NVIDIA boxes use nvidia-smi; Apple Silicon reports unified memory (the GPU
-    shares system RAM, so process-wide RAM pressure is the meaningful number).
+    Discrete NVIDIA GPUs report via nvidia-smi. NVIDIA *unified-memory* parts —
+    the GB10 in the "DGX Spark", GH200, Jetson — report memory.used/total as
+    "[N/A]" in nvidia-smi because the GPU shares system RAM, so we fall back to
+    the system RAM reading (the pool it actually draws from), exactly like Apple
+    Silicon's unified memory.
     """
+    nvidia_name: Optional[str] = None
     try:
         out = subprocess.check_output(
             [
@@ -40,10 +66,27 @@ def query_gpu_memory() -> Dict[str, Any]:
             timeout=5,
         ).decode()
         line = out.strip().splitlines()[0]
-        used, total, name = [p.strip() for p in line.split(",")]
-        return {"used_mb": int(used), "total_mb": int(total), "name": name, "available": True}
+        used, total, nvidia_name = [p.strip() for p in line.split(",")]
+        try:
+            return {"used_mb": int(used), "total_mb": int(total), "name": nvidia_name, "available": True}
+        except ValueError:
+            # Unified-memory NVIDIA part: memory.used/total are "[N/A]". Keep the
+            # captured name and fall through to the system-RAM reading below.
+            pass
     except Exception:  # noqa: BLE001
         pass
+
+    if nvidia_name and sys.platform.startswith("linux"):
+        mem = _linux_system_memory_mb()
+        if mem is not None:
+            used_mb, total_mb = mem
+            return {
+                "used_mb": used_mb,
+                "total_mb": total_mb,
+                "name": f"{nvidia_name} (unified memory)",
+                "available": True,
+            }
+
     if sys.platform == "darwin":
         try:
             total_b = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], timeout=5).decode().strip())
