@@ -141,6 +141,24 @@ Have these on your PATH before you start:
   [ffmpeg.org/download](https://ffmpeg.org/download.html), or
   `winget install Gyan.FFmpeg` / `brew install ffmpeg` / `apt install ffmpeg`.
 
+### Disk space
+
+Model weights are downloaded on first use (into the Hugging Face cache and
+`./models`), not bundled with the repo. Budget roughly:
+
+| What | Size |
+| --- | --- |
+| **OmniVoice** TTS weights + bundled audio tokenizer | ~3.1 GB |
+| **Whisper** (`whisper-large-v3-turbo`) for transcription / auto-Whisper | ~1.6 GB |
+| **Mel-Band-RoFormer** vocal isolation + de-reverb checkpoints | ~1.8 GB |
+| DeepFilterNet3 (only with `--extra dereverb`) | ~8 MB |
+| **Models subtotal** | **~6.5 GB** |
+| Python environment (PyTorch + CUDA libraries) | ~7 GB (CUDA) / ~2.5 GB (CPU / macOS) |
+
+All in, plan for **~14 GB** of free space for a CUDA install (around **~10 GB**
+on CPU / Apple Silicon, which skips the bundled NVIDIA CUDA libraries). Leave a
+little extra headroom for the temporary download cache on first run.
+
 ---
 
 ## Installation
