@@ -119,6 +119,7 @@ export function Studio({
   onInsertAndRender,
   onClearPerformance,
   onApplyTransform,
+  onIsolateSegment,
   onTranscribeClip,
   onFinalize,
   notify,
@@ -200,6 +201,7 @@ export function Studio({
   ) => Promise<MultitrackSegment | null>
   onClearPerformance: (index: number) => Promise<void>
   onApplyTransform: (index: number, transforms: VocalTransform) => Promise<void>
+  onIsolateSegment: (index: number, stem: 'vocals' | 'instrumental') => Promise<void>
   onTranscribeClip: (wav: Blob) => Promise<string>
   onFinalize: () => void
   notify: (m: string, k?: 'info' | 'error' | 'success') => void
@@ -1081,6 +1083,7 @@ export function Studio({
             onInsertAndRender={onInsertAndRender}
             onClearPerformance={onClearPerformance}
             onApplyTransform={onApplyTransform}
+            onIsolateSegment={onIsolateSegment}
             onTranscribeClip={onTranscribeClip}
             regenIndex={regenIndex}
             busy={running}

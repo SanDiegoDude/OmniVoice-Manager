@@ -1665,6 +1665,60 @@ def apply_segment_transform(sid: str, index: int, transforms: Optional[Dict[str,
         return public(session)
 
 
+def segment_full_audio(sid: str, index: int) -> tuple:
+    """Return a segment's FULL, untrimmed raw audio + sample rate. Used by stem
+    isolation, which re-writes the whole clip (unlike clone_source, which trims)."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
+        if seg is None:
+            raise FileNotFoundError(f"Segment {index} not found")
+        sr = int(session["sample_rate"])
+        raw = load_audio(_dir(sid) / seg["file"], sr=sr)
+        return raw.astype(np.float32), sr
+
+
+def apply_segment_isolate(sid: str, index: int, wav: np.ndarray, sr: int, stem: str) -> Dict[str, Any]:
+    """Replace a segment's audio with an isolated stem (vocals / instrumental)
+    produced by the RoFormer separator in the worker.
+
+    Destructive but covered by the standard single-step undo (the route
+    middleware snapshots the per-segment audio before we run, so a wrong stem
+    is one Undo away — and isolating the other stem regenerates from the
+    pre-isolation mix after that undo)."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
+        if seg is None:
+            raise FileNotFoundError(f"Segment {index} not found")
+        out = np.asarray(wav, dtype=np.float32)
+        if out.size == 0:
+            raise ValueError("Isolation produced no audio.")
+        d = _dir(sid)
+        save_wav(d / seg["file"], out, sr)
+        rdur = len(out) / sr if sr else 0.0
+        seg["raw_duration_s"] = round(rdur, 4)
+        # Isolation preserves length; keep the trim window inside the clip.
+        seg["trim_start_s"] = min(float(seg.get("trim_start_s", 0.0) or 0.0), rdur)
+        te = seg.get("trim_end_s")
+        seg["trim_end_s"] = min(float(te) if te else rdur, rdur)
+        # The audio changed under any prior transform stash; drop it so a later
+        # transform re-stashes from the now-isolated clip instead of restoring
+        # the pre-isolation mix.
+        old_orig = seg.pop("fx_orig", None)
+        if old_orig:
+            (d / old_orig).unlink(missing_ok=True)
+        seg.pop("transforms", None)
+        seg["isolated"] = stem
+        _stitch(session)
+        _write(session)
+        return public(session)
+
+
 def set_preserve_nonvocal(sid: str, index: int, enabled: bool) -> Dict[str, Any]:
     """Toggle whether an inpainted clip re-adds its captured non-vocal bed on
     regen. The bed is captured at lock time; enabling without one is rejected."""

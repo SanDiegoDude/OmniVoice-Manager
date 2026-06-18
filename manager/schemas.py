@@ -142,6 +142,12 @@ class SegmentTransformRequest(BaseModel):
     transforms: Dict[str, float] = Field(default_factory=dict)
 
 
+class SegmentIsolateRequest(BaseModel):
+    """Replace a segment's audio with an isolated stem from the RoFormer
+    separator — "vocals" (the voice) or "instrumental" (the backing/music)."""
+    stem: str = "vocals"  # vocals | instrumental
+
+
 class DeleteSpaceRequest(BaseModel):
     start_s: float
     amount: float

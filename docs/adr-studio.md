@@ -24,6 +24,7 @@ Right on the clip (or in its ⋯ menu when zoomed out):
 - **Auto-slice by sentence** — split a monologue into one clip per sentence using Whisper word timestamps.
 - **Manual slice** — hold **Ctrl** (or ⌘) and click a clip to drop a razor; drag to fine-tune the exact split point and release to cut into two clips. Both halves are auto-whispered, and the slice is covered by single-step undo.
 - **🎚 Vocal transforms** — open the per-segment transform modal to reshape an existing clip's audio: pitch / formant, creative colours (sub-octave, drive, ring-mod, vibrato), presets, and a **☎️ Telephone** lo-fi "bad phone call" effect (band-limit + crackle). Preview before committing; the bake is reversible (re-open and remove to restore the original).
+- **🎛 Isolate ▸ Voice / Instrumentals** — split a clip into stems with the RoFormer separator: keep just the voice, or just the instrumental/background. Most useful on uploaded audio channels (pull the vocal off a song, or the music out from under a recording). Destructive but undo-covered — a wrong stem is one Undo away, then isolate the other from the original mix.
 - **Whisper align** — re-sync a clip's displayed text to its actual audio without regenerating.
 - **Merge** — shift-click clips on the same track, then merge into one continuous clip (gaps become silence, text concatenates).
 - **Collapse track** — flatten an entire lane into a single movable, trimmable, re-sliceable clip.

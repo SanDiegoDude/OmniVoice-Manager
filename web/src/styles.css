@@ -524,6 +524,8 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 .mtk-menu-sep { height: 1px; background: var(--border); margin: 3px 0; }
 .mtk-menu { max-height: 80vh; overflow-y: auto; }
 .mtk-menu .btn.sm { justify-content: flex-start; text-align: left; }
+.mtk-submenu-caret { margin-left: auto; opacity: .6; padding-left: 10px; }
+.mtk-submenu { display: flex; flex-direction: column; gap: 6px; margin: 1px 0 1px 10px; padding-left: 8px; border-left: 2px solid var(--border); }
 .mtk-trim { margin-top: 12px; padding: 12px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius-sm); }
 
 /* ── Standard tool modal (trim/speed, vocal performance, future plug-ins) ── */

@@ -113,6 +113,7 @@ export function MultitrackEditor({
   onInsertAndRender,
   onClearPerformance,
   onApplyTransform,
+  onIsolateSegment,
   onTranscribeClip,
   regenIndex,
   busy,
@@ -173,6 +174,7 @@ export function MultitrackEditor({
   ) => Promise<MultitrackSegment | null>
   onClearPerformance: (index: number) => Promise<void>
   onApplyTransform: (index: number, transforms: VocalTransform) => Promise<void>
+  onIsolateSegment: (index: number, stem: 'vocals' | 'instrumental') => Promise<void>
   onTranscribeClip: (wav: Blob) => Promise<string>
   regenIndex: number | null
   busy: boolean
@@ -214,6 +216,10 @@ export function MultitrackEditor({
   >(null)
   const [slicing, setSlicing] = useState<number | null>(null)
   const [inpainting, setInpainting] = useState<number | null>(null)
+  // Index of the segment whose stem isolation is in flight; null = idle.
+  const [isolating, setIsolating] = useState<number | null>(null)
+  // Whether the segment menu's "Isolate ▸" submenu is expanded.
+  const [isoOpen, setIsoOpen] = useState(false)
   // Index of the segment whose Vocal Transforms plug-in is open; null = closed.
   const [fxModal, setFxModal] = useState<number | null>(null)
   const [promoting, setPromoting] = useState<string | null>(null)
@@ -276,7 +282,8 @@ export function MultitrackEditor({
   }, [])
   const [merging, setMerging] = useState(false)
   const [segMenu, setSegMenu] = useState<SegMenu>(null)
-  useLayoutEffect(() => { clampToViewport(segMenuRef.current) }, [segMenu])
+  useLayoutEffect(() => { clampToViewport(segMenuRef.current) }, [segMenu, isoOpen])
+  useEffect(() => { setIsoOpen(false) }, [segMenu?.index])
   useLayoutEffect(() => { clampToViewport(insertMenuRef.current) }, [insert])
 
   const segAudioRef = useRef<HTMLAudioElement | null>(null)
@@ -1644,6 +1651,34 @@ export function MultitrackEditor({
               >
                 🎚 Vocal transforms…{seg.fx ? ' (applied)' : ''}
               </button>
+              <button
+                className="btn sm"
+                title="Isolate a stem from this clip with the RoFormer separator — keep just the voice, or just the instrumental/background"
+                onClick={() => setIsoOpen((v) => !v)}
+              >
+                <span>🎛 Isolate{isolating === seg.index ? '…' : ''}</span>
+                <span className="mtk-submenu-caret">{isoOpen ? '▾' : '▸'}</span>
+              </button>
+              {isoOpen && (
+                <div className="mtk-submenu">
+                  <button
+                    className="btn sm"
+                    disabled={isolating != null}
+                    title="Keep only the voice (vocals), drop the music/background"
+                    onClick={async () => { const i = seg.index; setSegMenu(null); setIsolating(i); try { await onIsolateSegment(i, 'vocals') } finally { setIsolating(null) } }}
+                  >
+                    🎤 Voice
+                  </button>
+                  <button
+                    className="btn sm"
+                    disabled={isolating != null}
+                    title="Keep only the instrumental/background, drop the voice"
+                    onClick={async () => { const i = seg.index; setSegMenu(null); setIsolating(i); try { await onIsolateSegment(i, 'instrumental') } finally { setIsolating(null) } }}
+                  >
+                    🎸 Instrumentals
+                  </button>
+                </div>
+              )}
               {!isAudioChan && (
                 <>
                   <div className="mtk-menu-sep" />

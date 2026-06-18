@@ -234,6 +234,13 @@ def gpu_worker(req_q, res_q, cfg: Dict[str, Any]) -> None:
         iso = get_isolator()
         wav = np.asarray(payload["waveform"], dtype=np.float32)
         sr = int(payload.get("sample_rate", 24000))
+        # The RoFormer separator emits both stems; pick the one requested.
+        # Default ("vocals") keeps every existing caller (clone cleanup, inpaint)
+        # unchanged.
+        stem = str(payload.get("stem", "vocals")).lower()
+        if stem in ("instrumental", "instrumentals", "music", "inst"):
+            _vocals, instrumental = iso.isolate(wav, sample_rate=sr, return_instrumental=True)
+            return {"waveform": np.asarray(instrumental, dtype=np.float32), "sample_rate": sr}
         vocals = iso.isolate(wav, sample_rate=sr)
         return {"waveform": vocals.astype(np.float32), "sample_rate": sr}
 

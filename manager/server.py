@@ -70,6 +70,7 @@ from .schemas import (
     RegenSegmentRequest,
     ScriptAndSpeakRequest,
     ScriptRequest,
+    SegmentIsolateRequest,
     SegmentTransformRequest,
     SetChannelRequest,
     SetSegmentTextRequest,
@@ -832,6 +833,26 @@ def multitrack_segment_transform(sid: str, index: int, req: SegmentTransformRequ
     the clip's original audio. Covered by the standard single-step undo."""
     try:
         return sessions.apply_segment_transform(sid, index, req.transforms)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/multitrack/{sid}/segment/{index}/isolate")
+def multitrack_segment_isolate(sid: str, index: int, req: SegmentIsolateRequest):
+    """Replace a segment's audio with an isolated stem — just the voice, or just
+    the instrumental/background — using the RoFormer separator (the same model
+    that cleans references; it emits both stems, we keep the one you pick).
+    Destructive but covered by the standard single-step undo."""
+    stem = "instrumental" if str(req.stem).lower().startswith("inst") else "vocals"
+    try:
+        audio, sr = sessions.segment_full_audio(sid, index)
+        if audio.size == 0:
+            raise HTTPException(400, "Segment has no audio to isolate.")
+        iso = model_manager.isolate({"waveform": audio, "sample_rate": sr, "stem": stem})
+        wav = np.asarray(iso["waveform"], dtype=np.float32)
+        return sessions.apply_segment_isolate(sid, index, wav, sr, stem)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:

@@ -459,6 +459,19 @@ export const api = {
     if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Transform failed')
     return res.json()
   },
+  async isolateSegment(
+    sid: string,
+    index: number,
+    stem: 'vocals' | 'instrumental',
+  ): Promise<MultitrackSession> {
+    const res = await fetch(`/api/multitrack/${sid}/segment/${index}/isolate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stem }),
+    })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Isolation failed')
+    return res.json()
+  },
   async transformOutputFile(
     clip: Blob,
     transforms: VocalTransform | null,

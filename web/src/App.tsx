@@ -724,6 +724,16 @@ export default function App() {
       throw e
     }
   }
+  const isolateSegment = async (index: number, stem: 'vocals' | 'instrumental') => {
+    if (!session) return
+    try {
+      setSession(await api.isolateSegment(session.id, index, stem))
+      notify(`Isolated ${stem === 'instrumental' ? 'instrumental' : 'voice'} on segment`, 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+      throw e
+    }
+  }
   const transcribeClip = (wav: Blob) => api.transcribeClip(wav)
   const promoteChannel = async (pos: string, name: string) => {
     if (!session) return null
@@ -1026,6 +1036,7 @@ export default function App() {
           onInsertAndRender={insertAndRender}
           onClearPerformance={clearPerformance}
           onApplyTransform={applyTransform}
+          onIsolateSegment={isolateSegment}
           onTranscribeClip={transcribeClip}
           onDeleteSpace={deleteSpace}
           onAddSpace={addSpace}
