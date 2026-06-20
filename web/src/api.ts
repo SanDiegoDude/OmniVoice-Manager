@@ -187,6 +187,9 @@ export interface MultitrackTrack {
   muted?: boolean
   kind?: string
   mode: string
+  /** Full clone/design config (null for audio channels) — lets re-opening a
+   * project rehydrate the speaker form's reference-voice selector + toggles. */
+  config?: SpeakerConfig | null
   segments: MultitrackSegment[]
 }
 
@@ -201,6 +204,65 @@ export interface MultitrackSession {
   tracks: MultitrackTrack[]
   segment_count: number
   can_undo?: boolean
+  can_redo?: boolean
+}
+
+/** A saved project (multitrack session) as shown in the Projects pillar. */
+export interface Project {
+  id: string
+  title: string
+  created?: string
+  updated?: number
+  timestamp?: number
+  total_duration_s: number
+  segment_count: number
+  track_count: number
+  /** Generative (voice) tracks only — excludes uploaded audio channels. */
+  voice_count?: number
+  speaker_names: string[]
+  mix_url: string
+  last_opened?: number
+}
+
+/** One labeled, navigable step in a project's action history. */
+export interface HistoryStep {
+  id: string
+  label: string
+  ts?: number
+  index: number
+}
+
+export interface HistoryState {
+  steps: HistoryStep[]
+  cursor: number
+  can_undo: boolean
+  can_redo: boolean
+}
+
+/** A bundled voice the importer can offer to add to the library. */
+export interface ImportableVoice {
+  track: string
+  file: string
+  name: string
+  folder: string
+  preview_url: string
+}
+
+export interface ImportReport {
+  voices: ImportableVoice[]
+}
+
+export interface ImportResult {
+  session: MultitrackSession
+  import_report: ImportReport
+}
+
+/** Asset inventory for a project (the ⓘ details popover). */
+export interface ProjectAssets {
+  id: string
+  voices: { track: string; name: string; voice: string | null; in_library: boolean; bundled: boolean }[]
+  uploads: { track: string; name: string; duration_s: number; bundled: boolean }[]
+  plugins: { plugin: string; keys: string[] | null }[]
 }
 
 export interface HistoryEntry {
@@ -406,6 +468,10 @@ export const api = {
   promoteChannel: (sid: string, pos: string, name: string) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/speaker/${pos}/promote`, { method: 'POST', body: JSON.stringify({ name }) }),
   undo: (sid: string) => jfetch<MultitrackSession>(`/api/multitrack/${sid}/undo`, { method: 'POST' }),
+  redo: (sid: string) => jfetch<MultitrackSession>(`/api/multitrack/${sid}/redo`, { method: 'POST' }),
+  historyState: (sid: string) => jfetch<HistoryState>(`/api/multitrack/${sid}/history`),
+  historyJump: (sid: string, index: number) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/history/jump`, { method: 'POST', body: JSON.stringify({ index }) }),
   setChannel: (sid: string, pos: string, fields: { name?: string | null; gain_db?: number; muted?: boolean }) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/speaker/${pos}/channel`, { method: 'POST', body: JSON.stringify(fields) }),
   mergeSegments: (sid: string, indices: number[]) =>
@@ -568,6 +634,45 @@ export const api = {
     jfetch<{ ok: boolean }>('/api/history/clear', { method: 'POST', body: JSON.stringify({ kind }) }),
 
   outputs: () => jfetch<{ outputs: OutputFile[] }>('/api/outputs'),
+  deleteOutput: (filename: string) =>
+    jfetch<{ ok: boolean }>(`/api/outputs/${encodeURIComponent(filename)}`, { method: 'DELETE' }),
+  renameOutput: (filename: string, name: string) =>
+    jfetch<OutputFile>(`/api/outputs/${encodeURIComponent(filename)}/rename`, {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
+  // ---- Projects (browseable, restorable sessions) ----
+  projects: () => jfetch<{ projects: Project[] }>('/api/projects'),
+  openProject: (sid: string) => jfetch<MultitrackSession>(`/api/multitrack/${sid}/open`, { method: 'POST' }),
+  /** Fork a project into an independent "Copy of …" (in-app, no export/import). */
+  duplicateProject: (sid: string) => jfetch<MultitrackSession>(`/api/multitrack/${sid}/duplicate`, { method: 'POST' }),
+  renameProject: (sid: string, title: string) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/rename`, { method: 'POST', body: JSON.stringify({ title }) }),
+  /** Download URLs for the project bundle + DAW stems (anchor href / window.open). */
+  bundleUrl: (sid: string) => `/api/multitrack/${sid}/export`,
+  stemsUrl: (sid: string) => `/api/multitrack/${sid}/export-stems`,
+  async importProject(file: File): Promise<ImportResult> {
+    const fd = new FormData()
+    fd.append('file', file)
+    const res = await fetch('/api/projects/import', { method: 'POST', body: fd })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Import failed')
+    return res.json()
+  },
+  /** Import selected bundled voices into the library and relink the project. */
+  importVoices: (sid: string, imports: { track: string; file: string; name: string; folder: string }[]) =>
+    jfetch<MultitrackSession>(`/api/projects/${sid}/import-voices`, {
+      method: 'POST',
+      body: JSON.stringify({ imports }),
+    }),
+  /** Asset inventory (voices / uploads / plug-in data) for the details popover. */
+  projectAssets: (sid: string) => jfetch<ProjectAssets>(`/api/multitrack/${sid}/assets`),
+  /** Hook for 3rd-party plug-ins to persist state with a scene. */
+  setPluginData: (sid: string, plugin: string, data: unknown, merge = true) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/plugin-data`, {
+      method: 'POST',
+      body: JSON.stringify({ plugin, data, merge }),
+    }),
 }
 
 export interface ProcessVoiceBody {

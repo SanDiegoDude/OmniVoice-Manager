@@ -12,7 +12,7 @@ ADR Studio is the default tab and the heart of the Manager. Instead of one baked
 
 - **Per-clip regenerate** re-rolls one line in place. If the new take is longer or shorter, downstream clips ripple by the delta so your scene's spacing survives — but *only* when the clip controls its endpoint (it ends alone, or is the longest of its overlap stack). A short clip layered under a longer one leaves the timeline untouched.
 - **Channel regenerate-all** re-renders every clip on a track with the same smart ripple, clip by clip in timeline order — the tool for re-casting a voice. Clips with a saved vocal performance re-render **as performances** against the new voice; plain clips do a normal read.
-- **Single-step undo** covers any edit or regeneration.
+- **Multi-step undo / redo** covers every edit and regeneration. The full chain is a labeled, navigable history (see *Projects, Outputs & Action history* below) — `↶ Undo` / `Redo ↷` step one at a time, or jump straight to any earlier step.
 
 ## The clip toolkit
 
@@ -22,7 +22,7 @@ Right on the clip (or in its ⋯ menu when zoomed out):
 - **Split at playhead**, **duplicate** (with or without ripple), **delete** (with or without ripple), **download** an individual clip.
 - **Inline dialogue editing** — double-click a clip's text, edit, and regenerate with the new line.
 - **Auto-slice by sentence** — split a monologue into one clip per sentence using Whisper word timestamps.
-- **Manual slice** — hold **Ctrl** (or ⌘) and click a clip to drop a razor; drag to fine-tune the exact split point and release to cut into two clips. Both halves are auto-whispered, and the slice is covered by single-step undo.
+- **Manual slice** — hold **Ctrl** (or ⌘) and click a clip to drop a razor; drag to fine-tune the exact split point and release to cut into two clips. Both halves are auto-whispered, and the slice is covered by undo.
 - **🎚 Vocal transforms** — open the per-segment transform modal to reshape an existing clip's audio: pitch / formant, creative colours (sub-octave, drive, ring-mod, vibrato), presets, and a **☎️ Telephone** lo-fi "bad phone call" effect (band-limit + crackle). Preview before committing; the bake is reversible (re-open and remove to restore the original).
 - **🎛 Isolate ▸ Voice / Instrumentals** — split a clip into stems with the RoFormer separator: keep just the voice, or just the instrumental/background. Most useful on uploaded audio channels (pull the vocal off a song, or the music out from under a recording). Destructive but undo-covered — a wrong stem is one Undo away, then isolate the other from the original mix.
 - **Whisper align** — re-sync a clip's displayed text to its actual audio without regenerating.
@@ -69,4 +69,16 @@ Double-click an empty spot on a generative track → **🎙 Record dialog…** t
 
 ## Finalize
 
-**Finalize** stitches the timeline into one track with **perceptual LUFS loudness matching** (ITU-R BS.1770 / EBU R128) across all clips and a single **true-peak limiter** on the master — then saves it to history in your chosen output format (**MP3 192k** or **lossless FLAC**, set by the top-bar toggle). Every generation in history stores its full state and restores with one click.
+**Finalize** stitches the timeline into one track with **perceptual LUFS loudness matching** (ITU-R BS.1770 / EBU R128) across all clips and a single **true-peak limiter** on the master — then saves it as a finished **Output** in your chosen format (**MP3 192k** or **lossless FLAC**, set by the top-bar toggle). Finalize is the *delivery/mixdown* step — the output, not the project. The editable project keeps living in the **Projects** list (below), so you can keep working after a finalize.
+
+## Projects, Outputs & Action history
+
+The right-hand column splits into three distinct concerns:
+
+- **Projects** — every scene is an editable, **re-openable** project. Each one auto-saves continuously (the manifest + per-clip media pool), so a browser crash, an SSL hiccup, or a stray reload never loses work: just click the project to **fully restore it into the timeline** and keep editing — not just "restore settings." Projects can be renamed, played (mix preview), and deleted. Two share/hand-off actions sit on each project:
+  - **⬇ Bundle** — download a single self-contained `.omvp` file (manifest + all media + a mix preview) that travels as one unit. **⬆ Import** drops a bundle back in as a fresh project.
+  - **♫ Stems** — bounce one consolidated **FLAC per track**, every stem starting at **project zero (t=0)** so they line up the instant you drop them into any DAW (Pro Tools, Reaper, …).
+- **Outputs** — the finished, non-project files from **Finalize** and the **Voice Clone** tab. Replay, rename, download, or delete; they read clearly as "not a project."
+- **History** — the open project's **action history**: a labeled, navigable list of every step ("Regenerate clip", "Move clip", "Vocal transforms", …). Undo/redo from here, or click any step to jump straight to that state. Survives reloads, and repeated takes are content-addressed so the chain doesn't balloon on disk.
+
+*Smart-script drafts* live under a collapsible section at the bottom of the Projects list — click one to reload its prompt/script/speakers into the Studio.

@@ -10,17 +10,25 @@ time are summed → real layering), LUFS-leveled per clip, then true-peak limite
 Layout (under output/sessions/<id>/):
     seg_<index>.wav   raw per-line audio (full, pre-trim/speed)
     ref_<sid>.wav     cleaned reference per clone speaker (for fast regen)
+    vsrc_<hash>.<ext> snapshot of the library voice a clone speaker used, copied
+                      INTO the project so it owns the exact voice that produced
+                      its samples (the library is freely editable). Travels in
+                      the .omvp bundle; re-importable on another machine.
     mix.wav           current stitched preview
     session.json      manifest
 """
 
 from __future__ import annotations
 
+import io
 import json
+import re
 import shutil
+import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -62,6 +70,9 @@ def _read(sid: str) -> Optional[Dict[str, Any]]:
 
 
 def _write(session: Dict[str, Any]) -> None:
+    # Every manifest write is an auto-save; stamp the moment so the Projects list
+    # can surface "last edited" and sort by recency without any extra plumbing.
+    session["updated"] = time.time()
     p = _manifest_path(session["id"])
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(session, indent=2, ensure_ascii=False))
@@ -87,6 +98,104 @@ def _eff_duration(seg: Dict[str, Any]) -> float:
     te = max(ts, min(te, rdur))
     speed = float(seg.get("speed", 1.0) or 1.0)
     return max(0.0, (te - ts) / (speed if speed > 0 else 1.0))
+
+
+# ---------------------------------------------------------------------------
+# Voice snapshots — a project must own the exact voices that produced its
+# samples. The voice library is freely editable (a voice can be renamed, moved
+# or deleted out from under a project), so on every clone-speaker assignment we
+# copy that voice INTO the session, content-addressed (vsrc_<hash>.<ext>). The
+# snapshot ships inside the .omvp bundle, so a project opened on another machine
+# can re-find/import its voices even if they were never in that library.
+# ---------------------------------------------------------------------------
+def _snapshot_voice(d: Path, cfg: Dict[str, Any]) -> None:
+    """Best-effort: copy the library voice a clone speaker uses into the session
+    and record ``voice_snapshot`` (filename) + ``voice_name`` on the cfg. A
+    missing library voice is silently skipped (nothing left to capture)."""
+    if cfg.get("mode") != "clone" or not cfg.get("voice"):
+        return
+    try:
+        from . import voices as _voices
+
+        src = _voices.resolve_voice_path(cfg["voice"])
+        ext = src.suffix.lower() or ".wav"
+        fn = f"vsrc_{_voices.content_hash(src)[:16]}{ext}"
+        dest = d / fn
+        if not dest.exists():
+            shutil.copy2(src, dest)
+        cfg["voice_snapshot"] = fn
+        cfg["voice_name"] = Path(cfg["voice"]).name.rsplit(".", 1)[0]
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+
+
+def _gc_voice_snapshots(session: Dict[str, Any]) -> None:
+    """Drop vsrc_* snapshots no speaker references any more (e.g. after a voice
+    swap), so stale voices don't ride along in the bundle."""
+    d = _dir(session["id"])
+    keep = {
+        cfg.get("voice_snapshot")
+        for cfg in session.get("speakers", {}).values()
+        if cfg.get("voice_snapshot")
+    }
+    for f in d.glob("vsrc_*"):
+        if f.name not in keep:
+            f.unlink(missing_ok=True)
+
+
+def _consolidate_voices(session: Dict[str, Any]) -> None:
+    """Ensure every clone speaker with a resolvable library voice has a snapshot
+    captured — covers projects created before snapshotting existed. Called on
+    export so a bundle is always self-contained."""
+    d = _dir(session["id"])
+    for cfg in session.get("speakers", {}).values():
+        if (
+            cfg.get("mode") == "clone"
+            and cfg.get("voice")
+            and not (cfg.get("voice_snapshot") and (d / cfg["voice_snapshot"]).exists())
+        ):
+            _snapshot_voice(d, cfg)
+
+
+def _relink_voices(session: Dict[str, Any]) -> bool:
+    """On open/import, reconcile each clone speaker's ``voice`` against the fluid
+    library: keep it if it still resolves; else re-find it by content (its
+    bundled snapshot) and relink; else clear it (the track keeps its cached ref
+    for regen — it just has no library voice). Returns True if anything changed."""
+    from . import voices as _voices
+
+    d = _dir(session["id"])
+    changed = False
+    for cfg in session.get("speakers", {}).values():
+        if cfg.get("mode") != "clone" or not cfg.get("voice"):
+            continue
+        try:
+            _voices.resolve_voice_path(cfg["voice"])
+            continue  # still present
+        except (FileNotFoundError, ValueError):
+            pass
+        snap = cfg.get("voice_snapshot")
+        match = _voices.find_by_content(d / snap) if snap and (d / snap).exists() else None
+        if match:
+            cfg["voice"] = match
+            cfg.pop("voice_missing", None)
+        elif snap and (d / snap).exists():
+            # No library match, but the project ships the exact voice — expose it
+            # as an ephemeral "project-voice/<name>" so it stays selectable and
+            # usable (regen reads the snapshot). It's never added to the library;
+            # the user can still import it from the project if they want it there.
+            if not str(cfg["voice"]).startswith("project-voice/"):
+                cfg["voice_missing"] = cfg["voice"]
+            base = cfg.get("voice_missing") or cfg["voice"]
+            name = cfg.get("voice_name") or Path(base).name.rsplit(".", 1)[0]
+            cfg["voice_name"] = name
+            cfg["voice"] = f"project-voice/{name}"
+        else:
+            # Nothing bundled to fall back on — leave the track voiceless.
+            cfg["voice_missing"] = cfg["voice"]
+            cfg["voice"] = None
+        changed = True
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +253,8 @@ def create(
         cursor += _eff_duration(seg) + gap_s
 
     speakers = {str(k): {**v, "name": _speaker_name(str(k), v)} for k, v in speakers_cfg.items()}
+    for cfg in speakers.values():
+        _snapshot_voice(d, cfg)
 
     session = {
         "id": sid,
@@ -400,6 +511,19 @@ def public(session: Dict[str, Any]) -> Dict[str, Any]:
                 "muted": bool(cfg.get("muted", False)),
                 "kind": cfg.get("kind", "speaker"),
                 "mode": cfg.get("mode", "auto"),
+                # Full clone/design config so re-opening a project can rehydrate
+                # the speaker form (reference-voice selector, processing toggles).
+                "config": None if cfg.get("kind", "speaker") == "audio" else {
+                    "mode": cfg.get("mode", "auto"),
+                    "voice": cfg.get("voice") or None,
+                    "ref_text": cfg.get("ref_text"),
+                    "instruct": cfg.get("instruct"),
+                    "language": cfg.get("language"),
+                    "isolate": bool(cfg.get("isolate", True)),
+                    "normalize": bool(cfg.get("normalize", True)),
+                    "dereverb": bool(cfg.get("dereverb", False)),
+                    "dereverb_method": cfg.get("dereverb_method", "roformer"),
+                },
                 "segments": segs,
             }
         )
@@ -414,8 +538,18 @@ def public(session: Dict[str, Any]) -> Dict[str, Any]:
         "mix_url": f"/api/audio/session/{sid}/{session['mix_file']}?t={bust}",
         "tracks": tracks,
         "segment_count": len(session["segments"]),
-        "can_undo": _undo_dir(sid).exists(),
+        "can_undo": _ah().can_undo(sid),
+        "can_redo": _ah().can_redo(sid),
+        "plugin_data": session.get("plugin_data") or {},
     }
+
+
+def _ah():
+    """Lazy import of the action-history store (avoids an import cycle:
+    actionhist imports SESSIONS_DIR from this module)."""
+    from . import actionhist
+
+    return actionhist
 
 
 # ---------------------------------------------------------------------------
@@ -447,15 +581,29 @@ def _speaker_worker(session: Dict[str, Any], speaker_id: str, sr: int) -> Dict[s
             spk["isolate"] = bool(cfg.get("isolate", True))
             spk["normalize"] = bool(cfg.get("normalize", True))
             spk["dereverb"] = bool(cfg.get("dereverb", False))
-        elif cfg.get("voice"):
+        elif cfg.get("voice") or cfg.get("voice_snapshot"):
             # Cold build: hand the worker the raw voice + the cleaning flags so it
             # isolates/dereverbs/normalizes once; we capture the cleaned ref below.
+            # Resolve order: a real library voice → else the project's own bundled
+            # snapshot (covers ephemeral "project-voice/…" + voices since deleted
+            # from this machine's library), so a shared project always regenerates.
             from . import voices as _voices
 
-            spk["waveform"] = _voices.load_voice_audio(cfg["voice"])
-            spk["isolate"] = bool(cfg.get("isolate", True))
-            spk["normalize"] = bool(cfg.get("normalize", True))
-            spk["dereverb"] = bool(cfg.get("dereverb", False))
+            voice = cfg.get("voice")
+            wav = None
+            if voice and not str(voice).startswith("project-voice/"):
+                try:
+                    wav = _voices.load_voice_audio(voice)
+                except (FileNotFoundError, ValueError):
+                    wav = None
+            snap = cfg.get("voice_snapshot")
+            if wav is None and snap and (_dir(session["id"]) / snap).exists():
+                wav = load_audio(_dir(session["id"]) / snap, sr=sr)
+            if wav is not None:
+                spk["waveform"] = wav
+                spk["isolate"] = bool(cfg.get("isolate", True))
+                spk["normalize"] = bool(cfg.get("normalize", True))
+                spk["dereverb"] = bool(cfg.get("dereverb", False))
     return spk
 
 
@@ -642,6 +790,12 @@ def _controls_endpoint(session: Dict[str, Any], target: Dict[str, Any], start: f
     eps = 1e-3
     for o in session["segments"]:
         if o is target or int(o["index"]) == int(target["index"]):
+            continue
+        # Uploaded audio channels (music/SFX beds) routinely span the whole scene;
+        # they're a backing layer, not part of a voice clip's overlap stack, so
+        # they must NOT gate timeline rippling — otherwise a bed under a track
+        # makes every voice clip look "tucked under" and regen never re-gaps them.
+        if _channel_of(session, o["speaker_id"]).get("kind") == "audio":
             continue
         os_ = float(o.get("start_s", 0.0) or 0.0)
         oe = os_ + _eff_duration(o)
@@ -972,6 +1126,8 @@ def create_empty(
     d = _dir(sid)
     d.mkdir(parents=True, exist_ok=True)
     speakers = {str(k): {**v, "name": _speaker_name(str(k), v)} for k, v in speakers_cfg.items()}
+    for cfg in speakers.values():
+        _snapshot_voice(d, cfg)
     session = {
         "id": sid,
         "title": title or "Untitled Scene",
@@ -1002,7 +1158,9 @@ def add_speaker(sid: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
             raise FileNotFoundError("Session not found")
         nids = [int(k) for k in session.get("speakers", {}) if str(k).isdigit()]
         nid = str((max(nids) + 1) if nids else 1)
-        session.setdefault("speakers", {})[nid] = {**cfg, "name": _speaker_name(nid, cfg)}
+        merged = {**cfg, "name": _speaker_name(nid, cfg)}
+        _snapshot_voice(_dir(sid), merged)
+        session.setdefault("speakers", {})[nid] = merged
         if session.get("track_order"):
             session["track_order"].append(nid)
         _write(session)
@@ -1025,11 +1183,16 @@ def update_speaker(sid: str, pos: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         merged["gain_db"] = float(old.get("gain_db", 0.0) or 0.0)
         if not voice_changed and old.get("custom_name"):
             merged["custom_name"] = old["custom_name"]
+        if voice_changed:
+            merged.pop("voice_snapshot", None)
+            merged.pop("voice_missing", None)
+        _snapshot_voice(_dir(sid), merged)
         session.setdefault("speakers", {})[pos] = merged
         if voice_changed:
             ref_fn = session.get("refs", {}).pop(pos, None)
             if ref_fn:
                 (_dir(sid) / ref_fn).unlink(missing_ok=True)
+            _gc_voice_snapshots(session)
         _write(session)
         return public(session)
 
@@ -2063,58 +2226,141 @@ def delete_space(sid: str, start_s: float, amount: float) -> Dict[str, Any]:
 
 
 def discard(sid: str) -> None:
-    """Delete a session directory (e.g. an abandoned empty skeleton)."""
+    """Delete a session directory (e.g. an abandoned empty skeleton) plus its
+    single-step undo stash and full action-history store."""
     shutil.rmtree(_dir(sid), ignore_errors=True)
     shutil.rmtree(_undo_dir(sid), ignore_errors=True)
+    from . import actionhist
+
+    actionhist.discard(sid)
 
 
-def _undo_dir(sid: str) -> Path:
-    return SESSIONS_DIR / f"{sid}__undo"
+# ---------------------------------------------------------------------------
+# Projects (browse / restore / rename) — the "Projects" pillar of the column.
+#
+# A session directory IS a project: its manifest is the edit-decision list and
+# the seg_*/ref_*/perform_* files are the media pool. Because every mutation
+# auto-saves the manifest, a project is always re-openable — these helpers just
+# expose the on-disk sessions as a browseable, named, restorable list.
+# ---------------------------------------------------------------------------
+def _project_summary(session: Dict[str, Any]) -> Dict[str, Any]:
+    """A lightweight card for the Projects list (no per-clip detail)."""
+    speakers = session.get("speakers", {})
+    names: List[str] = []
+    voice_count = 0
+    for k in sorted(speakers, key=lambda x: (0, int(x)) if str(x).isdigit() else (1, x)):
+        cfg = speakers[k]
+        names.append(cfg.get("custom_name") or cfg.get("name") or _speaker_name(str(k), cfg))
+        if cfg.get("kind", "speaker") != "audio":
+            voice_count += 1
+    return {
+        "id": session["id"],
+        "title": session.get("title") or "Untitled Scene",
+        "created": session.get("created"),
+        "updated": session.get("updated"),
+        "timestamp": session.get("timestamp"),
+        "total_duration_s": session.get("total_duration_s", 0.0),
+        "segment_count": len(session.get("segments", [])),
+        "track_count": len(speakers),
+        "voice_count": voice_count,
+        "speaker_names": names,
+        "mix_url": f"/api/audio/session/{session['id']}/{session.get('mix_file', 'mix.wav')}?t={int(time.time() * 1000)}",
+        "last_opened": session.get("last_opened"),
+    }
 
 
-def checkpoint(sid: str) -> None:
-    """Snapshot the current session for single-step undo. Copies the manifest +
-    per-segment audio; the large, regenerable mix is skipped (rebuilt on undo).
-    Overwrites any previous snapshot — only ONE step back is kept on purpose."""
+def list_projects(limit: int = 200, include_empty: bool = False) -> List[Dict[str, Any]]:
+    """Browse saved projects (sessions), most-recently-edited first. Abandoned
+    empty skeletons (no segments, default title) are hidden unless asked for."""
+    out: List[Dict[str, Any]] = []
+    if not SESSIONS_DIR.exists():
+        return out
+    for d in SESSIONS_DIR.iterdir():
+        # Skip the sibling undo/history stores ("<sid>__undo", "<sid>__hist").
+        if not d.is_dir() or "__" in d.name:
+            continue
+        session = _read(d.name)
+        if not session:
+            continue
+        seg_count = len(session.get("segments", []))
+        is_default = (session.get("title") or "Untitled Scene") == "Untitled Scene"
+        if not include_empty and seg_count == 0 and is_default:
+            continue
+        out.append(_project_summary(session))
+    out.sort(key=lambda s: float(s.get("updated") or s.get("timestamp") or 0.0), reverse=True)
+    return out[:limit]
+
+
+def rename(sid: str, title: str) -> Dict[str, Any]:
+    """Rename a project (its scene title). Empty titles fall back to a default."""
     with _lock:
-        src = _dir(sid)
-        sess = _read(sid)
-        if not sess:
-            return
-        mix = sess.get("mix_file")
-        dst = _undo_dir(sid)
-        if dst.exists():
-            shutil.rmtree(dst, ignore_errors=True)
-        dst.mkdir(parents=True, exist_ok=True)
-        for f in src.iterdir():
-            if f.is_file() and f.name != mix:
-                shutil.copy2(f, dst / f.name)
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        session["title"] = (title or "").strip() or "Untitled Scene"
+        _write(session)
+        return public(session)
 
 
-def can_undo(sid: str) -> bool:
-    return _undo_dir(sid).exists()
-
-
-def undo(sid: str) -> Dict[str, Any]:
-    """Restore the last checkpoint (one step back), then rebuild the mix."""
+def duplicate(sid: str) -> Dict[str, Any]:
+    """Fork a project: deep-copy its whole session dir (manifest + media pool) to
+    a fresh id and title it "Copy of <title>". A fast in-app alternative to
+    export → import — the copy is fully independent (own media, own history)."""
     with _lock:
-        dst = _undo_dir(sid)
-        if not dst.exists():
-            raise FileNotFoundError("Nothing to undo")
-        src = _dir(sid)
-        for f in src.iterdir():
-            if f.is_file():
-                f.unlink()
-        for f in dst.iterdir():
-            if f.is_file():
-                shutil.copy2(f, src / f.name)
-        shutil.rmtree(dst, ignore_errors=True)
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        new_sid = uuid.uuid4().hex[:12]
+        src, dst = _dir(sid), _dir(new_sid)
+        shutil.copytree(src, dst)
+        (dst / "session.json.tmp").unlink(missing_ok=True)
+        new = json.loads((dst / "session.json").read_text())
+        new["id"] = new_sid
+        new["title"] = f"Copy of {session.get('title') or 'Untitled Scene'}"
+        new["created"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        new["timestamp"] = time.time()
+        new.pop("last_opened", None)
+        _write(new)
+        return public(new)
+
+
+def touch_opened(sid: str) -> Optional[Dict[str, Any]]:
+    """Stamp a project as just-opened (for "last opened" sorting/labels) without
+    counting as an edit — the ``updated`` auto-save time is left untouched."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            return None
+        session["last_opened"] = time.time()
+        # Restore voices alongside the rest of the project: relink to the library
+        # if still present (or re-findable by content), else leave the track
+        # voiceless. The cached refs keep regen working either way.
+        _relink_voices(session)
+        # Write directly (bypassing _write's ``updated`` stamp) so merely opening
+        # a project doesn't reorder it ahead of genuinely edited ones.
+        p = _manifest_path(sid)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(session, indent=2, ensure_ascii=False))
+        tmp.replace(p)
+        return public(session)
+
+
+def restitch(sid: str) -> Dict[str, Any]:
+    """Re-render the mix from the current manifest and return the public shape.
+    Used after an action-history undo/redo swaps the manifest + media in place."""
+    with _lock:
         session = _read(sid)
         if not session:
             raise FileNotFoundError("Session not found")
         _stitch(session)
         _write(session)
         return public(session)
+
+
+def _undo_dir(sid: str) -> Path:
+    # Legacy single-step stash, superseded by the action-history store
+    # (manager/actionhist.py). Kept only so discard() can clean up old dirs.
+    return SESSIONS_DIR / f"{sid}__undo"
 
 
 # ---------------------------------------------------------------------------
@@ -2153,3 +2399,268 @@ def resolve_file(sid: str, name: str) -> Path:
     if not target.exists():
         raise FileNotFoundError(name)
     return target
+
+
+# ---------------------------------------------------------------------------
+# Sharing / hand-off: stem export + .omvp project bundle
+# ---------------------------------------------------------------------------
+def _safe_name(text: str, default: str = "scene") -> str:
+    text = re.sub(r"[^A-Za-z0-9._-]+", "_", (text or "").strip()).strip("._-")
+    return text[:60] or default
+
+
+def export_stems(sid: str) -> Tuple[List[Tuple[str, np.ndarray]], int, str]:
+    """Bounce one consolidated file per track, every stem starting at project
+    zero (t=0) and sharing the same length, so they line up when dropped into
+    any DAW. Per-clip trim/speed/gain/fades and channel gain + LUFS leveling are
+    baked in exactly as in the mix; mute is ignored (stems are for hand-off)."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        sr = int(session["sample_rate"])
+        d = _dir(sid)
+        params = session.get("params", {})
+        level = bool(params.get("match_loudness", True))
+        target = float(params.get("target_lufs", -20.0))
+
+        per_track: Dict[str, List[tuple]] = {}
+        total = 1
+        for seg in session["segments"]:
+            chan = _channel_of(session, seg["speaker_id"])
+            is_audio = chan.get("kind") == "audio"
+            clip = _render_clip(
+                d, seg, sr, level and not is_audio, target,
+                extra_gain_db=float(chan.get("gain_db", 0.0) or 0.0),
+            )
+            if clip.size == 0:
+                continue
+            st = int(round(max(0.0, float(seg.get("start_s", 0.0) or 0.0)) * sr))
+            per_track.setdefault(str(seg["speaker_id"]), []).append((st, clip))
+            total = max(total, st + len(clip))
+
+        # Track order mirrors the public timeline order (1..N speakers, then a#).
+        def _ord(k: str):
+            return (0, int(k)) if str(k).isdigit() else (1, int(k[1:]) if k[1:].isdigit() else 0)
+
+        stems: List[Tuple[str, np.ndarray]] = []
+        used: Dict[str, int] = {}
+        for track_no, spk_id in enumerate(sorted(per_track, key=_ord), start=1):
+            buf = np.zeros(total, dtype=np.float32)
+            for st, c in per_track[spk_id]:
+                buf[st : st + len(c)] += c
+            if level:
+                buf = peak_limit(buf, ceiling_db=float(params.get("peak_ceiling_db", -1.0)))
+            cfg = session.get("speakers", {}).get(spk_id, {})
+            base_name = _safe_name(cfg.get("custom_name") or cfg.get("name") or f"track_{spk_id}", f"track_{spk_id}")
+            n = used.get(base_name, 0)
+            used[base_name] = n + 1
+            label = base_name if n == 0 else f"{base_name}_{n + 1}"
+            stems.append((f"{track_no:02d}_{label}", buf))
+        if not stems:
+            raise ValueError("This project has no audio to export as stems.")
+        return stems, sr, _safe_name(session.get("title") or "scene")
+
+
+def export_bundle(sid: str) -> Tuple[Path, str]:
+    """Zip the whole session dir (manifest + media pool + mix preview) into a
+    single self-contained ``.omvp`` project bundle that travels as one unit.
+    Returns (zip_path, download_name); the caller serves + cleans it up."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        _stitch(session)  # make sure the mix preview is current
+        _consolidate_voices(session)  # snapshot any voices not yet captured
+        _write(session)
+        d = _dir(sid)
+        slug = _safe_name(session.get("title") or "scene")
+        fd, tmp = tempfile.mkstemp(suffix=".omvp", prefix=f"{slug}_")
+        Path(tmp).unlink(missing_ok=True)
+        zpath = Path(tmp)
+        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(d.iterdir()):
+                if f.is_file() and not f.name.endswith(".tmp"):
+                    zf.write(f, f.name)
+        return zpath, f"{slug}.omvp"
+
+
+def _import_report(session: Dict[str, Any]) -> Dict[str, Any]:
+    """Which bundled voices aren't in this machine's library (yet) but ship a
+    snapshot — i.e. the ones the importer can offer to add to the library."""
+    from . import voices as _voices
+
+    d = _dir(session["id"])
+    missing: List[Dict[str, Any]] = []
+    for key, cfg in session.get("speakers", {}).items():
+        if cfg.get("mode") != "clone":
+            continue
+        if cfg.get("voice"):
+            try:
+                _voices.resolve_voice_path(cfg["voice"])
+                continue  # already in the library
+            except (FileNotFoundError, ValueError):
+                pass
+        snap = cfg.get("voice_snapshot")
+        if not (snap and (d / snap).exists()):
+            continue  # nothing bundled to import
+        orig = cfg.get("voice_missing") or cfg.get("voice") or ""
+        suggested = cfg.get("voice_name") or (
+            Path(orig).name.rsplit(".", 1)[0] if orig else f"voice_{key}"
+        )
+        folder = str(Path(orig).parent) if orig and str(Path(orig).parent) != "." else ""
+        missing.append(
+            {
+                "track": key,
+                "file": snap,
+                "name": suggested,
+                "folder": folder,
+                "preview_url": f"/api/audio/session/{session['id']}/{snap}",
+            }
+        )
+    return {"voices": missing}
+
+
+def project_assets(sid: str) -> Dict[str, Any]:
+    """Inventory of everything a project depends on (for the ⓘ details popover):
+    cloned voices with library-presence status, uploaded audio tracks, and any
+    3rd-party plug-in data attached to the project."""
+    from . import voices as _voices
+
+    session = _read(sid)
+    if not session:
+        raise FileNotFoundError("Session not found")
+    d = _dir(sid)
+
+    def _ord(k: str):
+        return (0, int(k)) if str(k).isdigit() else (1, k)
+
+    voices_out: List[Dict[str, Any]] = []
+    uploads: List[Dict[str, Any]] = []
+    for k in sorted(session.get("speakers", {}), key=_ord):
+        cfg = session["speakers"][k]
+        if cfg.get("kind") == "audio":
+            seg = next((s for s in session.get("segments", []) if str(s["speaker_id"]) == str(k)), None)
+            uploads.append(
+                {
+                    "track": k,
+                    "name": cfg.get("custom_name") or cfg.get("name") or f"Audio {k}",
+                    "duration_s": round(float(seg.get("raw_duration_s", 0.0) or 0.0), 2) if seg else 0.0,
+                    "bundled": bool(seg and (d / seg["file"]).exists()),
+                }
+            )
+        elif cfg.get("mode") == "clone":
+            voice = cfg.get("voice")
+            in_library = False
+            if voice:
+                try:
+                    _voices.resolve_voice_path(voice)
+                    in_library = True
+                except (FileNotFoundError, ValueError):
+                    in_library = False
+            snap = cfg.get("voice_snapshot")
+            voices_out.append(
+                {
+                    "track": k,
+                    "name": cfg.get("custom_name") or cfg.get("voice_name") or cfg.get("name") or f"Speaker {k}",
+                    "voice": voice or cfg.get("voice_missing"),
+                    "in_library": in_library,
+                    "bundled": bool(snap and (d / snap).exists()),
+                }
+            )
+    plugins = [
+        {"plugin": pk, "keys": sorted(pv.keys()) if isinstance(pv, dict) else None}
+        for pk, pv in (session.get("plugin_data") or {}).items()
+    ]
+    return {"id": sid, "voices": voices_out, "uploads": uploads, "plugins": plugins}
+
+
+def import_voices(sid: str, imports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Import selected bundled voice snapshots into the library and relink the
+    project's speakers to the freshly-created (or matched) library voices."""
+    from . import voices as _voices
+
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        d = _dir(sid)
+        for item in imports or []:
+            key = str(item.get("track"))
+            cfg = session.get("speakers", {}).get(key)
+            if not cfg:
+                continue
+            snap = item.get("file") or cfg.get("voice_snapshot")
+            if not snap:
+                continue
+            src = d / snap
+            if not src.exists():
+                continue
+            name = (item.get("name") or cfg.get("voice_name") or f"voice_{key}").strip()
+            folder = (item.get("folder") or "").strip()
+            rel = f"{folder}/{name}" if folder else name
+            desc = _voices.import_file(src, rel)
+            cfg["voice"] = str(desc["id"])
+            cfg["voice_name"] = str(desc["id"]).rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            cfg.pop("voice_missing", None)
+        _write(session)
+        return public(session)
+
+
+def set_plugin_data(sid: str, plugin: str, data: Any, merge: bool = True) -> Dict[str, Any]:
+    """Attach (or merge / clear) arbitrary 3rd-party plug-in data on a project.
+    Stored on the manifest under ``plugin_data[<plugin>]``, so it travels inside
+    the .omvp bundle and is surfaced in the project's asset details. This is the
+    hook external plug-ins write through to persist their state with a scene."""
+    plugin = str(plugin or "").strip()
+    if not plugin:
+        raise ValueError("A plugin id is required.")
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        store = session.setdefault("plugin_data", {})
+        if data is None:
+            store.pop(plugin, None)
+        elif merge and isinstance(store.get(plugin), dict) and isinstance(data, dict):
+            store[plugin].update(data)
+        else:
+            store[plugin] = data
+        _write(session)
+        return public(session)
+
+
+def import_bundle(data: bytes) -> Dict[str, Any]:
+    """Restore a ``.omvp`` bundle as a brand-new project (fresh id), so importing
+    never collides with or overwrites an existing session."""
+    new_sid = uuid.uuid4().hex[:12]
+    d = _dir(new_sid)
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                # Flatten + sanitize: never write outside the new session dir.
+                name = Path(info.filename).name
+                if not name or name.startswith("."):
+                    continue
+                with zf.open(info) as src, (d / name).open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+    except zipfile.BadZipFile:
+        shutil.rmtree(d, ignore_errors=True)
+        raise ValueError("Not a valid .omvp project bundle.")
+
+    manifest_path = d / "session.json"
+    if not manifest_path.exists():
+        shutil.rmtree(d, ignore_errors=True)
+        raise ValueError("Bundle is missing its project manifest.")
+    with _lock:
+        session = json.loads(manifest_path.read_text())
+        session["id"] = new_sid
+        session["created"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        session.pop("last_opened", None)
+        _relink_voices(session)
+        _stitch(session)
+        _write(session)
+        return {"session": public(session), "import_report": _import_report(session)}

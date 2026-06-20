@@ -114,6 +114,7 @@ export function Studio({
   onReorderTracks,
   onVoiceSaved,
   onUndo,
+  onRedo,
   playCue,
   onSetPerformance,
   onRenderPerformance,
@@ -183,6 +184,7 @@ export function Studio({
   onReorderTracks: (order: string[]) => Promise<MultitrackSession | null>
   onVoiceSaved?: () => void
   onUndo: () => void
+  onRedo: () => void
   onSetPerformance: (
     index: number,
     wav: Blob | null,
@@ -1082,6 +1084,7 @@ export function Studio({
             onReorderTracks={(order) => void handleReorderTracks(order)}
             onVoiceSaved={onVoiceSaved}
             onUndo={onUndo}
+            onRedo={onRedo}
             playCue={playCue}
             onSetPerformance={onSetPerformance}
             onRenderPerformance={onRenderPerformance}

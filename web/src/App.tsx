@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
-import type { GenParams, GenerateBody, HistoryEntry, Job, MultitrackSegment, MultitrackSession, OutputFile, Provider, SpeakerConfig, SystemInfo, Voice, VocalTransform, VoiceNode } from './api'
+import type { GenParams, GenerateBody, HistoryEntry, HistoryState, ImportableVoice, Job, MultitrackSegment, MultitrackSession, OutputFile, Project, Provider, SpeakerConfig, SystemInfo, Voice, VocalTransform, VoiceNode } from './api'
 import { SidePanel } from './components/SidePanel'
+import ProjectImportModal from './components/ProjectImportModal'
 import { Studio, type Injected } from './components/Studio'
+import { injectedFromSession } from './sessionForm'
 import type { PerfCaptureState } from './components/PerformanceCapture'
 import { TopBar } from './components/TopBar'
 import { Toasts, type ToastItem } from './components/ui'
@@ -31,6 +33,10 @@ export default function App() {
   const [labOpen, setLabOpen] = useState(false)
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [outputs, setOutputs] = useState<OutputFile[]>([])
+  const [projects, setProjects] = useState<Project[]>([])
+  const [histState, setHistState] = useState<HistoryState | null>(null)
+  // Pending "import these voices into the library?" prompt after an .omvp import.
+  const [voiceImport, setVoiceImport] = useState<{ sid: string; voices: ImportableVoice[] } | null>(null)
   const [job, setJob] = useState<Job | null>(null)
   const [session, setSession] = useState<MultitrackSession | null>(null)
   // Cues the multitrack editor to play from a spot after a render completes.
@@ -107,6 +113,14 @@ export default function App() {
     }
   }, [])
 
+  const refreshProjects = useCallback(async () => {
+    try {
+      setProjects((await api.projects()).projects)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
   const refreshProviders = useCallback(async () => {
     try {
       const r = await api.scriptProviders()
@@ -146,10 +160,31 @@ export default function App() {
     refreshVoices()
     refreshHistory()
     refreshOutputs()
+    refreshProjects()
     refreshProviders()
     const iv = setInterval(refreshInfo, 4000)
     return () => clearInterval(iv)
-  }, [refreshInfo, refreshVoices, refreshHistory, refreshOutputs, refreshProviders])
+  }, [refreshInfo, refreshVoices, refreshHistory, refreshOutputs, refreshProjects, refreshProviders])
+
+  // Keep the open project's action-history (undo/redo chain) in sync. The
+  // session object changes identity on every edit, so this refetches the
+  // labeled steps + cursor whenever the timeline mutates.
+  useEffect(() => {
+    if (!session?.id) {
+      setHistState(null)
+      return
+    }
+    let cancelled = false
+    api
+      .historyState(session.id)
+      .then((s) => {
+        if (!cancelled) setHistState(s)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [session])
 
   // Backstop for swipe-back / accidental close: confirm before leaving while a
   // scene has content (overscroll-behavior kills the gesture itself; this
@@ -209,6 +244,7 @@ export default function App() {
           }
           refreshHistory()
           refreshOutputs()
+          refreshProjects()
           refreshInfo()
         } else if (j.status === 'error') {
           notify('Generation failed', 'error')
@@ -219,7 +255,7 @@ export default function App() {
       }
     }, 600)
     return () => clearInterval(iv)
-  }, [job, notify, refreshHistory, refreshOutputs, refreshInfo])
+  }, [job, notify, refreshHistory, refreshOutputs, refreshProjects, refreshInfo])
 
   // ---- model actions ----
   const loadModel = async () => {
@@ -563,8 +599,13 @@ export default function App() {
     try {
       const before = new Set<number>()
       session.tracks.forEach((t) => t.segments.forEach((s) => before.add(s.index)))
+      // Whisper makes sense for speech, but it goes haywire on music/SFX — so for
+      // uploaded audio channels we slice silently (no re-transcription).
+      const srcTrack = session.tracks.find((t) => t.segments.some((s) => s.index === index))
+      const isAudio = srcTrack?.kind === 'audio'
       const next = await api.splitSegment(session.id, index, at_s)
       setSession(next)
+      if (isAudio) return
       // A manual slice duplicates the source text into both halves; re-transcribing
       // each side is almost always the next step, so do it automatically (same flow
       // as the per-segment Whisper button). The right half is the only new index.
@@ -768,6 +809,23 @@ export default function App() {
       notify(String(e), 'error')
     }
   }
+  const redoSession = async () => {
+    if (!session) return
+    try {
+      setSession(await api.redo(session.id))
+      notify('Redid the last action', 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const jumpHistory = async (index: number) => {
+    if (!session) return
+    try {
+      setSession(await api.historyJump(session.id, index))
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
   const deleteSpace = async (start_s: number, amount: number) => {
     if (!session) return
     try {
@@ -966,8 +1024,114 @@ export default function App() {
     }
   }
 
-  // ---- history ----
-  const restore = (e: HistoryEntry) => {
+  // ---- projects (browse / open / rename / delete / share) ----
+  const openProject = async (sid: string) => {
+    if (sid === sessionRef.current?.id) return
+    try {
+      const s = await api.openProject(sid)
+      sessionRef.current = s
+      setSession(s)
+      // Rehydrate the speaker form (reference-voice selectors, toggles) + script
+      // from the restored scene — otherwise it keeps the previous roster.
+      setInjected(injectedFromSession(s))
+      notify(`Opened “${s.title}” — restored into the editor`, 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const renameProject = async (sid: string, title: string) => {
+    try {
+      const s = await api.renameProject(sid, title)
+      if (sid === sessionRef.current?.id) setSession(s)
+      refreshProjects()
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const duplicateProject = async (sid: string) => {
+    try {
+      const s = await api.duplicateProject(sid)
+      refreshProjects()
+      notify(`Forked → “${s.title}”`, 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const deleteProject = async (sid: string) => {
+    try {
+      await api.discardSession(sid)
+      if (sid === sessionRef.current?.id) {
+        sessionRef.current = null
+        setSession(null)
+      }
+      refreshProjects()
+      notify('Project deleted')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const newBlankProject = () => {
+    // Wipe the editor for the next job. The current project stays saved on disk
+    // (re-openable from the Projects list), so no "are you sure?" is needed.
+    sessionRef.current = null
+    setSession(null)
+    setInjected({ nonce: Date.now(), script: '', prompt: '', title: 'Untitled Scene' })
+    notify('Fresh project — editor cleared')
+  }
+  const importProject = async (file: File) => {
+    try {
+      const { session: s, import_report } = await api.importProject(file)
+      sessionRef.current = s
+      setSession(s)
+      setInjected(injectedFromSession(s))
+      refreshProjects()
+      notify(`Imported “${s.title}” — opened in the editor`, 'success')
+      // Offer to fold any voices the project shipped but this library lacks.
+      if (import_report.voices.length > 0) setVoiceImport({ sid: s.id, voices: import_report.voices })
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const importVoices = async (picks: { track: string; file: string; name: string; folder: string }[]) => {
+    if (!voiceImport) return
+    try {
+      if (picks.length > 0) {
+        const s = await api.importVoices(voiceImport.sid, picks)
+        if (sessionRef.current?.id === s.id) {
+          sessionRef.current = s
+          setSession(s)
+          setInjected(injectedFromSession(s))
+        }
+        refreshVoices()
+        notify(`Imported ${picks.length} voice${picks.length === 1 ? '' : 's'} into your library`, 'success')
+      }
+    } catch (e) {
+      notify(String(e), 'error')
+    } finally {
+      setVoiceImport(null)
+    }
+  }
+
+  // ---- outputs (rename / delete) ----
+  const deleteOutput = async (filename: string) => {
+    try {
+      await api.deleteOutput(filename)
+      refreshOutputs()
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const renameOutput = async (filename: string, name: string) => {
+    try {
+      await api.renameOutput(filename, name)
+      refreshOutputs()
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+
+  // ---- script drafts (restore into the Studio) ----
+  const restoreScript = (e: HistoryEntry) => {
     setInjected({
       nonce: Date.now(),
       script: e.script ?? '',
@@ -981,13 +1145,8 @@ export default function App() {
     const restored = e.speakers && Object.keys(e.speakers).length ? ' (with speakers & settings)' : ''
     notify(`Restored “${e.title}”${restored}`)
   }
-  const deleteHistory = async (id: string) => {
+  const deleteScript = async (id: string) => {
     await api.deleteHistory(id)
-    refreshHistory()
-  }
-  const clearHistory = async () => {
-    if (!confirm('Clear all history?')) return
-    await api.clearHistory()
     refreshHistory()
   }
 
@@ -1064,6 +1223,7 @@ export default function App() {
           onReorderTracks={reorderTracks}
           onVoiceSaved={refreshVoices}
           onUndo={undoSession}
+          onRedo={redoSession}
           playCue={playCue}
           onSetPerformance={setPerformance}
           onRenderPerformance={renderPerformance}
@@ -1093,12 +1253,25 @@ export default function App() {
 
         <div className="col side-right">
           <SidePanel
-            history={history}
+            projects={projects}
             outputs={outputs}
+            histState={histState}
+            scripts={history.filter((e) => e.type === 'script')}
+            activeSessionId={session?.id ?? null}
             playingUrl={playingUrl}
-            onRestore={restore}
-            onDeleteHistory={deleteHistory}
-            onClearHistory={clearHistory}
+            onOpenProject={openProject}
+            onRenameProject={renameProject}
+            onDuplicateProject={duplicateProject}
+            onDeleteProject={deleteProject}
+            onNewProject={newBlankProject}
+            onImportProject={importProject}
+            onDeleteOutput={deleteOutput}
+            onRenameOutput={renameOutput}
+            onUndo={undoSession}
+            onRedo={redoSession}
+            onJumpHistory={jumpHistory}
+            onRestoreScript={restoreScript}
+            onDeleteScript={deleteScript}
             onTogglePlay={togglePlay}
           />
         </div>
@@ -1134,6 +1307,9 @@ export default function App() {
 
       {labOpen && (
           <VoiceLab voices={voices} folders={folders} onClose={() => setLabOpen(false)} onSaved={refreshVoices} notify={notify} />
+      )}
+      {voiceImport && (
+        <ProjectImportModal voices={voiceImport.voices} onImport={importVoices} onClose={() => setVoiceImport(null)} />
       )}
       <Toasts items={toasts} />
     </div>

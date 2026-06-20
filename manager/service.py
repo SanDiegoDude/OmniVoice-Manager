@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, List
 
 import numpy as np
 
-from . import history, ref_cache, sentence_slicer, sessions, voices
+from . import actionhist, history, ref_cache, sentence_slicer, sessions, voices
 from .audio_utils import duration_seconds, encode_audio, load_audio
 from .config import OUTPUT_DIR, settings
 from .generation import parse_script
@@ -131,6 +131,37 @@ def list_outputs(limit: int = 100) -> List[Dict[str, Any]]:
     return out
 
 
+def delete_output(filename: str) -> bool:
+    """Delete a saved output file (Outputs pillar). Path-safe; format-checked."""
+    p = (OUTPUT_DIR / filename).resolve()
+    if OUTPUT_DIR.resolve() not in p.parents or not p.is_file():
+        return False
+    if p.suffix.lower() not in _OUTPUT_EXTS:
+        return False
+    p.unlink()
+    return True
+
+
+def rename_output(filename: str, new_name: str) -> Dict[str, Any]:
+    """Rename a saved output (keeps its extension). Returns the refreshed entry."""
+    p = (OUTPUT_DIR / filename).resolve()
+    if OUTPUT_DIR.resolve() not in p.parents or not p.is_file():
+        raise FileNotFoundError("Output not found")
+    base = slugify(new_name, default="output")
+    target = OUTPUT_DIR / f"{base}{p.suffix.lower()}"
+    n = 1
+    while target.exists() and target.resolve() != p:
+        target = OUTPUT_DIR / f"{base}-{n}{p.suffix.lower()}"
+        n += 1
+    p.rename(target)
+    return {
+        "filename": target.name,
+        "audio_url": f"/api/audio/output/{target.name}",
+        "size_kb": round(target.stat().st_size / 1024, 1),
+        "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(target.stat().st_mtime)),
+    }
+
+
 def make_multitrack_job(
     model_manager, req: GenerateRequest, title: str
 ) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
@@ -175,6 +206,8 @@ def make_bulk_slice_job(
     def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
         session = sentence_slicer.slice_all_voice(model_manager, sid, progress_cb=progress_cb)
         sliced = (session or {}).pop("_bulk_sliced", 0) if session else 0
+        if session is not None:
+            actionhist.commit(sid, "Auto-slice scene")
         return {"session": session, "session_id": sid, "bulk_sliced": sliced}
 
     return job
@@ -192,6 +225,7 @@ def make_regen_job(
     def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
         result = model_manager.generate(payload, progress_cb=progress_cb)
         session = sessions.apply_regen(sid, index, result, perform_rendered=not plain)
+        actionhist.commit(sid, "Regenerate clip")
         return {"session": session, "session_id": sid, "regenerated_index": index}
 
     return job
@@ -207,6 +241,7 @@ def make_insert_job(
     def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
         result = model_manager.generate(payload, progress_cb=progress_cb)
         session = sessions.apply_insert(sid, new_index, speaker_id, text, start_s, ripple, result)
+        actionhist.commit(sid, "Insert clip")
         return {"session": session, "session_id": sid, "inserted_index": new_index}
 
     return job
@@ -221,6 +256,7 @@ def make_channel_regen_job(
     def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
         result = model_manager.generate(payload, progress_cb=progress_cb)
         session = sessions.apply_channel_regen(sid, pos, result)
+        actionhist.commit(sid, "Regenerate channel")
         return {"session": session, "session_id": sid, "channel_regen": pos}
 
     return job

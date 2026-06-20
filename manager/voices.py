@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
+import shutil
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .audio_utils import duration_seconds, load_audio
 from .config import AUDIO_EXTENSIONS, CUSTOM_VOICES_DIR
@@ -169,3 +171,67 @@ def save_voice(rel_path: str, audio, sample_rate: int = 24000) -> Dict[str, obje
 def delete_voice(voice_id: str) -> None:
     path = resolve_voice_path(voice_id)
     path.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Content matching + external import (used by project save/restore so a project
+# always travels with the exact voice snapshots that produced its samples, and
+# can re-import any that are missing from this machine's fluid library).
+# ---------------------------------------------------------------------------
+def content_hash(path: Path) -> str:
+    """SHA-1 of a file's bytes — a stable fingerprint for de-dup / matching."""
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def find_by_content(path: Path) -> Optional[str]:
+    """Find a library voice whose bytes are identical to ``path`` and return its
+    id, else None. Size-filtered first so only same-length candidates get hashed
+    (a proper recursive search of every subfolder, but cheap)."""
+    if not CUSTOM_VOICES_DIR.exists() or not path.exists():
+        return None
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    digest: Optional[str] = None
+    for cand in CUSTOM_VOICES_DIR.rglob("*"):
+        if not (cand.is_file() and cand.suffix.lower() in AUDIO_EXTENSIONS):
+            continue
+        try:
+            if cand.stat().st_size != size:
+                continue
+            if digest is None:
+                digest = content_hash(path)
+            if content_hash(cand) == digest:
+                return str(cand.relative_to(CUSTOM_VOICES_DIR))
+        except OSError:
+            continue
+    return None
+
+
+def import_file(src: Path, rel_path: str) -> Dict[str, object]:
+    """Copy an external audio file into the library verbatim (preserving its
+    extension). If an identical voice already exists anywhere in the library,
+    relink to it instead of creating a duplicate."""
+    existing = find_by_content(src)
+    if existing:
+        return {**_voice_descriptor(resolve_voice_path(existing)), "deduped": True}
+    rel_path = _sanitize_segment(rel_path)
+    if not rel_path:
+        raise ValueError("Empty voice name.")
+    ext = src.suffix.lower() or ".wav"
+    if not rel_path.lower().endswith(ext):
+        rel_path += ext
+    target = _safe_relpath(rel_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        stem, n = target.stem, 2
+        while target.exists():
+            target = target.with_name(f"{stem}_{n}{ext}")
+            n += 1
+    shutil.copy2(src, target)
+    return {**_voice_descriptor(target), "deduped": False}

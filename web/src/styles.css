@@ -280,6 +280,31 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 .tag { font-size: 10px; padding: 1px 7px; border-radius: 999px; text-transform: uppercase; letter-spacing: .4px; font-weight: 600; }
 .tag.script { background: rgba(155,109,255,.18); color: #c2a9ff; }
 .tag.generation { background: rgba(63,208,138,.16); color: #6fe0aa; }
+.tag.project { background: rgba(109,139,255,.18); color: #aebbff; }
+.tag.step { background: rgba(255,255,255,.08); color: var(--text-dim); padding: 1px 5px; letter-spacing: 0; }
+.list-item.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.inline-edit { font-size: 13px; font-weight: 600; padding: 2px 6px; background: #0a0e18; border: 1px solid var(--accent); border-radius: 4px; color: var(--text); min-width: 0; }
+
+/* Project rows: title on its own line, a compact action strip below. */
+.proj-name { display: flex; align-items: center; gap: 6px; font-size: 13px; line-height: 1.3; word-break: break-word; }
+.proj-name .hint { margin-top: 0; }
+.proj-actions { display: flex; align-items: center; gap: 4px; margin-top: 6px; }
+.proj-actions .btn.sm { padding: 2px 7px; }
+
+/* Asset details popover (the ⓘ button). */
+.asset-pop { position: absolute; top: 100%; left: 8px; right: 8px; z-index: 30; margin-top: 4px; background: var(--bg-elev); border: 1px solid var(--accent); border-radius: var(--radius-sm); box-shadow: 0 8px 24px rgba(0,0,0,.5); padding: 8px 10px; cursor: default; }
+.asset-pop-head { display: flex; justify-content: space-between; align-items: center; font-weight: 600; font-size: 12px; margin-bottom: 4px; }
+.asset-group { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-top: 8px; margin-bottom: 2px; }
+.asset-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; padding: 2px 0; }
+.asset-row .asset-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.asset-row .hint { margin-top: 0; }
+.asset-badge { font-size: 9.5px; padding: 1px 6px; border-radius: 999px; text-transform: uppercase; letter-spacing: .4px; flex: 0 0 auto; }
+.asset-badge.ok { background: rgba(63,208,138,.16); color: #6fe0aa; }
+.asset-badge.warn { background: rgba(255,196,84,.16); color: #ffd083; }
+.asset-badge.bad { background: rgba(255,99,99,.16); color: #ff9a9a; }
+
+.import-voice-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border-soft); }
+.import-voice-row:last-child { border-bottom: none; }
 
 .tabs { display: flex; gap: 4px; }
 .tabs button { flex: 1; background: transparent; border: none; color: var(--text-dim); padding: 8px; font-size: 12.5px; font-weight: 600; border-bottom: 2px solid transparent; }

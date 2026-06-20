@@ -46,9 +46,9 @@ This is the heart of the Manager. Instead of one baked render, every scene is ke
 - **Uploaded audio channels** — drop in soundtracks / SFX / recordings as their own non-generative layers with independent gain. Upload **multiple files at once** (and **video files** — audio is extracted automatically); each lands at the playhead in its own track. Then **⭐ promote** any channel into a full clone voice channel (auto-transcribed, with a matching speaker added) when you want to put words in its mouth.
 - **Merge, collapse, mute** — shift-click clips on a track and merge them into one (gaps become silence); flatten an entire lane into a single re-sliceable clip; or mute a lane in the mix without touching it.
 - **Tag library** — hot-clickable OmniVoice non-verbal cues (`[laughter]`, `[whisper]`, …) injected at the cursor in any dialogue field.
-- **Zoom (shift+scroll or `+`/`-` keys), middle-drag pan, follow-playhead, spacebar transport, single-step undo**, a floating dB readout while you drag gain, magnetic selection edges, and a vertical resize to grow the rows + waveform — it feels like an editor, not a form.
+- **Zoom (shift+scroll or `+`/`-` keys), middle-drag pan, follow-playhead, spacebar transport, multi-step undo/redo**, a floating dB readout while you drag gain, magnetic selection edges, and a vertical resize to grow the rows + waveform — it feels like an editor, not a form.
 - **Reset-safe Generate** — re-running a full scene generation prompts for confirmation first whenever the timeline has been hand-edited or carries uploaded channels, so a stray click can't wipe work in progress.
-- **Finalize** stitches the timeline to a single, loudness-matched, true-peak-limited track (MP3 or lossless FLAC) and saves it to history.
+- **Finalize** stitches the timeline to a single, loudness-matched, true-peak-limited track (MP3 or lossless FLAC) and saves it as a finished Output — separate from the editable project, which keeps living in the Projects list.
 
 → [Full guide](docs/adr-studio.md)
 
@@ -82,8 +82,8 @@ Server-side preferences mean the toggles you live in don't reset on you. **LOD**
 ### Auto-trim silence
 Optional, persistent silence trimming shaves dead air (and near-silent hiss/artifacting) off the head and tail of generations, regenerations, and recorded takes — so you stop hand-trimming the gap the model and your own timing leave at the start of every line.
 
-### History that actually restores
-Every generation stores its full state — prompt, script, single/multi-speaker mode, each speaker's configuration, and all generation parameters — so one click rebuilds the exact setup. Backwards compatible with older entries.
+### Projects that fully restore
+The right-hand column splits into **Projects · Outputs · Action history**. Every scene is an auto-saved, **re-openable project**: a browser crash or stray reload never costs you work — click it and the whole timeline (clips, edits, voices, performances) is restored, ready to keep editing. Share or archive a project as a single `.omvp` bundle, or export **per-track, t=0-aligned FLAC stems** for any DAW. **Outputs** are the finished, non-project files; **History** is the project's labeled, navigable **multi-step undo/redo** chain (content-addressed, so it survives reloads without bloating disk). Smart-script drafts still restore their prompt/script/speakers into the Studio with one click.
 
 ### API-first
 Every UI capability is also an HTTP endpoint, including the Smart Script system — so you can drive generation from your own tools (e.g. a ComfyUI connector) and not just basic synthesis.
@@ -98,7 +98,8 @@ manager/    FastAPI backend
   server.py         HTTP API + static UI hosting
   model_manager.py  GPU worker lifecycle (spawn / warm / unload)
   worker.py         child process: TTS, isolation, de-reverb, Whisper, loudness, stitching
-  sessions.py       multitrack timeline: per-clip audio, additive mixing, edits, undo
+  sessions.py       multitrack projects: per-clip media, additive mixing, edits, stems/bundle
+  actionhist.py     multi-step undo/redo (content-addressed snapshot ring)
   service.py        worker payload building, finalize, history
   scripts_ai.py     Smart Script writer (multi-provider, robust parsing)
   vocal_isolation/  Mel-Band-RoFormer port + DeepFilterNet integration
@@ -306,11 +307,11 @@ LOD and Low VRAM mode can also be toggled live from the top bar in the UI.
 
 ## Using the UI
 
-- **🎬 ADR Studio** (default tab) — write or AI-generate a script, configure speakers (clone / design / auto), set generation and loudness options, and generate straight into the timeline: regenerate / move / trim / speed / gain individual clips, split / duplicate / delete, slice by sentence or by hand (Ctrl+click), insert or remove empty time, layer overlapping dialogue, apply per-segment vocal transforms, Pin Current Voice to Segment, record dialogue or vocal performances straight into clips, add uploaded audio (and video) channels and promote them to voices, then **Finalize** to commit and save. Single-step **Undo** covers any edit. **Sync dialogue from Editor** pulls the timeline's current lines back into the script box (in timeline order) without re-running Whisper.
+- **🎬 ADR Studio** (default tab) — write or AI-generate a script, configure speakers (clone / design / auto), set generation and loudness options, and generate straight into the timeline: regenerate / move / trim / speed / gain individual clips, split / duplicate / delete, slice by sentence or by hand (Ctrl+click), insert or remove empty time, layer overlapping dialogue, apply per-segment vocal transforms, Pin Current Voice to Segment, record dialogue or vocal performances straight into clips, add uploaded audio (and video) channels and promote them to voices, then **Finalize** to commit and save. Multi-step **Undo / Redo** covers every edit, with a labeled, navigable action history. **Sync dialogue from Editor** pulls the timeline's current lines back into the script box (in timeline order) without re-running Whisper.
 - **🎤 Voice Clone** — single-voice takes from text or a recorded performance (inline capture panel), with the same AI scriptwriter.
 - **Voice Lab** — upload or pick a reference, manually trim it, preview isolation / de-reverb / normalization, and save (or overwrite) the cleaned voice in your library.
 - **Tag library** — a hot-clickable list of OmniVoice's supported bracket cues that inject at your cursor.
-- **History & Outputs** — replay, download, or fully restore any past generation.
+- **Projects, Outputs & Action history** — browse and fully re-open saved projects, replay/rename/delete finished outputs, export `.omvp` bundles or per-track FLAC stems, and step through a project's multi-step undo/redo history.
 - **Mobile-friendly** — the voice library and history collapse to edge tabs on desktop and slide-over drawers on phones; swipe-back navigation is disabled so a stray edge gesture can't nuke a session.
 
 ---

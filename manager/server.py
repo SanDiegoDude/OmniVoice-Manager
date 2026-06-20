@@ -93,29 +93,93 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Single-step undo: snapshot a session's state right before any mutating request
-# touches it. Done in one place (the middleware) so every editor action — even
-# multi-call ones like promote — collapses to exactly one undo step. New-session
-# and non-mutating routes are skipped.
-_UNDO_SKIP_SUFFIX = ("/undo", "/finalize", "/transcribe")
+# Action history (multi-step undo/redo) lives in manager/actionhist.py. The
+# middleware drives it in one place so every editor action becomes exactly one
+# labeled step. Routes that don't mutate a session (or that mutate it later, in
+# a worker job) are handled specially below.
+_HIST_SKIP_SUFFIX = ("/undo", "/redo", "/jump", "/finalize", "/transcribe", "/open", "/rename", "/export-stems", "/plugin-data", "/duplicate")
+# These routes only SUBMIT a worker job; the real mutation (and its history
+# commit) happens when the job applies its result (see service.py). The
+# middleware still captures a pre-action baseline, but must NOT commit-after.
+_HIST_ASYNC_SUFFIX = ("/regenerate", "/insert", "/bulk-slice")
+
+
+def _action_label(method: str, path: str) -> str:
+    """A human-readable label for the action a mutating route performs, surfaced
+    as a navigable step in the Action history pillar."""
+    table = [
+        ("/regenerate", "Regenerate"),
+        ("/insert", "Insert clip"),
+        ("/merge", "Merge clips"),
+        ("/split", "Split clip"),
+        ("/auto-slice", "Auto-slice clip"),
+        ("/bulk-slice", "Auto-slice scene"),
+        ("/delete-space", "Delete space"),
+        ("/add-space", "Add space"),
+        ("/duplicate", "Duplicate clip"),
+        ("/move", "Move clip"),
+        ("/edit", "Edit clip"),
+        ("/transform", "Vocal transforms"),
+        ("/isolate", "Isolate stem"),
+        ("/inpaint-preserve", "Preserve non-vocal"),
+        ("/inpaint", "Vocal inpaint"),
+        ("/performance", "Set performance" if method == "POST" else "Clear performance"),
+        ("/promote", "Promote channel"),
+        ("/collapse", "Collapse track"),
+        ("/channel", "Channel settings"),
+        ("/track-order", "Reorder tracks"),
+        ("/reflow", "Reflow timeline"),
+        ("/upload-channel", "Add audio channel"),
+        ("/upload-segment", "Add audio clip"),
+        ("/import-clip", "Import clip"),
+        ("/text", "Edit text"),
+        ("/delete", "Delete clip"),
+    ]
+    for suffix, label in table:
+        if path.endswith(suffix):
+            return label
+    # Bare speaker routes: POST /speaker = add, POST /speaker/{pos} = update,
+    # DELETE /speaker/{pos} = remove a track.
+    if "/speaker" in path:
+        if method == "DELETE":
+            return "Remove track"
+        return "Add speaker" if path.endswith("/speaker") else "Update speaker"
+    return "Edit"
 
 
 @app.middleware("http")
-async def _undo_checkpoint(request, call_next):
+async def _history_checkpoint(request, call_next):
+    sid = None
+    is_mutation = False
+    is_async = False
     try:
         if request.method in ("POST", "DELETE"):
-            parts = request.url.path.strip("/").split("/")
+            path = request.url.path
+            parts = path.strip("/").split("/")
             if (
                 len(parts) >= 4
                 and parts[0] == "api"
                 and parts[1] == "multitrack"
                 and parts[2] not in ("generate", "empty")
-                and not any(request.url.path.endswith(s) for s in _UNDO_SKIP_SUFFIX)
+                and not any(path.endswith(s) for s in _HIST_SKIP_SUFFIX)
             ):
-                sessions.checkpoint(parts[2])
+                sid = parts[2]
+                is_mutation = True
+                is_async = any(path.endswith(s) for s in _HIST_ASYNC_SUFFIX)
+                # Always capture the pre-action baseline so the first edit of a
+                # session is undoable back to its current state.
+                sessions._ah().ensure_baseline(sid)
     except Exception:
-        pass  # never let snapshotting break the actual request
-    return await call_next(request)
+        sid = None  # never let history bookkeeping break the actual request
+
+    response = await call_next(request)
+
+    try:
+        if sid and is_mutation and not is_async and response.status_code < 400:
+            sessions._ah().commit(sid, _action_label(request.method, request.url.path))
+    except Exception:
+        pass
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -568,11 +632,50 @@ def multitrack_discard(sid: str):
 
 @app.post("/api/multitrack/{sid}/undo")
 def multitrack_undo(sid: str):
-    """Restore the single last checkpoint (one step back)."""
+    """Step one action back in the project's history, then rebuild the mix."""
+    from . import actionhist
+
+    if not actionhist.undo(sid):
+        raise HTTPException(400, "Nothing to undo")
     try:
-        return sessions.undo(sid)
+        return sessions.restitch(sid)
     except FileNotFoundError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/redo")
+def multitrack_redo(sid: str):
+    """Step one action forward in the project's history, then rebuild the mix."""
+    from . import actionhist
+
+    if not actionhist.redo(sid):
+        raise HTTPException(400, "Nothing to redo")
+    try:
+        return sessions.restitch(sid)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.get("/api/multitrack/{sid}/history")
+def multitrack_history(sid: str):
+    """The labeled action-history steps + cursor for the Action history pillar."""
+    from . import actionhist
+
+    return actionhist.state(sid)
+
+
+@app.post("/api/multitrack/{sid}/history/jump")
+def multitrack_history_jump(sid: str, payload: dict | None = None):
+    """Restore an arbitrary step from the action history (click a step to jump)."""
+    from . import actionhist
+
+    target = int((payload or {}).get("index", -1))
+    if not actionhist.jump(sid, target):
+        raise HTTPException(400, "Cannot jump to that step")
+    try:
+        return sessions.restitch(sid)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
 
 
 @app.post("/api/multitrack/{sid}/speaker")
@@ -1378,6 +1481,158 @@ def script_and_speak(req: ScriptAndSpeakRequest):
 @app.get("/api/outputs")
 def get_outputs():
     return {"outputs": service.list_outputs()}
+
+
+@app.delete("/api/outputs/{filename}")
+def delete_output(filename: str):
+    if not service.delete_output(filename):
+        raise HTTPException(404, "Output not found")
+    return {"ok": True}
+
+
+@app.post("/api/outputs/{filename}/rename")
+def rename_output(filename: str, payload: dict | None = None):
+    try:
+        return service.rename_output(filename, (payload or {}).get("name", ""))
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+# ---------------------------------------------------------------------------
+# Projects (browseable, named, restorable sessions)
+# ---------------------------------------------------------------------------
+@app.get("/api/projects")
+def list_projects():
+    return {"projects": sessions.list_projects()}
+
+
+@app.post("/api/multitrack/{sid}/rename")
+def rename_project(sid: str, payload: dict | None = None):
+    title = (payload or {}).get("title", "")
+    try:
+        return sessions.rename(sid, title)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/duplicate")
+def duplicate_project(sid: str):
+    """Fork a project into an independent "Copy of …" — no export/import needed."""
+    try:
+        return sessions.duplicate(sid)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/open")
+def open_project(sid: str):
+    """Re-open a saved project: stamp it last-opened and hand back the full,
+    editable session for restoral into the multitrack UI."""
+    session = sessions.touch_opened(sid)
+    if not session:
+        raise HTTPException(404, "Project not found")
+    return session
+
+
+@app.get("/api/multitrack/{sid}/export")
+def export_project_bundle(sid: str):
+    """Download the project as a single self-contained ``.omvp`` bundle."""
+    try:
+        zpath, name = sessions.export_bundle(sid)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    from starlette.background import BackgroundTask
+
+    return FileResponse(
+        zpath,
+        media_type="application/octet-stream",
+        filename=name,
+        background=BackgroundTask(zpath.unlink, missing_ok=True),
+    )
+
+
+@app.get("/api/multitrack/{sid}/export-stems")
+def export_project_stems(sid: str):
+    """Download per-track, t=0-aligned FLAC stems as a zip (DAW hand-off)."""
+    import shutil as _shutil
+    import tempfile as _tempfile
+    import zipfile as _zipfile
+
+    from starlette.background import BackgroundTask
+
+    from .audio_utils import encode_audio
+
+    try:
+        stems, sr, slug = sessions.export_stems(sid)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    tmpdir = Path(_tempfile.mkdtemp(prefix="omv_stems_"))
+    zpath = tmpdir / f"{slug}_stems.zip"
+    with _zipfile.ZipFile(zpath, "w", _zipfile.ZIP_DEFLATED) as zf:
+        for name, audio in stems:
+            fpath = tmpdir / f"{name}.flac"
+            written = encode_audio(fpath, audio, sr, fmt="flac")
+            zf.write(written, written.name)
+    return FileResponse(
+        zpath,
+        media_type="application/zip",
+        filename=zpath.name,
+        background=BackgroundTask(_shutil.rmtree, tmpdir, ignore_errors=True),
+    )
+
+
+@app.post("/api/projects/import")
+async def import_project_bundle(file: UploadFile = File(...)):
+    """Import an ``.omvp`` bundle as a new project. Returns ``{session,
+    import_report}`` — the report lists bundled voices not yet in this library,
+    which the UI can offer to import."""
+    data = await file.read()
+    try:
+        return sessions.import_bundle(data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/projects/{sid}/import-voices")
+def import_project_voices(sid: str, payload: dict | None = None):
+    """Import selected bundled voice snapshots into the library and relink the
+    project's tracks to them."""
+    imports = (payload or {}).get("imports") or []
+    try:
+        return sessions.import_voices(sid, imports)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/multitrack/{sid}/assets")
+def project_assets(sid: str):
+    """Asset inventory for a project: voices, uploaded tracks, plug-in data."""
+    try:
+        return sessions.project_assets(sid)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/plugin-data")
+def set_plugin_data(sid: str, payload: dict | None = None):
+    """Hook for 3rd-party plug-ins to persist state with a scene. Body:
+    ``{plugin, data, merge?}``; ``data: null`` clears that plugin's entry."""
+    payload = payload or {}
+    try:
+        return sessions.set_plugin_data(
+            sid,
+            str(payload.get("plugin", "")),
+            payload.get("data"),
+            bool(payload.get("merge", True)),
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 # ---------------------------------------------------------------------------

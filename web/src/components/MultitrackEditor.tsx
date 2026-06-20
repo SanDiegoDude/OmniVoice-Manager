@@ -107,6 +107,7 @@ export function MultitrackEditor({
   onReorderTracks,
   onVoiceSaved,
   onUndo,
+  onRedo,
   playCue,
   onSetPerformance,
   onRenderPerformance,
@@ -155,6 +156,7 @@ export function MultitrackEditor({
   newTrackDefaults?: Partial<SpeakerConfig>
   onVoiceSaved?: () => void
   onUndo: () => void
+  onRedo: () => void
   onSetPerformance: (
     index: number,
     wav: Blob | null,
@@ -943,8 +945,11 @@ export function MultitrackEditor({
               <button className="btn sm ghost" onClick={() => setSelSegs(new Set())} title="Clear the merge selection">✕</button>
             </div>
           )}
-          <button className="btn sm mtk-undo" onClick={onUndo} disabled={busy || !session.can_undo} title="Undo the last action (single step back — regenerate, move, trim, add, delete, etc.)">
+          <button className="btn sm mtk-undo" onClick={onUndo} disabled={busy || !session.can_undo} title="Undo the last action (regenerate, move, trim, add, delete, etc.). Full multi-step history is in the right-hand column.">
             ↶ Undo
+          </button>
+          <button className="btn sm mtk-undo" onClick={onRedo} disabled={busy || !session.can_redo} title="Redo the action you just undid.">
+            Redo ↷
           </button>
           <button className="btn sm finalize" onClick={onFinalize} disabled={busy || finalizing} title="Bake the timeline down to a single saved render. You typically click this once, at the end.">
             {finalizing ? <span className="spinner" /> : '✓'} Finalize audio

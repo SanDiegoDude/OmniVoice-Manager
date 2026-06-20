@@ -154,7 +154,14 @@ Response:
 | POST | `/api/generate` | start a generation job → `{job_id}` |
 | GET | `/api/jobs/{id}` | poll job status/progress/result |
 | GET | `/api/outputs` | list generated audio |
-| GET/DELETE | `/api/history[/{id}]` | history CRUD |
+| DELETE/POST | `/api/outputs/{file}[/rename]` | delete / rename an output file |
+| GET | `/api/projects` | list re-openable projects (multitrack sessions) |
+| POST | `/api/multitrack/{sid}/{open,rename,undo,redo}` | re-open / rename / multi-step undo / redo |
+| GET | `/api/multitrack/{sid}/{history,export,export-stems,assets}` | action-history steps, self-contained `.omvp` bundle, FLAC stems, asset inventory |
+| POST | `/api/multitrack/{sid}/plugin-data` | 3rd-party plug-in persistence hook (stored with the scene, travels in the bundle) |
+| POST | `/api/projects/import` | import an `.omvp` bundle → `{session, import_report}` (missing voices it can add to the library) |
+| POST | `/api/projects/{sid}/import-voices` | add a bundle's missing voices to the library and relink the project |
+| GET/DELETE | `/api/history[/{id}]` | smart-script draft history CRUD |
 | GET | `/api/audio/{output\|voice\|temp}/...` | serve audio |
 
 Interactive docs at `/docs`.
@@ -171,7 +178,9 @@ manager/
   voices.py          voice library scanning/saving
   audio_utils.py     load / isolate-glue / RMS boost / trim / save
   scripts_ai.py      smart-script via OpenAI-compatible APIs + Google Vertex AI
-  history.py         persistent JSON history
+  sessions.py        multitrack projects: per-clip media pool, additive mix, edits
+  actionhist.py      multi-step undo/redo (content-addressed snapshot ring)
+  history.py         persistent JSON history (smart-script drafts)
   jobs.py            background job manager (progress polling)
   vocal_isolation/   ported Mel-Band-Roformer isolator
 web/                 React + Vite + TS frontend (build → web/dist)

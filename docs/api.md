@@ -31,8 +31,9 @@ Every UI capability is also an HTTP endpoint, so you can drive the Manager from 
 | --- | --- |
 | `GET /api/voices` · `POST /api/voices/upload` · `POST /api/voices/process` | Voice library + Voice Lab |
 | `DELETE /api/voices/{id}` | Delete a voice |
-| `GET /api/outputs` · `GET /api/history` | Browse results and history |
-| `GET·DELETE /api/history/{id}` | Restore / delete a history entry |
+| `GET /api/outputs` · `DELETE /api/outputs/{filename}` · `POST …/{filename}/rename` | Browse / delete / rename finished output files |
+| `GET /api/projects` | List saved, re-openable projects (multitrack sessions) |
+| `GET /api/history` · `GET·DELETE /api/history/{id}` | Smart-script drafts: list / restore / delete |
 | `GET /api/audio/{output\|voice\|temp}/...` | Serve audio files |
 
 ## Multitrack timeline
@@ -48,7 +49,12 @@ Every UI capability is also an HTTP endpoint, so you can drive the Manager from 
 | `POST …/upload-channel` · `…/speaker/{pos}/promote` · `…/speaker/{pos}/regenerate` | Audio channels, promote-to-voice, re-cast a channel (honors per-clip performances) |
 | `POST·DELETE …/segment/{i}/performance` | Attach / detach a vocal performance (multipart take + mode/strength/gain/speed) |
 | `POST …/merge` · `…/speaker/{pos}/collapse` | Merge selected clips, collapse a track to one clip |
-| `POST …/segment/{i}/transcribe` · `…/{sid}/undo` · `…/{sid}/finalize` | Whisper a clip, single-step undo, commit to history |
+| `POST …/segment/{i}/transcribe` · `…/{sid}/finalize` | Whisper a clip, commit the mix to an output + history |
+| `POST …/{sid}/undo` · `…/{sid}/redo` · `GET …/{sid}/history` · `POST …/{sid}/history/jump` | Multi-step undo/redo: step back/forward, list labeled steps, jump to any step |
+| `POST …/{sid}/open` · `…/{sid}/rename` | Re-open a project (full restoral, incl. relinking voices to the library), rename it |
+| `GET …/{sid}/export` · `GET …/{sid}/export-stems` · `POST /api/projects/import` | Download a self-contained `.omvp` bundle (voices snapshotted inside) / per-track FLAC stems; import a bundle → `{session, import_report}` |
+| `POST /api/projects/{sid}/import-voices` | Add a bundle's missing voices to the library and relink the project's tracks |
+| `GET …/{sid}/assets` · `POST …/{sid}/plugin-data` | Project asset inventory (voices / uploads / plug-in data); 3rd-party plug-in persistence hook |
 
 ## Async vs. sync
 

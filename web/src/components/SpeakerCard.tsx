@@ -60,6 +60,16 @@ export function SpeakerCard({
 }) {
   const set = (patch: Partial<SpeakerConfig>) => onChange({ ...config, ...patch })
 
+  // A project can carry a voice that isn't in this library: an ephemeral
+  // "project-voice/<name>" (snapshot travels in the project) or a voice since
+  // removed. Surface it as a selectable option so the right voice always shows.
+  const isProjectVoice = !!config.voice && config.voice.startsWith('project-voice/')
+  const voiceInLibrary = !!config.voice && voices.some((v) => v.id === config.voice)
+  const orphanLabel = isProjectVoice
+    ? `${config.voice!.replace(/^project-voice\//, '')} (in project)`
+    : config.voice ?? ''
+  const headVoice = config.voice ? (isProjectVoice ? orphanLabel : config.voice) : 'No voice selected'
+
   return (
     <div className="speaker-card">
       <div className="sc-head">
@@ -75,7 +85,7 @@ export function SpeakerCard({
         )}
         <div className="speaker-badge">{index}</div>
         <div className="sc-voice">
-          {config.mode === 'clone' ? config.voice ?? 'No voice selected' : config.mode === 'design' ? 'Designed voice' : 'Auto voice'}
+          {config.mode === 'clone' ? headVoice : config.mode === 'design' ? 'Designed voice' : 'Auto voice'}
         </div>
         <div className="segment">
           {(['clone', 'design', 'auto'] as SpeakerMode[]).map((m) => (
@@ -97,6 +107,7 @@ export function SpeakerCard({
             <span>Reference voice</span>
             <select className="input" value={config.voice ?? ''} onChange={(e) => set({ voice: e.target.value })}>
               <option value="">Select a voice…</option>
+              {config.voice && !voiceInLibrary && <option value={config.voice}>{orphanLabel}</option>}
               {voices.map((v) => (
                 <option key={v.id} value={v.id}>
                   {v.name}
