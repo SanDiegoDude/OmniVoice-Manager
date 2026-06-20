@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import history, prefs, scripts_ai, service, sessions, voices
+from . import history, prefs, scripts_ai, sentence_slicer, service, sessions, voices
 from .audio_utils import (
     VIDEO_EXTS,
     apply_gain_db,
@@ -204,6 +204,17 @@ def system_trim_silence(payload: dict):
     enabled = bool(payload.get("enabled", False))
     settings.trim_silence = enabled
     prefs.update({"system": {"trim_silence": enabled}})
+    return model_manager.info()
+
+
+@app.post("/api/system/auto-slice")
+def system_auto_slice(payload: dict):
+    """Toggle auto-slice-by-sentence on scene generation (persisted). When on, a
+    follow-on phase splits every generated voice segment into one clip per
+    sentence after all TTS is done (so Whisper loads once, not per clip)."""
+    enabled = bool(payload.get("enabled", False))
+    settings.auto_slice = enabled
+    prefs.update({"system": {"auto_slice": enabled}})
     return model_manager.info()
 
 
@@ -623,7 +634,7 @@ def multitrack_add_space(sid: str, req: AddSpaceRequest):
 @app.post("/api/multitrack/{sid}/segment/{index}/duplicate")
 def multitrack_duplicate_segment(sid: str, index: int, req: DuplicateSegmentRequest):
     try:
-        return sessions.duplicate_segment(sid, index, req.start_s, req.ripple)
+        return sessions.duplicate_segment(sid, index, req.start_s, req.ripple, req.speaker_id)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
 
@@ -647,119 +658,35 @@ def multitrack_transcribe_segment(sid: str, index: int, req: TranscribeSegmentRe
     return {"text": (res.get("text") or "").strip()}
 
 
-def _group_sentences(chunks: list, total_s: float) -> list:
-    """Merge Whisper timestamped chunks into sentences by terminal punctuation.
-    Each result has {text, start, end} in the same (audible) time domain."""
-    sentences: list = []
-    cur_text = ""
-    cur_start = None
-    cur_end = 0.0
-    term = re.compile(r"[.!?…。！？]['\"”’\)\]]*\s*$")
-    for c in chunks:
-        t = c.get("text", "") or ""
-        st = c.get("start")
-        en = c.get("end")
-        if cur_start is None:
-            cur_start = float(st) if st is not None else cur_end
-        cur_text += t
-        if en is not None:
-            cur_end = float(en)
-        if term.search(t):
-            sentences.append({"text": cur_text.strip(), "start": cur_start, "end": cur_end})
-            cur_text = ""
-            cur_start = None
-    if cur_text.strip():
-        sentences.append({"text": cur_text.strip(), "start": cur_start if cur_start is not None else cur_end, "end": total_s})
-    return [s for s in sentences if s["text"]]
-
-
-_SENT_RE = re.compile(r"[^.!?…。！？]+(?:[.!?…。！？]+['\"”’\)\]]*)?\s*")
-
-
-def _sentences_from_source(chunks: list, source: str, total_s: float) -> Optional[list]:
-    """Build auto-slice sentences from the segment's *own* script text, taking
-    only the timing from Whisper's word stamps. Whisper occasionally decodes a
-    whole 30s chunk lowercased with no punctuation, which both wrecked the
-    dialogue text on sliced clips and collapsed sentence detection; the script
-    that generated the audio is the better source of truth for the words.
-    Returns None when the script can't be aligned (caller falls back to the
-    raw Whisper sentences)."""
-    import difflib
-
-    src_sents = [m.group(0).strip() for m in _SENT_RE.finditer(source) if m.group(0).strip()]
-    if len(src_sents) < 2:
-        return None
-
-    def norm(w: str) -> str:
-        return re.sub(r"[^a-z0-9']+", "", w.lower())
-
-    words = [c for c in chunks if (c.get("text") or "").strip()]
-    if not words:
-        return None
-    src_words: list = []
-    sent_of: list = []
-    for si, s in enumerate(src_sents):
-        for w in s.split():
-            src_words.append(norm(w))
-            sent_of.append(si)
-    sm = difflib.SequenceMatcher(a=[norm(c["text"]) for c in words], b=src_words, autojunk=False)
-    spans = [[None, None] for _ in src_sents]  # [start, end] audible seconds
-    matched = 0
-    for a, b, n in sm.get_matching_blocks():
-        for k in range(n):
-            matched += 1
-            si = sent_of[b + k]
-            st, en = words[a + k].get("start"), words[a + k].get("end")
-            if st is not None:
-                spans[si][0] = st if spans[si][0] is None else min(spans[si][0], st)
-            if en is not None:
-                spans[si][1] = en if spans[si][1] is None else max(spans[si][1], en)
-    if matched < max(2, len(src_words) // 2):
-        return None  # script and audio genuinely disagree
-
-    # Sentences whose words never matched carry no timing — fold their text
-    # into a timed neighbour so no dialogue is dropped. auto_slice cuts each
-    # slice at the previous slice's end, so only `end` has to be solid.
-    out: list = []
-    pending = ""
-    for si, s in enumerate(src_sents):
-        st, en = spans[si]
-        text = f"{pending} {s}".strip()
-        pending = ""
-        if en is None or (out and en <= out[-1]["end"]):
-            pending = text
-            continue
-        out.append({"text": text, "start": st if st is not None else (out[-1]["end"] if out else 0.0), "end": float(en)})
-    if pending:
-        if not out:
-            return None
-        out[-1]["text"] = f"{out[-1]['text']} {pending}".strip()
-    if len(out) < 2:
-        return None
-    out[-1]["end"] = total_s
-    return out
-
-
 @app.post("/api/multitrack/{sid}/segment/{index}/auto-slice")
 def multitrack_auto_slice(sid: str, index: int):
     """Auto-split a segment into one clip per sentence using Whisper timestamps."""
     try:
-        audio, sr, _name, _start = sessions.render_segment(sid, index)
+        sliced = sentence_slicer.slice_segment(model_manager, sid, index)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
-    total_s = len(audio) / float(max(sr, 1))
-    res = model_manager.transcribe({"waveform": audio, "sample_rate": sr, "chunks": True})
-    chunks = res.get("chunks") or []
-    src_text = sessions.segment_text(sid, index)
-    sentences = _sentences_from_source(chunks, src_text, total_s) if src_text else None
-    if sentences is None:
-        sentences = _group_sentences(chunks, total_s)
-    if len(sentences) < 2:
+    if not sliced:
         raise HTTPException(400, "Couldn't detect multiple sentences in this segment.")
+    session = sessions.get(sid)
+    if session is None:
+        raise HTTPException(404, "Session not found")
+    return session
+
+
+@app.post("/api/multitrack/{sid}/bulk-slice")
+def multitrack_bulk_slice(sid: str):
+    """Sentence-slice EVERY voice track in a scene as one heavy background job
+    (uploaded audio channels are left alone). Returns a job id to poll."""
+    if sessions.get(sid) is None:
+        raise HTTPException(404, "Session not found")
+    job_fn = service.make_bulk_slice_job(model_manager, sid)
     try:
-        return sessions.auto_slice(sid, index, sentences)
-    except (ValueError, FileNotFoundError) as e:
-        raise HTTPException(400, str(e))
+        job_id = job_manager.submit(
+            job_fn, meta={"multitrack": True, "bulk_slice": True}, dedup_group="bulk-slice"
+        )
+    except DuplicateJobError:
+        raise HTTPException(409, "A bulk slice was just started — ignoring the duplicate click.")
+    return {"job_id": job_id}
 
 
 def _prep_clone_audio(audio: np.ndarray, sr: int, target_s: float = 15.0, max_s: float = 16.5) -> np.ndarray:
@@ -1175,6 +1102,23 @@ def multitrack_segment_clip(sid: str, index: int, dl: int = 0):
     return FileResponse(str(path), media_type="audio/wav", filename=f"{safe}.wav")
 
 
+@app.get("/api/multitrack/{sid}/download")
+def multitrack_download(sid: str):
+    """Download the full stitched mix in the UI's configured export format
+    (FLAC/MP3), so shares aren't giant WAVs."""
+    from .audio_utils import encode_audio
+
+    try:
+        audio, sr, title = sessions.render_mix(sid)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    safe = service.slugify(title, default="scene")
+    fmt = settings.output_format
+    path = TMP_DIR / f"mix_{sid}.{fmt}"
+    out = encode_audio(path, audio, sr, fmt=fmt, bitrate=settings.output_bitrate)
+    return FileResponse(str(out), media_type=media_type_for(out), filename=f"{safe}{out.suffix}")
+
+
 @app.post("/api/multitrack/{sid}/segment/{index}/regenerate")
 def multitrack_regen(sid: str, index: int, req: Optional[RegenSegmentRequest] = None):
     try:
@@ -1292,6 +1236,36 @@ async def multitrack_upload_channel(
         return sessions.add_audio_channel(sid, label, audio, int(in_sr), start_s=float(start_s))
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/channel/{pos}/upload-segment")
+async def multitrack_upload_audio_segment(
+    sid: str,
+    pos: str,
+    file: UploadFile = File(...),
+    start_s: float = Form(0.0),
+    ripple: bool = Form(False),
+):
+    """Drop an uploaded audio/video file as a new clip on an EXISTING audio
+    channel (quick foley/SFX), optionally rippling later clips."""
+    data = await file.read()
+    tmp = TMP_DIR / f"upload_{uuid.uuid4().hex}_{file.filename or 'audio'}"
+    tmp.write_bytes(data)
+    try:
+        audio, in_sr = load_media_audio(tmp, sr=None, mono=True)
+    except Exception as e:  # noqa: BLE001
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, f"Could not read audio: {e}")
+    tmp.unlink(missing_ok=True)
+    label = Path(file.filename or "Audio").stem
+    try:
+        return sessions.add_audio_segment(
+            sid, pos, audio, int(in_sr), name=label, start_s=float(start_s), ripple=bool(ripple)
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/multitrack/{sid}/reflow")
@@ -1586,6 +1560,7 @@ def main() -> int:
     settings.load_on_demand = bool(args.lod) or bool(_sys.get("load_on_demand", False))
     settings.low_vram = bool(_sys.get("low_vram", False))
     settings.trim_silence = bool(_sys.get("trim_silence", False))
+    settings.auto_slice = bool(_sys.get("auto_slice", False))
     _fmt = str(_out.get("format") or settings.output_format).lower()
     if _fmt in ("mp3", "flac", "wav", "m4a", "ogg"):
         settings.output_format = _fmt

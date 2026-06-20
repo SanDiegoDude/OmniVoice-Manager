@@ -14,6 +14,7 @@ export interface SystemInfo {
   load_on_demand: boolean
   low_vram: boolean
   trim_silence?: boolean
+  auto_slice?: boolean
   output_format?: string
   device: string
   dtype: string
@@ -81,10 +82,11 @@ export interface Job {
         regenerated_index?: number
         inserted_index?: number
         channel_regen?: string
+        bulk_sliced?: number
       }
     | null
   error: string | null
-  meta: { title?: string; multitrack?: boolean; regen?: number; channel_regen?: string }
+  meta: { title?: string; multitrack?: boolean; regen?: number; channel_regen?: string; bulk_slice?: boolean }
 }
 
 /** Render-time vocal transforms applied to the take before the V2V transfer.
@@ -266,6 +268,8 @@ export const api = {
     jfetch<SystemInfo>('/api/system/low-vram', { method: 'POST', body: JSON.stringify({ enabled }) }),
   setTrimSilence: (enabled: boolean) =>
     jfetch<SystemInfo>('/api/system/trim-silence', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  setAutoSlice: (enabled: boolean) =>
+    jfetch<SystemInfo>('/api/system/auto-slice', { method: 'POST', body: JSON.stringify({ enabled }) }),
   setOutputFormat: (format: string) =>
     jfetch<SystemInfo>('/api/system/output-format', { method: 'POST', body: JSON.stringify({ format }) }),
   getPrefs: () => jfetch<Record<string, unknown>>('/api/prefs'),
@@ -385,14 +389,16 @@ export const api = {
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/delete-space`, { method: 'POST', body: JSON.stringify({ start_s, amount }) }),
   addSpace: (sid: string, start_s: number, amount: number) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/add-space`, { method: 'POST', body: JSON.stringify({ start_s, amount }) }),
-  duplicateSegment: (sid: string, index: number, start_s: number, ripple: boolean) =>
-    jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/duplicate`, { method: 'POST', body: JSON.stringify({ start_s, ripple }) }),
+  duplicateSegment: (sid: string, index: number, start_s: number, ripple: boolean, speaker_id?: string) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/duplicate`, { method: 'POST', body: JSON.stringify({ start_s, ripple, speaker_id }) }),
   transcribeSegment: (sid: string, index: number, draft?: { trim_start_s?: number; trim_end_s?: number; speed?: number }) =>
     jfetch<{ text: string }>(`/api/multitrack/${sid}/segment/${index}/transcribe`, { method: 'POST', body: JSON.stringify(draft || {}) }),
   setSegmentText: (sid: string, index: number, text: string) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/text`, { method: 'POST', body: JSON.stringify({ text }) }),
   autoSlice: (sid: string, index: number) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/auto-slice`, { method: 'POST' }),
+  bulkSlice: (sid: string) =>
+    jfetch<{ job_id: string }>(`/api/multitrack/${sid}/bulk-slice`, { method: 'POST' }),
   setInpaint: (sid: string, index: number, enabled: boolean) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/inpaint`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   setPreserveNonvocal: (sid: string, index: number, enabled: boolean) =>
@@ -537,6 +543,15 @@ export const api = {
     fd.append('name', name)
     fd.append('start_s', String(startS))
     const res = await fetch(`/api/multitrack/${sid}/upload-channel`, { method: 'POST', body: fd })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Upload failed')
+    return res.json()
+  },
+  async uploadAudioSegment(sid: string, pos: string, file: File, startS = 0, ripple = false): Promise<MultitrackSession> {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('start_s', String(startS))
+    fd.append('ripple', String(ripple))
+    const res = await fetch(`/api/multitrack/${sid}/channel/${pos}/upload-segment`, { method: 'POST', body: fd })
     if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Upload failed')
     return res.json()
   },

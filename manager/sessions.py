@@ -22,7 +22,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -264,6 +264,21 @@ def get(sid: str) -> Optional[Dict[str, Any]]:
         return public(session) if session else None
 
 
+def render_mix(sid: str) -> Tuple[np.ndarray, int, str]:
+    """Re-stitch the full timeline and hand back the mix samples + a title for
+    on-demand download (encoded into the configured FLAC/MP3 format by the
+    caller). Re-stitching guarantees the download matches the live edit."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        sr = int(session["sample_rate"])
+        full = _stitch(session)
+        _write(session)
+        title = str(session.get("title") or "scene")
+        return full, sr, title
+
+
 def segment_text(sid: str, index: int) -> str:
     """A segment's current dialogue text ('' when missing)."""
     with _lock:
@@ -272,6 +287,26 @@ def segment_text(sid: str, index: int) -> str:
             return ""
         seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
         return str(seg.get("text") or "") if seg else ""
+
+
+def voice_segment_indices(sid: str) -> List[int]:
+    """Indices of segments on generative (voice) tracks, in timeline order —
+    the targets for sentence auto-slicing. Uploaded audio channels are skipped
+    (slicing music/SFX by 'sentence' makes no sense)."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            return []
+        segs = sorted(
+            session["segments"],
+            key=lambda s: (float(s.get("start_s", 0.0) or 0.0), int(s["index"])),
+        )
+        out: List[int] = []
+        for s in segs:
+            if _channel_of(session, s["speaker_id"]).get("kind") == "audio":
+                continue
+            out.append(int(s["index"]))
+        return out
 
 
 def public(session: Dict[str, Any]) -> Dict[str, Any]:
@@ -1078,6 +1113,63 @@ def add_audio_channel(
         return public(session)
 
 
+def add_audio_segment(
+    sid: str,
+    pos: str,
+    audio: np.ndarray,
+    in_sr: int,
+    name: str = "",
+    start_s: float = 0.0,
+    ripple: bool = False,
+) -> Dict[str, Any]:
+    """Drop an uploaded audio sample as a NEW clip on an EXISTING audio channel
+    (quick foley/SFX without spawning a track). `ripple` pushes every clip that
+    starts at/after the drop point later by the new clip's duration."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        spk = session.get("speakers", {}).get(str(pos))
+        if spk is None:
+            raise FileNotFoundError(f"Channel {pos} not found")
+        if spk.get("kind") != "audio":
+            raise ValueError("Target is not an uploaded audio channel")
+        sr = int(session["sample_rate"])
+        wav = np.asarray(audio, dtype=np.float32)
+        if in_sr and int(in_sr) != sr:
+            import librosa
+
+            wav = librosa.resample(wav, orig_sr=int(in_sr), target_sr=sr).astype(np.float32)
+        nid = int(session.get("next_index", max((s["index"] for s in session["segments"]), default=-1) + 1))
+        session["next_index"] = nid + 1
+        fn = f"seg_{nid:03d}.wav"
+        save_wav(_dir(sid) / fn, wav, sr)
+        dur = duration_seconds(wav, sr)
+        start = max(0.0, float(start_s))
+        if ripple:
+            for s in session["segments"]:
+                if float(s.get("start_s", 0.0) or 0.0) >= start - 1e-6:
+                    s["start_s"] = round(float(s["start_s"]) + dur, 3)
+        label = (name or "").strip() or "Audio"
+        session["segments"].append(
+            {
+                "index": nid,
+                "speaker_id": str(pos),
+                "text": label,
+                "file": fn,
+                "raw_duration_s": dur,
+                "trim_start_s": 0.0,
+                "trim_end_s": dur,
+                "speed": 1.0,
+                "gain_db": 0.0,
+                "start_s": round(start, 3),
+            }
+        )
+        _stitch(session)
+        _write(session)
+        return public(session)
+
+
 def channel_regen_payload(sid: str, pos: str) -> Dict[str, Any]:
     """Build a worker payload to regenerate EVERY segment on a speaker channel
     (e.g. after re-casting the voice). Keeps each segment's index for mapping."""
@@ -1409,8 +1501,18 @@ def add_space(sid: str, start_s: float, amount: float) -> Dict[str, Any]:
         return public(session)
 
 
-def duplicate_segment(sid: str, index: int, start_s: float, ripple: bool = False) -> Dict[str, Any]:
-    """Copy a segment (audio + trim/speed/text) to a new spot. No model run."""
+def duplicate_segment(
+    sid: str,
+    index: int,
+    start_s: float,
+    ripple: bool = False,
+    speaker_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Copy a segment to a new spot — carrying the full clip identity: audio,
+    trim/speed/text AND its level (gain_db), fades, and any baked vocal
+    transforms (fx). `speaker_id` re-homes the copy onto another track (alt-drag
+    onto a different lane); when omitted/unknown it stays on the source track.
+    No model run."""
     with _lock:
         session = _read(sid)
         if not session:
@@ -1418,6 +1520,14 @@ def duplicate_segment(sid: str, index: int, start_s: float, ripple: bool = False
         src = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
         if src is None:
             raise FileNotFoundError(f"Segment {index} not found")
+        # Re-home onto another track only when the target exists and matches the
+        # source's kind (don't drop a voice clip onto an uploaded-audio channel).
+        target_spk = str(src["speaker_id"])
+        if speaker_id is not None:
+            dst = session.get("speakers", {}).get(str(speaker_id))
+            src_chan = _channel_of(session, src["speaker_id"])
+            if dst is not None and (dst.get("kind") == "audio") == (src_chan.get("kind") == "audio"):
+                target_spk = str(speaker_id)
         nid = int(session.get("next_index", max((s["index"] for s in session["segments"]), default=-1) + 1))
         session["next_index"] = nid + 1
         new_fn = f"seg_{nid:03d}.wav"
@@ -1428,19 +1538,23 @@ def duplicate_segment(sid: str, index: int, start_s: float, ripple: bool = False
             for s in session["segments"]:
                 if float(s.get("start_s", 0.0) or 0.0) >= start_s - 1e-6:
                     s["start_s"] = round(float(s["start_s"]) + dur, 3)
-        session["segments"].append(
-            {
-                "index": nid,
-                "speaker_id": src["speaker_id"],
-                "text": src["text"],
-                "file": new_fn,
-                "raw_duration_s": src.get("raw_duration_s", 0.0),
-                "trim_start_s": src.get("trim_start_s", 0.0),
-                "trim_end_s": src.get("trim_end_s", src.get("raw_duration_s", 0.0)),
-                "speed": src.get("speed", 1.0),
-                "start_s": round(start_s, 3),
-            }
-        )
+        new_seg: Dict[str, Any] = {
+            "index": nid,
+            "speaker_id": target_spk,
+            "text": src["text"],
+            "file": new_fn,
+            "raw_duration_s": src.get("raw_duration_s", 0.0),
+            "trim_start_s": src.get("trim_start_s", 0.0),
+            "trim_end_s": src.get("trim_end_s", src.get("raw_duration_s", 0.0)),
+            "speed": src.get("speed", 1.0),
+            "gain_db": float(src.get("gain_db", 0.0) or 0.0),
+            "fade_in_s": float(src.get("fade_in_s", 0.0) or 0.0),
+            "fade_out_s": float(src.get("fade_out_s", 0.0) or 0.0),
+            "start_s": round(start_s, 3),
+        }
+        if src.get("transforms"):
+            new_seg["transforms"] = {**src["transforms"]}
+        session["segments"].append(new_seg)
         _stitch(session)
         _write(session)
         return public(session)

@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, List
 
 import numpy as np
 
-from . import history, ref_cache, sessions, voices
+from . import history, ref_cache, sentence_slicer, sessions, voices
 from .audio_utils import duration_seconds, encode_audio, load_audio
 from .config import OUTPUT_DIR, settings
 from .generation import parse_script
@@ -153,7 +153,29 @@ def make_multitrack_job(
             prompt=req.prompt or "",
             script=req.script or req.text or "",
         )
+        # Optional follow-on: sentence-slice every voice segment now that all TTS
+        # is done. Kept as a second phase (not inline per-clip) so the Whisper
+        # pass loads once instead of thrashing the GPU against the TTS model.
+        if settings.auto_slice:
+            sid = session["id"]
+            sliced = sentence_slicer.slice_all_voice(model_manager, sid, progress_cb=progress_cb)
+            if sliced is not None:
+                sliced.pop("_bulk_sliced", None)
+                session = sliced
         return {"session": session, "session_id": session["id"]}
+
+    return job
+
+
+def make_bulk_slice_job(
+    model_manager, sid: str
+) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
+    """Sentence-slice every voice track in an existing scene as a heavy job."""
+
+    def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+        session = sentence_slicer.slice_all_voice(model_manager, sid, progress_cb=progress_cb)
+        sliced = (session or {}).pop("_bulk_sliced", 0) if session else 0
+        return {"session": session, "session_id": sid, "bulk_sliced": sliced}
 
     return job
 

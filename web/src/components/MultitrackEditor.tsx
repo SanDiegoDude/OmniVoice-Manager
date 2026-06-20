@@ -2,7 +2,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { api } from '../api'
 import type { MultitrackSegment, MultitrackSession, MultitrackTrack, SpeakerConfig, Voice, VocalTransform } from '../api'
 import { AudioPlayer, type AudioPlayerHandle } from './AudioPlayer'
-import { Toggle } from './ui'
 import { blurTag, focusTag } from '../tagInject'
 import { claimPlayback, releasePlayback } from '../audioBus'
 import PerformanceModal from './PerformanceModal'
@@ -38,7 +37,7 @@ function hueFor(id: string): number {
 }
 const snap = (t: number) => Math.max(0, Math.round(t * 10) / 10)
 
-type Drag = { index: number; cur: number; lane: number } | null
+type Drag = { index: number; cur: number; lane: number; copy?: boolean } | null
 type Sel = { a: number; b: number; mode: 'del' | 'add' } | null
 type SegMenu = { index: number; x: number; y: number } | null
 // Live, uncommitted values while a segment tool-handle is being dragged
@@ -53,7 +52,7 @@ type SegTool = {
   gain?: number
 } | null
 type Pending =
-  | { kind: 'seg'; index: number; origStart: number; fromLane: number; startX: number; startY: number }
+  | { kind: 'seg'; index: number; origStart: number; fromLane: number; startX: number; startY: number; copy?: boolean }
   | { kind: 'seg-l'; index: number; origTrimStart: number; origStart: number; speed: number; trimEnd: number; startX: number }
   | { kind: 'seg-r'; index: number; origTrimEnd: number; trimStart: number; rawDur: number; speed: number; startX: number }
   | { kind: 'fade'; index: number; side: 'in' | 'out'; orig: number; eff: number; startX: number }
@@ -93,7 +92,9 @@ export function MultitrackEditor({
   onSetChannel,
   onRegenChannel,
   onUploadChannel,
+  onUploadAudioSegment,
   onAutoSlice,
+  onBulkSlice,
   onSetInpaint,
   onSetPreserveNonvocal,
   onPromoteChannel,
@@ -132,13 +133,15 @@ export function MultitrackEditor({
   onSplitSegment: (index: number, atS: number) => void
   onDeleteSpace: (startS: number, amount: number) => void
   onAddSpace: (startS: number, amount: number) => void
-  onDuplicateSegment: (index: number, startS: number, ripple: boolean) => void
+  onDuplicateSegment: (index: number, startS: number, ripple: boolean, speakerId?: string) => void
   onSetText: (index: number, text: string) => void
   onTranscribe: (index: number, draft?: { trim_start_s?: number; trim_end_s?: number; speed?: number }) => Promise<string | null | undefined>
   onSetChannel: (pos: string, fields: { name?: string | null; gain_db?: number }) => void
   onRegenChannel: (pos: string) => void
   onUploadChannel: (file: File, name: string, startS?: number) => void | Promise<void>
+  onUploadAudioSegment: (pos: string, file: File, startS: number, ripple: boolean) => void | Promise<void>
   onAutoSlice: (index: number) => Promise<void>
+  onBulkSlice: () => Promise<void>
   onSetInpaint: (index: number, enabled: boolean) => Promise<void>
   onSetPreserveNonvocal: (index: number, enabled: boolean) => Promise<void>
   onPromoteChannel: (pos: string, name: string) => Promise<MultitrackSession | null>
@@ -267,6 +270,18 @@ export function MultitrackEditor({
   }, [vScale, onVMove, onVUp])
   const [gapVal, setGapVal] = useState(session.gap_ms)
   const [speedVal, setSpeedVal] = useState(1)
+  // Two-step confirm for the heavy bulk sentence-slice (guards misclicks).
+  const [confirmBulk, setConfirmBulk] = useState(false)
+  // Playhead clock display: 'mmss' = MM:SS:CC, 'secs' = seconds.subseconds.
+  const [clockFmt, setClockFmt] = useState<'mmss' | 'secs'>('mmss')
+  const fmtClock = (t: number) => {
+    const v = Math.max(0, t || 0)
+    if (clockFmt === 'secs') return v.toFixed(2)
+    const m = Math.floor(v / 60)
+    const s = Math.floor(v % 60)
+    const cc = Math.floor((v * 100) % 100)
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(cc).padStart(2, '0')}`
+  }
   const [sel, setSel] = useState<Sel>(null)
   const [selEditing, setSelEditing] = useState(false)
   // Multi-select for merge: shift-click toggles; selection is sticky (survives
@@ -294,8 +309,14 @@ export function MultitrackEditor({
   const headPosRef = useRef(0)
   const mixRef = useRef(session.mix_url)
   const uploadInputRef = useRef<HTMLInputElement>(null)
+  // Where the next uploaded audio channel drops: set at click time so the two
+  // toolbar buttons (PH = playhead, Start = 0:00) share one hidden file input.
+  const uploadAtRef = useRef(0)
+  // Drop an audio sample onto an EXISTING audio channel (double-click menu).
+  const audioSegInputRef = useRef<HTMLInputElement>(null)
+  const audioSegReqRef = useRef<{ pos: string; startS: number; ripple: boolean } | null>(null)
   const pendingRef = useRef<Pending | null>(null)
-  const dragRef = useRef<{ index: number; cur: number; lane: number } | null>(null)
+  const dragRef = useRef<{ index: number; cur: number; lane: number; copy?: boolean } | null>(null)
   const selRef = useRef<Sel>(null)
   const activeRef = useRef(false)
   const suppressClickRef = useRef(false)
@@ -419,6 +440,7 @@ export function MultitrackEditor({
     setSelSegs(new Set())
     setGapVal(session.gap_ms)
     setSpeedVal(1)
+    setConfirmBulk(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id])
 
@@ -499,8 +521,8 @@ export function MultitrackEditor({
       if (p.kind === 'seg') {
         const cur = snap(p.origStart + dt)
         const lane = laneAt(e.clientY)
-        dragRef.current = { index: p.index, cur, lane }
-        setDrag({ index: p.index, cur, lane })
+        dragRef.current = { index: p.index, cur, lane, copy: p.copy }
+        setDrag({ index: p.index, cur, lane, copy: p.copy })
       } else if (p.kind === 'seg-l') {
         // Drag the left edge: trim the head; the clip's remaining audio keeps
         // its place on the timeline (start moves with the edge), like a DAW.
@@ -546,14 +568,17 @@ export function MultitrackEditor({
       if (activeRef.current) {
         if (p?.kind === 'seg' && dragRef.current) {
           const d = dragRef.current
-          if (d.lane !== p.fromLane) {
+          const dst = session.tracks[d.lane]
+          const src = session.tracks[p.fromLane]
+          const compatible = !!dst && !!src && (dst.kind === 'audio') === (src.kind === 'audio')
+          if (p.copy) {
+            // Alt-drag = drop a no-ripple COPY exactly where released (same or
+            // another compatible track); the original stays put.
+            if (compatible) onDuplicateSegment(d.index, d.cur, false, dst!.speaker_id)
+          } else if (d.lane !== p.fromLane) {
             // Dropped on another track: re-home the clip (audio unchanged —
             // regenerate to render it in the new track's voice).
-            const dst = session.tracks[d.lane]
-            const src = session.tracks[p.fromLane]
-            if (dst && src && (dst.kind === 'audio') === (src.kind === 'audio')) {
-              onMoveSegment(d.index, dst.speaker_id, d.cur)
-            }
+            if (compatible) onMoveSegment(d.index, dst!.speaker_id, d.cur)
           } else {
             onEditSegment(d.index, { start_s: d.cur })
           }
@@ -589,7 +614,7 @@ export function MultitrackEditor({
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
-  }, [pxPerSec, rowH, session, onEditSegment, onMoveSegment, updateSel, updateTool, magnet])
+  }, [pxPerSec, rowH, session, onEditSegment, onMoveSegment, onDuplicateSegment, updateSel, updateTool, magnet])
 
   // Spacebar = play/pause (unless typing, and never while a tool modal is open —
   // modals own the spacebar for their own players).
@@ -724,6 +749,8 @@ export function MultitrackEditor({
       fromLane: laneIndexOf(seg.speaker_id),
       startX: e.clientX,
       startY: e.clientY,
+      // Alt-drag = duplicate: the original stays put, a copy rides the cursor.
+      copy: e.altKey,
     }
   }
 
@@ -901,11 +928,6 @@ export function MultitrackEditor({
           </div>
         </div>
         <div className="row" style={{ gap: 12, alignItems: 'center' }}>
-          <Toggle checked={follow} onChange={setFollow} label="Follow" />
-          <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            Zoom
-            <input type="range" min={MIN_PPS} max={MAX_PPS} step={2} value={pxPerSec} onChange={(e) => setPxPerSec(clampPps(parseInt(e.target.value, 10)))} title="Zoom — shift+scroll over the timeline, or the +/− keys" />
-          </label>
           {selValid.length > 0 && (
             <div className="row" style={{ gap: 6, alignItems: 'center' }}>
               <button
@@ -921,11 +943,47 @@ export function MultitrackEditor({
               <button className="btn sm ghost" onClick={() => setSelSegs(new Set())} title="Clear the merge selection">✕</button>
             </div>
           )}
-          <button className="btn sm ghost" onClick={onUndo} disabled={busy || !session.can_undo} title="Undo the last action (single step back — regenerate, move, trim, add, delete, etc.)">
+          <button className="btn sm mtk-undo" onClick={onUndo} disabled={busy || !session.can_undo} title="Undo the last action (single step back — regenerate, move, trim, add, delete, etc.)">
             ↶ Undo
           </button>
-          <button className="btn sm ghost" onClick={() => uploadInputRef.current?.click()} disabled={busy} title="Upload audio OR video files as new layered channels (soundtrack / SFX) — pick several at once; each lands on its own track. Video audio is stripped automatically.">
-            ＋🎵 Audio channel
+          <button className="btn sm finalize" onClick={onFinalize} disabled={busy || finalizing} title="Bake the timeline down to a single saved render. You typically click this once, at the end.">
+            {finalizing ? <span className="spinner" /> : '✓'} Finalize audio
+          </button>
+        </div>
+      </div>
+
+      {/* Full stitched mix (waveform viewer) */}
+      <AudioPlayer
+        ref={playerRef}
+        key={session.mix_url}
+        url={session.mix_url}
+        title="Full mix (auto-stitched)"
+        filename={`${session.title || 'scene'}.wav`}
+        autoPlay={false}
+        showPlay={false}
+        downloadUrl={`/api/multitrack/${session.id}/download`}
+        waveHeight={Math.round(70 * vScale)}
+        onTime={onTime}
+      />
+
+      {/* Track controls — bulk actions (left) · transport (center) · global speed/gap (right) */}
+      <div className="mtk-transport">
+        <div className="mtk-transport-left">
+          <button
+            className="btn sm ghost"
+            onClick={() => { uploadAtRef.current = Math.max(0, head.cur); uploadInputRef.current?.click() }}
+            disabled={busy}
+            title="Upload audio OR video files as new layered channels (soundtrack / SFX) — each drops at the PLAYHEAD. Pick several at once; each lands on its own track. Video audio is stripped automatically."
+          >
+            ＋🎵 +Audio (PH)
+          </button>
+          <button
+            className="btn sm ghost"
+            onClick={() => { uploadAtRef.current = 0; uploadInputRef.current?.click() }}
+            disabled={busy}
+            title="Upload audio OR video files as new layered channels (soundtrack / SFX) — each drops at the START (0:00). Pick several at once; each lands on its own track. Video audio is stripped automatically."
+          >
+            ＋🎵 +Audio (Start)
           </button>
           <input
             ref={uploadInputRef}
@@ -936,36 +994,87 @@ export function MultitrackEditor({
             onChange={async (e) => {
               const files = Array.from(e.target.files ?? [])
               e.target.value = ''
-              // Each file lands as its own channel at the playhead (small foley/SFX
-              // where you're working, not at t=0). Await sequentially so concurrent
-              // session writes don't race.
+              // Drop point was captured at click time (playhead vs 0:00). Await
+              // sequentially so concurrent session writes don't race.
+              const at = uploadAtRef.current
               for (const f of files) {
-                await onUploadChannel(f, f.name.replace(/\.[^.]+$/, ''), Math.max(0, head.cur))
+                await onUploadChannel(f, f.name.replace(/\.[^.]+$/, ''), at)
               }
             }}
           />
-          <button className="btn primary" onClick={onFinalize} disabled={busy || finalizing}>
-            {finalizing ? <span className="spinner" /> : '✓'} Finalize audio
+          {/* Drop an audio sample onto an existing audio channel (double-click menu). */}
+          <input
+            ref={audioSegInputRef}
+            type="file"
+            accept="audio/*,video/*"
+            style={{ display: 'none' }}
+            onChange={async (e) => {
+              const file = (e.target.files ?? [])[0]
+              e.target.value = ''
+              const req = audioSegReqRef.current
+              audioSegReqRef.current = null
+              if (file && req) await onUploadAudioSegment(req.pos, file, req.startS, req.ripple)
+            }}
+          />
+          {confirmBulk ? (
+            <div className="row mtk-bulk-confirm" style={{ gap: 6, alignItems: 'center' }}>
+              <span className="hint" style={{ whiteSpace: 'nowrap' }}>Slice every voice track?</span>
+              <button
+                className="btn sm primary"
+                disabled={busy}
+                title="Slice all voice tracks into one clip per sentence (this can take a while)"
+                onClick={async () => { setConfirmBulk(false); await onBulkSlice() }}
+              >
+                ✓ Slice all
+              </button>
+              <button className="btn sm ghost" onClick={() => setConfirmBulk(false)} title="Cancel">✕</button>
+            </div>
+          ) : (
+            <button
+              className="btn sm"
+              disabled={busy || session.segment_count === 0}
+              title={'Bulk slice — split every voice track into one clip per sentence.\n\nHeavy job: transcribes & re-cuts all generated speech (uploaded audio channels are left alone). Click, then confirm.'}
+              onClick={() => setConfirmBulk(true)}
+            >
+              ✂ Bulk Slice
+            </button>
+          )}
+          <button
+            className={`btn sm${follow ? ' on' : ''}`}
+            onClick={() => setFollow((f) => !f)}
+            title="Playhead Follow — keep the timeline auto-scrolled to the playhead during playback. Highlighted = on."
+          >
+            PH Follow
           </button>
         </div>
-      </div>
 
-      {/* Transport + global controls */}
-      <div className="mtk-transport">
-        <div className="row" style={{ gap: 4 }}>
-          <button className="btn sm ghost" onClick={() => seekTo(0)} title="Start">⏮</button>
-          <button className="btn sm ghost" onClick={prevSeg} title="Previous segment">◀</button>
+        <div className="mtk-transport-mid">
+          <button className="btn ghost mtk-tbtn" onClick={() => seekTo(0)} title="Start">⏮</button>
+          <button className="btn ghost mtk-tbtn" onClick={prevSeg} title="Previous segment">◀</button>
           <button
-            className={`btn sm playbtn ${head.playing ? 'live' : head.cur > 0.02 ? 'stopped' : 'idle'}`}
+            className={`btn playbtn mtk-tbtn mtk-tbtn-play ${head.playing ? 'live' : head.cur > 0.02 ? 'stopped' : 'idle'}`}
             onClick={() => playerRef.current?.toggle()}
             title="Play / pause (space)"
           >
             {head.playing ? '⏸' : '▶'}
           </button>
-          <button className="btn sm ghost" onClick={nextSeg} title="Next segment">▶</button>
-          <button className="btn sm ghost" onClick={() => seekTo(total)} title="End">⏭</button>
+          <button className="btn ghost mtk-tbtn" onClick={nextSeg} title="Next segment">▶</button>
+          <button className="btn ghost mtk-tbtn" onClick={() => seekTo(total)} title="End">⏭</button>
         </div>
-        <div className="row" style={{ gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+
+        <div className="mtk-transport-right">
+          <button
+            type="button"
+            className="mtk-clock"
+            onClick={() => setClockFmt((f) => (f === 'mmss' ? 'secs' : 'mmss'))}
+            title="Playhead time. Click to switch between minutes:seconds:subseconds and seconds.subseconds."
+          >
+            {fmtClock(head.cur)}
+          </button>
+          <label className="hint mtk-glob" title="Zoom — shift+scroll over the timeline, or the +/− keys">
+            Zoom
+            <input type="range" min={MIN_PPS} max={MAX_PPS} step={2} value={pxPerSec} onChange={(e) => setPxPerSec(clampPps(parseInt(e.target.value, 10)))} />
+          </label>
           <label className="hint mtk-glob" title="Global speed (re-flows the timeline; resets per-segment speeds)">
             Speed {speedVal.toFixed(2)}×
             <input
@@ -986,18 +1095,6 @@ export function MultitrackEditor({
           </label>
         </div>
       </div>
-
-      {/* Full stitched mix */}
-      <AudioPlayer
-        ref={playerRef}
-        key={session.mix_url}
-        url={session.mix_url}
-        title="Full mix (auto-stitched)"
-        filename={`${session.title || 'scene'}.wav`}
-        autoPlay={false}
-        waveHeight={Math.round(70 * vScale)}
-        onTime={onTime}
-      />
 
       <div className="mtk-grid" style={{ marginTop: 12 }}>
         <div className="mtk-labels" style={{ width: LABEL_W, position: 'relative' }} ref={labelsRef}>
@@ -1058,9 +1155,9 @@ export function MultitrackEditor({
                   onDoubleClick={(e) => {
                     if ((e.target as HTMLElement).closest('.mtk-seg')) return
                     // Close the gap the click sits IN: from the nearest clip-end
-                    // before the click to the nearest clip-start after it — both
+                    // before the click to the nearest clip-start after it —
                     // measured across ALL tracks so it tracks the true silence at
-                    // the cursor and never crushes clips on other tracks.
+                    // the cursor (won't ripple over another speaker's turn).
                     const clickT = timeFromClientX(e.clientX)
                     const all = session.tracks.flatMap((tr) =>
                       tr.segments.map((s) => ({ start: s.start_s, end: s.start_s + s.duration_s })),
@@ -1072,10 +1169,13 @@ export function MultitrackEditor({
                     if (endsBefore.length && startsAfter.length) {
                       const gs = Math.max(...endsBefore)
                       const ge = Math.min(...startsAfter)
-                      // Bail if any clip straddles the candidate gap (it'd be
-                      // crushed) — e.g. a long bed on another track under the click.
-                      const covered = all.some((s) => s.start < ge - 1e-3 && s.end > gs + 1e-3)
-                      if (!covered && ge - gs > 0.05) {
+                      // Only a clip that STARTS inside the gap would be rippled into
+                      // a collision; bail on those. A bed/foley layer that merely
+                      // spans the gap (starts at/before it) is left untouched by the
+                      // ripple (delete_space shifts clip starts, never chops), so it
+                      // must NOT block detection — that was the de-gap "MIA" bug.
+                      const blocked = all.some((s) => s.start > gs + 1e-3 && s.start < ge - 1e-3)
+                      if (!blocked && ge - gs > 0.05) {
                         gapStart = gs
                         gapAmount = ge - gs
                       }
@@ -1094,9 +1194,9 @@ export function MultitrackEditor({
                       segTool && (segTool.trimStart != null || segTool.trimEnd != null)
                         ? Math.max(0.05, (trimE - trimS) / spd)
                         : seg.duration_s || 0
-                    // Dragging onto ANOTHER lane: the clip stays put (dimmed) and a
-                    // ghost rides the cursor on the target lane instead.
-                    const lifting = drag && drag.index === seg.index && drag.lane !== ti
+                    // Dragging onto ANOTHER lane (or alt-drag copying): the clip
+                    // stays put and a ghost rides the cursor instead.
+                    const lifting = drag && drag.index === seg.index && (drag.lane !== ti || !!drag.copy)
                     const live =
                       drag && drag.index === seg.index && !lifting ? drag.cur : segTool?.start ?? seg.start_s
                     const left = live * pxPerSec
@@ -1119,7 +1219,7 @@ export function MultitrackEditor({
                         key={seg.index}
                         className={`mtk-seg${isRegen ? ' regen' : ''}${dirty ? ' dirty' : ''}${isTrimming ? ' trimming' : ''}${seg.inpaint ? ' inpaint' : ''}${seg.perform ? ' perform' : ''}${seg.perform?.dirty ? ' perform-dirty' : ''}${selSegs.has(seg.index) ? ' selected' : ''}${drag && drag.index === seg.index ? ' dragging' : ''}${lifting ? ' lifting' : ''}${sliceArmed === seg.index ? ' slice-armed' : ''}`}
                         style={{ left, width, background: `hsl(${hue} 45% 22%)`, borderColor: dirty ? 'var(--warn)' : `hsl(${hue} 60% 45%)` }}
-                        title={sliceArmed === seg.index ? 'Press on the clip and release to slice here (Esc to cancel)' : `${text}\n(drag to move · pull up/down to another track · ctrl+click to slice)`}
+                        title={sliceArmed === seg.index ? 'Press on the clip and release to slice here (Esc to cancel)' : `${text}\n(drag to move · pull up/down to another track · alt+drag to copy · ctrl+click to slice)`}
                         onMouseDown={(e) => {
                           // Ctrl/Cmd+click = jump straight into a manual slice gesture
                           // (press-move-release). startSlice preventDefaults/stops so
@@ -1178,7 +1278,7 @@ export function MultitrackEditor({
                               🎙
                             </button>
                           )}
-                          {tier >= 4 && <button className="mtk-ic" onClick={() => startEdit(seg.index, text)} title="Edit dialogue">✎</button>}
+                          {tier >= 4 && <button className="mtk-ic" onClick={() => setPerfModal({ index: seg.index, mic: true, capture: false })} title="Edit dialogue (opens the editor — double-click the text for a quick inline edit)">✎</button>}
                           {tier >= 4 && <button className="mtk-ic" onClick={() => downloadSeg(seg)} title="Download this slice">⬇</button>}
                           {tier >= 3 && (
                             <button className={`mtk-ic${isTrimming ? ' on' : ''}`} onClick={() => (isTrimming ? saveTrim() : openTrim(seg))} title={isTrimming ? 'Save trim' : 'Trim / speed'}>
@@ -1392,10 +1492,17 @@ export function MultitrackEditor({
               const seg = flatSegs.find((s) => s.index === drag.index)
               if (!seg) return null
               const fromLane = laneIndexOf(seg.speaker_id)
-              if (drag.lane === fromLane) return null
+              // A move on the same lane has no ghost (the clip itself slides); a
+              // copy always rides a ghost, even when dropping on the same lane.
+              if (drag.lane === fromLane && !drag.copy) return null
               const dst = session.tracks[drag.lane]
               const src = session.tracks[fromLane]
               const valid = !!dst && !!src && (dst.kind === 'audio') === (src.kind === 'audio')
+              const tag = !valid
+                ? '⃠ incompatible track'
+                : drag.copy
+                ? `⧉ copy → ${dst.name} @ ${drag.cur.toFixed(1)}s`
+                : `→ ${dst.name} @ ${drag.cur.toFixed(1)}s`
               return (
                 <div
                   className={`mtk-seg-ghost${valid ? '' : ' invalid'}`}
@@ -1406,9 +1513,7 @@ export function MultitrackEditor({
                     height: rowH - 12,
                   }}
                 >
-                  <span className="mtk-seg-ghost-tag">
-                    {valid ? `→ ${dst.name} @ ${drag.cur.toFixed(1)}s` : '⃠ incompatible track'}
-                  </span>
+                  <span className="mtk-seg-ghost-tag">{tag}</span>
                 </div>
               )
             })()}
@@ -1544,6 +1649,32 @@ export function MultitrackEditor({
                 >
                   🎙 Record dialog…
                 </button>
+                {insertAudio && (
+                  <>
+                    <button
+                      className="btn sm"
+                      title="Upload an audio/video sample as a new clip on THIS audio track at the click point — quick foley/SFX, no extra track. Leaves the rest of the timeline put."
+                      onClick={() => {
+                        audioSegReqRef.current = { pos: insert.speakerId, startS: insert.start_s, ripple: false }
+                        setInsert(null)
+                        audioSegInputRef.current?.click()
+                      }}
+                    >
+                      ＋🎵 Upload Audio (no update)
+                    </button>
+                    <button
+                      className="btn sm"
+                      title="Upload an audio/video sample as a new clip on THIS audio track at the click point, pushing every later clip back by its length."
+                      onClick={() => {
+                        audioSegReqRef.current = { pos: insert.speakerId, startS: insert.start_s, ripple: true }
+                        setInsert(null)
+                        audioSegInputRef.current?.click()
+                      }}
+                    >
+                      ⇥🎵 Upload Audio (ripple — push later lines)
+                    </button>
+                  </>
+                )}
                 <button
                   className="btn sm"
                   onClick={() => {
@@ -1594,6 +1725,33 @@ export function MultitrackEditor({
                 >
                   ↻ Regenerate{dirty ? ' (edited)' : seg.perform?.dirty ? ' (render performance)' : ''}
                 </button>
+              )}
+              {!isAudioChan && (
+                !seg.perform ? (
+                  <button
+                    className="btn sm"
+                    title="Act the line yourself (record or upload) and paint this clip's voice over YOUR performance — timing, emphasis, emotion preserved"
+                    onClick={() => { setPerfModal({ index: seg.index, mic: true, capture: true }); setSegMenu(null) }}
+                  >
+                    🎙 Record/Upload Vocal Performance…
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      className="btn sm on"
+                      onClick={() => { setPerfModal({ index: seg.index, mic: true, capture: true }); setSegMenu(null) }}
+                    >
+                      🎙 Edit performance ({seg.perform.mode === 'voice' ? 'voice' : 'character'} · {seg.perform.strength})
+                    </button>
+                    <button
+                      className="btn sm"
+                      title="Detach the performance — back to plain TTS regeneration"
+                      onClick={async () => { const i = seg.index; setSegMenu(null); await onClearPerformance(i) }}
+                    >
+                      ✕ Remove performance
+                    </button>
+                  </>
+                )
               )}
               {!isAudioChan && (
                 <button
@@ -1701,32 +1859,6 @@ export function MultitrackEditor({
                     >
                       {seg.preserve_nonvocal ? '☑ ' : '☐ '}Preserve non-vocal
                     </button>
-                  )}
-                  <div className="mtk-menu-sep" />
-                  {!seg.perform ? (
-                    <button
-                      className="btn sm"
-                      title="Act the line yourself (record or upload) and paint this clip's voice over YOUR performance — timing, emphasis, emotion preserved"
-                      onClick={() => { setPerfModal({ index: seg.index, mic: true, capture: true }); setSegMenu(null) }}
-                    >
-                      🎙 Record/Upload Vocal Performance…
-                    </button>
-                  ) : (
-                    <>
-                      <button
-                        className="btn sm on"
-                        onClick={() => { setPerfModal({ index: seg.index, mic: true, capture: true }); setSegMenu(null) }}
-                      >
-                        🎙 Edit performance ({seg.perform.mode === 'voice' ? 'voice' : 'character'} · {seg.perform.strength})
-                      </button>
-                      <button
-                        className="btn sm"
-                        title="Detach the performance — back to plain TTS regeneration"
-                        onClick={async () => { const i = seg.index; setSegMenu(null); await onClearPerformance(i) }}
-                      >
-                        ✕ Remove performance
-                      </button>
-                    </>
                   )}
                 </>
               )}

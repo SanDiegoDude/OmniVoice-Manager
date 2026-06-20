@@ -9,6 +9,7 @@ export function TopBar({
   onToggleLod,
   onToggleLowVram,
   onToggleTrimSilence,
+  onToggleAutoSlice,
   onToggleFormat,
 }: {
   info: SystemInfo | null
@@ -18,6 +19,7 @@ export function TopBar({
   onToggleLod: (v: boolean) => void
   onToggleLowVram: (v: boolean) => void
   onToggleTrimSilence: (v: boolean) => void
+  onToggleAutoSlice: (v: boolean) => void
   onToggleFormat: (format: string) => void
 }) {
   const gpu = info?.gpu
@@ -109,6 +111,20 @@ export function TopBar({
           'you stop hand-trimming the empty space the model and human timing ' +
           'leave behind. Applies to segment generations/regenerations, the ' +
           'Voice Clone render, and recorded performances.'
+        }
+      />
+      <Toggle
+        checked={!!info?.auto_slice}
+        onChange={onToggleAutoSlice}
+        label="Auto-slice"
+        title={
+          'Auto-slice by sentence.\n\n' +
+          'After a scene finishes generating, automatically splits every voice ' +
+          'track into one clip per sentence — so you land with sentence-level ' +
+          'clips ready to move, trim and re-time. Runs as a follow-on pass once ' +
+          'all speech is rendered (uploaded audio channels are left alone). ' +
+          'Use the “Bulk slice” button in the track controls to slice an ' +
+          'existing scene on demand.'
         }
       />
 

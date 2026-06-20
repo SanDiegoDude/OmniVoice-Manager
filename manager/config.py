@@ -53,6 +53,10 @@ class Settings:
     # take (leaves a small natural pad). Kills the dead air the model and human
     # timing leave at the head/tail so users stop hand-trimming every segment.
     trim_silence: bool = False
+    # When set, a scene generation runs a follow-on phase that sentence-slices
+    # every generated voice segment (uploaded audio channels are skipped). Done
+    # after all TTS so the Whisper pass loads once instead of thrashing VRAM.
+    auto_slice: bool = False
     # Output encoding for finished renders + history. MP3 keeps files small and
     # universally shareable (socials/messaging) without audible loss for speech.
     output_format: str = "mp3"  # mp3 | wav | m4a | ogg

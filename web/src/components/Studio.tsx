@@ -102,7 +102,9 @@ export function Studio({
   onSetChannel,
   onRegenChannel,
   onUploadChannel,
+  onUploadAudioSegment,
   onAutoSlice,
+  onBulkSlice,
   onSetInpaint,
   onSetPreserveNonvocal,
   onPromoteChannel,
@@ -163,13 +165,15 @@ export function Studio({
   onSplitSegment: (index: number, atS: number) => void
   onDeleteSpace: (startS: number, amount: number) => void
   onAddSpace: (startS: number, amount: number) => void
-  onDuplicateSegment: (index: number, startS: number, ripple: boolean) => void
+  onDuplicateSegment: (index: number, startS: number, ripple: boolean, speakerId?: string) => void
   onSetSegmentText: (index: number, text: string) => void
   onTranscribeSegment: (index: number, draft?: { trim_start_s?: number; trim_end_s?: number; speed?: number }) => Promise<string | null | undefined>
   onSetChannel: (pos: string, fields: { name?: string | null; gain_db?: number }) => void
   onRegenChannel: (pos: string) => void
   onUploadChannel: (file: File, name: string, startS?: number) => void
+  onUploadAudioSegment: (pos: string, file: File, startS: number, ripple: boolean) => void | Promise<void>
   onAutoSlice: (index: number) => Promise<void>
+  onBulkSlice: () => Promise<void>
   onSetInpaint: (index: number, enabled: boolean) => Promise<void>
   onSetPreserveNonvocal: (index: number, enabled: boolean) => Promise<void>
   onPromoteChannel: (pos: string, name: string) => Promise<MultitrackSession | null>
@@ -1062,7 +1066,9 @@ export function Studio({
             onSetChannel={onSetChannel}
             onRegenChannel={onRegenChannel}
             onUploadChannel={onUploadChannel}
+            onUploadAudioSegment={onUploadAudioSegment}
             onAutoSlice={onAutoSlice}
+            onBulkSlice={onBulkSlice}
             onSetInpaint={onSetInpaint}
             onSetPreserveNonvocal={onSetPreserveNonvocal}
             onPromoteChannel={handlePromote}

@@ -35,6 +35,9 @@ DEFAULTS: Dict[str, Any] = {
         "load_on_demand": False,
         "low_vram": False,
         "trim_silence": False,
+        # Auto-slice each generated voice segment into one clip per sentence as a
+        # follow-on phase after a scene generates (a temporary top-bar toggle).
+        "auto_slice": False,
     },
     "output": {
         # "mp3" (compact, shareable) or "flac" (lossless, pro-audio).

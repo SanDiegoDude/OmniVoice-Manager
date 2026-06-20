@@ -236,9 +236,17 @@ class ModelManager:
             "dereverb", payload, progress_cb=progress_cb, kill_after=self.settings.load_on_demand
         )
 
-    def transcribe(self, payload: Dict[str, Any], progress_cb: ProgressCb = None) -> Dict[str, Any]:
+    def transcribe(
+        self, payload: Dict[str, Any], progress_cb: ProgressCb = None, kill_after: Optional[bool] = None
+    ) -> Dict[str, Any]:
+        # `kill_after=None` keeps the default LOD behavior (free the worker after);
+        # bulk callers pass False to hold Whisper warm across many clips, then
+        # free it once at the end — avoiding a reload-per-clip VRAM thrash.
         return self._request(
-            "transcribe", payload, progress_cb=progress_cb, kill_after=self.settings.load_on_demand
+            "transcribe",
+            payload,
+            progress_cb=progress_cb,
+            kill_after=self.settings.load_on_demand if kill_after is None else kill_after,
         )
 
     def info(self) -> Dict[str, Any]:
@@ -250,6 +258,7 @@ class ModelManager:
             "load_on_demand": self.settings.load_on_demand,
             "low_vram": self.settings.low_vram,
             "trim_silence": self.settings.trim_silence,
+            "auto_slice": self.settings.auto_slice,
             "output_format": self.settings.output_format,
             "device": self._resolved_device or self.settings.device,
             "dtype": self._resolved_dtype or self.settings.dtype,

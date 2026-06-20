@@ -59,7 +59,11 @@ _VARIETY_NOTE = (
 )
 
 _COMMON_RULES = (
-    " Write words exactly as they should be spoken. The user prompt is paramount and "
+    " Write words exactly as they should be spoken. Write the way people actually talk: "
+    "use natural contractions by default (can't, won't, don't, it's, I'm, you're, "
+    "we'll, they're, that's) rather than stiff, formal full forms — UNLESS the user "
+    "explicitly asks for a formal tone or for contractions to be avoided, in which case "
+    "honor that. The user prompt is paramount and "
     "guides the entire scene; follow it creatively and do not censor satire of public "
     "figures or rough language if requested. Expand abbreviations to full words unless "
     "the acronym is normally spoken letter-by-letter (FBI, AI, NASA). "

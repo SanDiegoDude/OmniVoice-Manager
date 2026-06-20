@@ -188,6 +188,8 @@ export default function App() {
                 ? 'Segment added'
                 : j.result.channel_regen !== undefined
                 ? 'Channel regenerated'
+                : j.result.bulk_sliced !== undefined
+                ? `Sliced ${j.result.bulk_sliced} track${j.result.bulk_sliced === 1 ? '' : 's'} by sentence`
                 : 'Scene ready — edit in multitrack'
             notify(msg, 'success')
             // Always play what was just rendered — instant "it's done" feedback.
@@ -197,7 +199,9 @@ export default function App() {
               setPlayCue({ nonce: Date.now(), index: j.result.inserted_index as number })
             } else if (j.result.channel_regen !== undefined) {
               setPlayCue({ nonce: Date.now(), channel: String(j.result.channel_regen) })
-            } else {
+            } else if (j.result.bulk_sliced === undefined) {
+              // Fresh scene generation — autoplay from the top. A bulk slice just
+              // re-cuts existing clips, so don't yank the playhead/playback.
               setPlayCue({ nonce: Date.now(), at: 0 })
             }
           } else {
@@ -260,6 +264,14 @@ export default function App() {
     try {
       setInfo(await api.setTrimSilence(v))
       notify(`Auto-trim silence ${v ? 'enabled' : 'disabled'}`)
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const toggleAutoSlice = async (v: boolean) => {
+    try {
+      setInfo(await api.setAutoSlice(v))
+      notify(`Auto-slice by sentence ${v ? 'enabled — new scenes slice on generate' : 'disabled'}`)
     } catch (e) {
       notify(String(e), 'error')
     }
@@ -772,10 +784,10 @@ export default function App() {
       notify(String(e), 'error')
     }
   }
-  const duplicateSegment = async (index: number, start_s: number, ripple: boolean) => {
+  const duplicateSegment = async (index: number, start_s: number, ripple: boolean, speakerId?: string) => {
     if (!session) return
     try {
-      setSession(await api.duplicateSegment(session.id, index, start_s, ripple))
+      setSession(await api.duplicateSegment(session.id, index, start_s, ripple, speakerId))
     } catch (e) {
       notify(String(e), 'error')
     }
@@ -873,11 +885,32 @@ export default function App() {
       notify(String(e), 'error')
     }
   }
+  const uploadAudioSegment = async (pos: string, file: File, startS: number, ripple: boolean) => {
+    if (!session) return
+    try {
+      setSession(await api.uploadAudioSegment(session.id, pos, file, startS, ripple))
+      notify(`Audio sample dropped${ripple ? ' (rippled later clips)' : ''}`, 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
 
   const reflowSession = async (fields: { gap_ms?: number; speed?: number }) => {
     if (!session) return
     try {
       setSession(await api.reflowSession(session.id, fields))
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+
+  // Heavy: sentence-slice every voice track. Runs as a polled job so the UI
+  // shows progress and stays busy-locked until the whole batch lands.
+  const bulkSlice = async () => {
+    if (!session) return
+    try {
+      const { job_id } = await api.bulkSlice(session.id)
+      setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: { multitrack: true, bulk_slice: true } })
     } catch (e) {
       notify(String(e), 'error')
     }
@@ -968,6 +1001,7 @@ export default function App() {
         onToggleLod={toggleLod}
         onToggleLowVram={toggleLowVram}
         onToggleTrimSilence={toggleTrimSilence}
+        onToggleAutoSlice={toggleAutoSlice}
         onToggleFormat={toggleFormat}
       />
       <div className={`workspace${leftOpen ? '' : ' no-left'}${rightOpen ? '' : ' no-right'}`}>
@@ -1020,6 +1054,7 @@ export default function App() {
           onDeleteSegment={deleteSegment}
           onSplitSegment={splitSegment}
           onAutoSlice={autoSlice}
+          onBulkSlice={bulkSlice}
           onSetInpaint={setInpaint}
           onSetPreserveNonvocal={setPreserveNonvocal}
           onPromoteChannel={promoteChannel}
@@ -1046,6 +1081,7 @@ export default function App() {
           onSetChannel={setChannel}
           onRegenChannel={regenChannel}
           onUploadChannel={uploadChannel}
+          onUploadAudioSegment={uploadAudioSegment}
           onFinalize={finalizeSession}
           notify={notify}
           submitting={submitting}

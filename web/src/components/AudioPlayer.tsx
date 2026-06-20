@@ -57,6 +57,8 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   filename?: string
   autoPlay?: boolean
   showDownload?: boolean
+  showPlay?: boolean
+  downloadUrl?: string
   initialStart?: number
   initialEnd?: number
   initialGain?: number
@@ -71,6 +73,8 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   filename,
   autoPlay = true,
   showDownload = true,
+  showPlay = true,
+  downloadUrl,
   initialStart,
   initialEnd,
   initialGain,
@@ -565,6 +569,30 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   }, [duration])
 
   const download = async () => {
+    // Server-side download (honors the configured FLAC/MP3 export format).
+    // Fetch as a blob rather than pointing an <a> at the URL: a plain anchor
+    // navigation trips the app's beforeunload "leave site?" guard before the
+    // browser sees Content-Disposition. The blob URL downloads with no nav, and
+    // we lift the real filename (+ extension) from the response header.
+    if (downloadUrl) {
+      setDownloading(true)
+      try {
+        const res = await fetch(downloadUrl)
+        if (!res.ok) throw new Error('Download failed')
+        const cd = res.headers.get('Content-Disposition') || ''
+        const m = /filename\*?=(?:UTF-8'')?["']?([^"';]+)/i.exec(cd)
+        const name = m ? decodeURIComponent(m[1]) : (filename || 'mix')
+        const blob = await res.blob()
+        const a = document.createElement('a')
+        a.href = URL.createObjectURL(blob)
+        a.download = name
+        a.click()
+        setTimeout(() => URL.revokeObjectURL(a.href), 2000)
+      } finally {
+        setDownloading(false)
+      }
+      return
+    }
     const buf = bufferRef.current
     if (!buf) {
       // Fallback: download the raw file.
@@ -617,13 +645,15 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
           </div>
         </div>
         <div className="row" style={{ gap: 6 }}>
-          <button
-            className={`btn sm playbtn ${playing ? 'live' : started ? 'stopped' : 'idle'}`}
-            onClick={playing ? stop : play}
-            title={playing ? 'Stop' : 'Play'}
-          >
-            {playing ? '■ Stop' : '▶ Play'}
-          </button>
+          {showPlay && (
+            <button
+              className={`btn sm playbtn ${playing ? 'live' : started ? 'stopped' : 'idle'}`}
+              onClick={playing ? stop : play}
+              title={playing ? 'Stop' : 'Play'}
+            >
+              {playing ? '■ Stop' : '▶ Play'}
+            </button>
+          )}
           <button className="btn sm ghost" onClick={reset} title="Reset trim & gain">
             ↺ Reset
           </button>

@@ -161,6 +161,8 @@ class AddSpaceRequest(BaseModel):
 class DuplicateSegmentRequest(BaseModel):
     start_s: float
     ripple: bool = False
+    # Optional target track: re-home the copy onto another lane (alt-drag drop).
+    speaker_id: Optional[str] = None
 
 
 class TranscribeSegmentRequest(BaseModel):
