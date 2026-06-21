@@ -61,6 +61,14 @@ export function SoundLab({
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState<Job['progress']>({})
   const [result, setResult] = useState<NonNullable<Job['result']> | null>(null)
+  // Whether the run that produced `result` actually asked for an LLM reprompt.
+  // Lets us flag a *silent fallback* (asked, but came back un-enhanced) without
+  // mistaking it for "reprompt off" or a Reroll (which intentionally skips it).
+  const [repromptTried, setRepromptTried] = useState(false)
+  // The shaped prompt from the last successful reprompt. Persists across Rerolls
+  // (which reuse it but skip the LLM, so the result itself is un-flagged) so the
+  // "Generated prompt" panel stays visible while you reroll the same take.
+  const [enhancedPrompt, setEnhancedPrompt] = useState<string | null>(null)
   const [speed, setSpeed] = useState(1)
   // Trim window + output gain dialed into the preview — baked onto the placed
   // segment (track) or the saved file (library) so what you hear is what you get.
@@ -99,6 +107,8 @@ export function SoundLab({
     setSaved(false)
     setSaveName('')
     setGateError(null)
+    setRepromptTried(false)
+    setEnhancedPrompt(null)
     setTab(placement === 'track' ? 'generate' : 'generate')
     setPickedSound(null)
     return () => {
@@ -187,7 +197,7 @@ export function SoundLab({
 
   // `opts.reprompt` lets a caller force the LLM step off — Reroll uses this to
   // re-run SA3 on the already-shaped prompt without re-hitting the AI.
-  const runGenerate = async (override?: Vals, opts?: { reprompt?: boolean }) => {
+  const runGenerate = async (override?: Vals, opts?: { reprompt?: boolean; reroll?: boolean }) => {
     if (primaryEmpty || busy) return
     setBusy(true)
     setResult(null)
@@ -197,10 +207,15 @@ export function SoundLab({
     setTrim(null)
     setGainDb(0)
     setProgress({ stage: 'queued' })
+    const useReprompt = opts?.reprompt ?? repromptActive
+    setRepromptTried(useReprompt)
+    // A fresh generate starts a new prompt cycle (drop any prior enhanced prompt);
+    // a Reroll keeps it so the panel persists across rerolls.
+    if (!opts?.reroll) setEnhancedPrompt(null)
     try {
       const { job_id } = await api.pluginGenerate(plugin.id, {
         fields: buildFields(override),
-        reprompt: opts?.reprompt ?? repromptActive,
+        reprompt: useReprompt,
         save: false, // always preview first; saving is a deliberate second step
         session_id: sessionId,
       })
@@ -210,6 +225,7 @@ export function SoundLab({
         setProgress(j.progress || {})
         if (j.status === 'done') {
           setResult(j.result)
+          if (j.result?.reprompted && j.result?.prompt) setEnhancedPrompt(String(j.result.prompt))
           setSaveName(suggestName())
           break
         }
@@ -247,7 +263,7 @@ export function SoundLab({
         setVal(seedField.key, next)
       }
     }
-    runGenerate(override, { reprompt: false })
+    runGenerate(override, { reprompt: false, reroll: true })
   }
 
   // Has the user trimmed or changed gain? (Those bake into a library copy.)
@@ -498,10 +514,16 @@ export function SoundLab({
 
           {result && previewUrl && (
             <div className="card" style={{ marginTop: 16, padding: 12 }}>
-              {result.reprompted && result.prompt && (
+              {enhancedPrompt && (
                 <div style={{ marginBottom: 8 }}>
                   <div className="field-label">Generated prompt</div>
-                  <div className="hint" style={{ whiteSpace: 'pre-wrap' }}>{result.prompt}</div>
+                  <div className="hint" style={{ whiteSpace: 'pre-wrap' }}>{enhancedPrompt}</div>
+                </div>
+              )}
+              {repromptTried && !result.reprompted && (
+                <div className="hint" style={{ marginBottom: 8 }}>
+                  ⚠ Smart reprompt didn’t return a rewrite — generated from your prompt as-is
+                  (the AI provider declined or errored). Quality may differ from a reprompted take.
                 </div>
               )}
               <AudioPlayer
