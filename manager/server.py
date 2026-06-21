@@ -1465,13 +1465,15 @@ def multitrack_set_segment_text(sid: str, index: int, req: SetSegmentTextRequest
 
 
 @app.get("/api/multitrack/{sid}/segment/{index}/clip")
-def multitrack_segment_clip(sid: str, index: int, dl: int = 0):
+def multitrack_segment_clip(sid: str, index: int, dl: int = 0, orig: int = 0):
     """Render a segment exactly as it sits in the mix (trim+speed+level). Used for
-    accurate solo preview and shareable per-slice download."""
+    accurate solo preview and shareable per-slice download. `orig=1` renders the
+    clip's pre-transform audio (the transforms modal previews its sliders on the
+    untreated clip so applied effects don't stack)."""
     from .audio_utils import encode_audio
 
     try:
-        audio, sr, name, start_s = sessions.render_segment(sid, index)
+        audio, sr, name, start_s = sessions.render_segment(sid, index, pristine=bool(orig))
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
     safe = service.slugify(f"{name}-{start_s:.1f}s", default=f"seg{index}")
@@ -1480,7 +1482,7 @@ def multitrack_segment_clip(sid: str, index: int, dl: int = 0):
         path = TMP_DIR / f"clip_{sid}_{index}.{fmt}"
         out = encode_audio(path, audio, sr, fmt=fmt, bitrate=settings.output_bitrate)
         return FileResponse(str(out), media_type=media_type_for(out), filename=f"{safe}{out.suffix}")
-    path = TMP_DIR / f"clip_{sid}_{index}.wav"
+    path = TMP_DIR / f"clip_{sid}_{index}{'_orig' if orig else ''}.wav"
     save_wav(path, audio, sr)
     return FileResponse(str(path), media_type="audio/wav", filename=f"{safe}.wav")
 

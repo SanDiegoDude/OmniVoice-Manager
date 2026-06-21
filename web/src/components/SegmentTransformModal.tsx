@@ -59,7 +59,9 @@ export default function SegmentTransformModal({
   useEffect(() => () => clearPreview(), [clearPreview])
 
   if (!seg) return null
-  const clipUrl = seg.clip_url
+  // Preview/audition the clip's PRE-transform audio so the sliders bake onto the
+  // untreated take rather than stacking on an already-baked clip (`orig=1`).
+  const clipUrl = `${seg.clip_url}&orig=1`
 
   // Render a non-destructive preview of the current sliders onto the clip.
   const preview = async () => {

@@ -840,6 +840,39 @@ def _apply_bed(sid: str, seg: Dict[str, Any], vocal: np.ndarray, sr: int) -> np.
     return peak_limit(out)
 
 
+def _reapply_segment_fx(sid: str, seg: Dict[str, Any], wav: np.ndarray, sr: int) -> np.ndarray:
+    """Carry a segment's baked vocal/audio transforms onto a freshly-regenerated
+    take instead of stranding them on the pre-regen audio.
+
+    A regen overwrites the clip's audio, but the transform stash (``fx_orig``)
+    still points at the *old* take. If we leave it, the segment keeps reporting
+    its effects as "applied" while the timeline plays the untreated new voice,
+    and the next Apply/Remove in the transforms modal re-derives from the stale
+    stash — silently reverting to the old voice. To avoid that we re-stash the
+    fresh, untransformed take and re-bake the same transforms onto it, so the
+    user's effects follow the new voice. When the clip has no active transforms
+    we just drop any stale stash. Returns the (possibly transformed) wav to
+    write to the segment's file."""
+    from .voice_transforms import apply_transforms, has_effect
+
+    d = _dir(sid)
+    old_orig = seg.get("fx_orig")
+    tf = seg.get("transforms")
+    wav = np.asarray(wav, dtype=np.float32)
+    if has_effect(tf):
+        # Re-stash the fresh pristine take so future apply/remove re-derive from
+        # the new voice, then bake the stored transforms back on top of it.
+        orig_fn = old_orig or f"{Path(seg['file']).stem}_fxorig.wav"
+        save_wav(d / orig_fn, wav, sr)
+        seg["fx_orig"] = orig_fn
+        return np.asarray(apply_transforms(wav, sr, tf), dtype=np.float32)
+    if old_orig:
+        (d / old_orig).unlink(missing_ok=True)
+    seg.pop("fx_orig", None)
+    seg.pop("transforms", None)
+    return wav
+
+
 def apply_regen(
     sid: str, index: int, worker_result: Dict[str, Any], perform_rendered: bool = True
 ) -> Dict[str, Any]:
@@ -868,12 +901,11 @@ def apply_regen(
         controls = _controls_endpoint(session, target, start, end_old)
 
         wav = _apply_bed(sid, target, wav, sr)  # Vocal Inpaint: re-add non-vocal bed
+        # Carry any baked per-segment transforms onto the fresh take so the
+        # user's vocal effects follow the new voice (re-stashing the new pristine
+        # audio so a later apply/remove derives from it, not the old take).
+        wav = _reapply_segment_fx(sid, target, wav, sr)
         save_wav(_dir(sid) / target["file"], wav, sr)
-        # Fresh take → any baked per-segment transforms (and their stash) are stale.
-        if target.get("fx_orig"):
-            (_dir(sid) / target["fx_orig"]).unlink(missing_ok=True)
-        target.pop("fx_orig", None)
-        target.pop("transforms", None)
         dur = duration_seconds(wav, sr)
         target["raw_duration_s"] = dur
         target["trim_start_s"] = 0.0
@@ -1421,6 +1453,9 @@ def replace_segment_audio(
             raise FileNotFoundError(f"Segment {index} not found")
         sr = int(session["sample_rate"])
         wav = load_audio(Path(audio_path), sr=sr).astype(np.float32)
+        # Carry any baked transforms onto the re-rolled clip so applied effects
+        # follow the new sound instead of stranding on the pre-roll audio.
+        wav = _reapply_segment_fx(sid, seg, wav, sr)
         save_wav(_dir(sid) / seg["file"], wav, sr)
         dur = duration_seconds(wav, sr)
         seg["raw_duration_s"] = round(dur, 3)
@@ -1511,6 +1546,10 @@ def apply_channel_regen(sid: str, pos: str, worker_result: Dict[str, Any]) -> Di
             end_old = start + old_eff
             controls = _controls_endpoint(session, target, start, end_old)
             wav = np.asarray(outs[idx]["waveform"], dtype=np.float32)
+            # Re-bake any per-segment transforms onto the new take so the user's
+            # vocal effects follow the re-cast voice (matches single-segment
+            # regen; otherwise the effects strand on the pre-regen audio).
+            wav = _reapply_segment_fx(sid, target, wav, sr)
             save_wav(_dir(sid) / target["file"], wav, sr)
             dur = duration_seconds(wav, sr)
             target["raw_duration_s"] = dur
@@ -2270,11 +2309,17 @@ def promote_channel(sid: str, pos: str, prepped: np.ndarray, prepped_sr: int, la
         return public(session)
 
 
-def render_segment(sid: str, index: int, overrides: Optional[Dict[str, Any]] = None) -> tuple:
+def render_segment(
+    sid: str, index: int, overrides: Optional[Dict[str, Any]] = None, pristine: bool = False
+) -> tuple:
     """Render a single segment exactly as it sits in the mix (trim + speed +
     leveling). Returns (audio, sr, name, start). Used for accurate solo preview /
     download and Whisper alignment. `overrides` (trim_start_s/trim_end_s/speed)
-    renders a not-yet-saved trim draft without persisting it."""
+    renders a not-yet-saved trim draft without persisting it.
+
+    `pristine` renders from the pre-transform stash (``fx_orig``) when one exists,
+    so the transforms modal can preview/bake its sliders on the clip's untreated
+    audio instead of the already-baked clip (which would stack effects)."""
     with _lock:
         session = _read(sid)
         if not session:
@@ -2282,6 +2327,10 @@ def render_segment(sid: str, index: int, overrides: Optional[Dict[str, Any]] = N
         seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
         if seg is None:
             raise FileNotFoundError(f"Segment {index} not found")
+        if pristine:
+            fo = seg.get("fx_orig")
+            if fo and (_dir(sid) / fo).exists():
+                seg = {**seg, "file": fo}
         if overrides:
             seg = {**seg, **{k: v for k, v in overrides.items() if v is not None}}
         sr = int(session["sample_rate"])
