@@ -3,9 +3,9 @@ rem Launch the OmniVoice Manager on Windows (builds the web UI if needed, then s
 rem Uses the local .venv directly so `uv` does not need to be on your PATH.
 rem
 rem Script-level flags (consumed here, NOT passed to the server):
-rem   --rebuild    Sync Python deps (uv sync) AND force a fresh web UI build,
-rem                even if a build already exists. Catches libraries added
-rem                during active development.
+rem   --rebuild    Sync Python deps + CLI commands (uv sync) AND force a fresh web
+rem                UI build, even if a build already exists. Catches libraries and
+rem                console scripts (e.g. omnivoice-plugin) added during active dev.
 rem   --forceup    Kill any process already listening on the port first.
 rem Everything else is passed through, e.g.: run_manager.bat --ssl --lod
 setlocal enabledelayedexpansion
@@ -35,18 +35,23 @@ if "%FORCEUP%"=="1" (
     )
 )
 
-rem --- Sync Python deps on --rebuild (catches libs added during active dev) ---
-rem Best-effort: the launcher runs off .venv without uv on PATH, so if uv isn't
-rem available we just warn and carry on with the existing env.
+rem --- Sync Python deps + CLI commands on --rebuild ---
+rem `uv sync` re-syncs dependencies AND regenerates the project's console scripts
+rem (omnivoice-manager, omnivoice-plugin, ...). The launcher runs off .venv without
+rem uv on PATH, so look in the usual install locations too before giving up.
 if "%REBUILD%"=="1" (
-    where uv >nul 2>nul
-    if errorlevel 1 (
-        echo --rebuild: 'uv' not on PATH - skipping dependency sync. 1>&2
-        echo   Run 'uv sync' yourself if dependencies have changed. 1>&2
-    ) else (
-        echo Syncing Python dependencies ^(uv sync^) ...
-        uv sync
+    set "UVBIN="
+    for /f "delims=" %%u in ('where uv 2^>nul') do if not defined UVBIN set "UVBIN=%%u"
+    if not defined UVBIN if exist "%USERPROFILE%\.local\bin\uv.exe" set "UVBIN=%USERPROFILE%\.local\bin\uv.exe"
+    if not defined UVBIN if exist "%USERPROFILE%\.cargo\bin\uv.exe" set "UVBIN=%USERPROFILE%\.cargo\bin\uv.exe"
+    if not defined UVBIN if exist ".venv\Scripts\uv.exe" set "UVBIN=.venv\Scripts\uv.exe"
+    if defined UVBIN (
+        echo Syncing Python deps + CLI commands ^(uv sync^) ...
+        "!UVBIN!" sync
         if errorlevel 1 echo uv sync failed - continuing with the existing environment. 1>&2
+    ) else (
+        echo --rebuild: 'uv' not found - skipping dependency sync. 1>&2
+        echo   Install uv or run 'uv sync' yourself if deps/CLI commands changed. 1>&2
     )
 )
 

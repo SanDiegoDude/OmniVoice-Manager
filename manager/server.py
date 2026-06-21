@@ -8,12 +8,13 @@ script pipeline, not just raw TTS.
 from __future__ import annotations
 
 import argparse
+import atexit
 import re
 import time
 import json
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -21,7 +22,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import history, prefs, scripts_ai, sentence_slicer, service, sessions, voices
+from . import (
+    history,
+    plugin_service,
+    prefs,
+    samples,
+    scripts_ai,
+    sentence_slicer,
+    service,
+    sessions,
+    voices,
+)
 from .audio_utils import (
     VIDEO_EXTS,
     apply_gain_db,
@@ -38,6 +49,9 @@ from .audio_utils import (
 from .config import (
     DATA_DIR,
     OUTPUT_DIR,
+    PLUGIN_LOG_DIR,
+    PLUGIN_TMP_DIR,
+    PLUGINS_DIR,
     WEB_DIST_DIR,
     active_provider,
     get_active_provider_id,
@@ -49,6 +63,7 @@ from .config import (
 )
 from .jobs import DuplicateJobError, JobManager
 from .model_manager import ModelManager, query_gpu_memory
+from .plugins import PluginHost
 from .schemas import (
     AddSpaceRequest,
     DeleteSegmentRequest,
@@ -65,7 +80,12 @@ from .schemas import (
     LoadModelRequest,
     TrackOrderRequest,
     PromoteChannelRequest,
+    PluginInvokeRequest,
+    PluginGenerateRequest,
+    PluginInstallRequest,
+    ImportTempSoundRequest,
     ProcessVoiceRequest,
+    SoundTransformRequest,
     ReflowRequest,
     RegenSegmentRequest,
     ScriptAndSpeakRequest,
@@ -85,6 +105,24 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 model_manager = ModelManager(settings)
 job_manager = JobManager()
 
+# External plug-in host. Plug-ins run isolated (own venv sidecars); GPU plug-ins
+# free the main TTS worker before running so the two never share VRAM, and are
+# torn down after each job in LOD mode — same memory discipline as the worker.
+plugin_host = PluginHost(
+    plugins_dir=PLUGINS_DIR,
+    tmp_root=PLUGIN_TMP_DIR,
+    log_root=PLUGIN_LOG_DIR,
+    host_hooks=plugin_service.build_host_hooks(),
+    is_lod=lambda: settings.load_on_demand,
+    free_host_gpu=model_manager.unload,
+)
+# Symmetric GPU serialization: the worker frees GPU plug-in sidecars before it
+# (re)acquires the GPU, just as plug-ins free the worker before a GPU job — so a
+# resident plug-in (warm SA3 sidecar) can never coexist with the TTS model and
+# OOM a clone/Whisper load.
+model_manager.before_gpu = plugin_host.free_gpu
+atexit.register(plugin_host.shutdown)
+
 app = FastAPI(title="OmniVoice Manager", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -101,13 +139,14 @@ _HIST_SKIP_SUFFIX = ("/undo", "/redo", "/jump", "/finalize", "/transcribe", "/op
 # These routes only SUBMIT a worker job; the real mutation (and its history
 # commit) happens when the job applies its result (see service.py). The
 # middleware still captures a pre-action baseline, but must NOT commit-after.
-_HIST_ASYNC_SUFFIX = ("/regenerate", "/insert", "/bulk-slice")
+_HIST_ASYNC_SUFFIX = ("/regenerate", "/regenerate-foley", "/insert", "/bulk-slice")
 
 
 def _action_label(method: str, path: str) -> str:
     """A human-readable label for the action a mutating route performs, surfaced
     as a navigable step in the Action history pillar."""
     table = [
+        ("/regenerate-foley", "Re-roll foley"),
         ("/regenerate", "Regenerate"),
         ("/insert", "Insert clip"),
         ("/merge", "Merge clips"),
@@ -129,6 +168,7 @@ def _action_label(method: str, path: str) -> str:
         ("/channel", "Channel settings"),
         ("/track-order", "Reorder tracks"),
         ("/reflow", "Reflow timeline"),
+        ("/audio-track", "Add audio track"),
         ("/upload-channel", "Add audio channel"),
         ("/upload-segment", "Add audio clip"),
         ("/import-clip", "Import clip"),
@@ -412,6 +452,7 @@ def _process_audio(
     dereverb_method: str = "roformer",
     trim_start: float = 0.0,
     trim_end: float = 0.0,
+    transforms: Optional[Dict[str, float]] = None,
     progress_cb=None,
 ) -> np.ndarray:
     audio = _manual_trim(audio, trim_start, trim_end)
@@ -429,6 +470,11 @@ def _process_audio(
         audio = normalize_rms(audio)
     if gain_db:
         audio = apply_gain_db(audio, gain_db)
+    if transforms:
+        from .voice_transforms import apply_transforms, has_effect
+
+        if has_effect(transforms):
+            audio = apply_transforms(np.asarray(audio, dtype=np.float32), 24000, transforms)
     return peak_normalize(audio, 0.98)
 
 
@@ -437,7 +483,7 @@ def preview_voice(req: ProcessVoiceRequest):
     audio = _load_process_source(req.source, req.is_upload)
     processed = _process_audio(
         audio, req.isolate, req.trim, req.normalize, req.gain_db, req.dereverb, req.dereverb_method,
-        req.trim_start, req.trim_end,
+        req.trim_start, req.trim_end, req.transforms,
     )
     name = f"_preview_{uuid.uuid4().hex}.wav"
     save_wav(TMP_DIR / name, processed)
@@ -449,7 +495,7 @@ def process_voice(req: ProcessVoiceRequest):
     audio = _load_process_source(req.source, req.is_upload)
     processed = _process_audio(
         audio, req.isolate, req.trim, req.normalize, req.gain_db, req.dereverb, req.dereverb_method,
-        req.trim_start, req.trim_end,
+        req.trim_start, req.trim_end, req.transforms,
     )
 
     # Overwrite-in-place: save back to the selected library voice. Strip the
@@ -468,6 +514,231 @@ def process_voice(req: ProcessVoiceRequest):
 
     descriptor = voices.save_voice(req.save_as, processed)
     return descriptor
+
+
+# ---------------------------------------------------------------------------
+# Sound library (foley / SFX) — the non-vocal counterpart to the voice library.
+# ---------------------------------------------------------------------------
+@app.get("/api/sounds")
+def get_sounds():
+    return {"tree": samples.sound_tree(), "flat": samples.list_sounds(), "folders": samples.list_folders()}
+
+
+@app.post("/api/sounds/folder")
+def create_sound_folder(payload: dict):
+    try:
+        return samples.create_folder(str((payload or {}).get("folder", "")))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/sounds/move")
+def move_sound(payload: dict):
+    payload = payload or {}
+    try:
+        return samples.move_sound(str(payload.get("id", "")), str(payload.get("folder", "")))
+    except FileNotFoundError:
+        raise HTTPException(404, "Sound not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/sounds/rename")
+def rename_sound(payload: dict):
+    payload = payload or {}
+    try:
+        return samples.rename_sound(str(payload.get("id", "")), str(payload.get("name", "")))
+    except FileNotFoundError:
+        raise HTTPException(404, "Sound not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/sounds/{sound_id:path}")
+def del_sound(sound_id: str):
+    try:
+        samples.delete_sound(sound_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Sound not found")
+    return {"ok": True}
+
+
+@app.post("/api/sounds/import-temp")
+def import_temp_sound(req: ImportTempSoundRequest):
+    """Save a generated temp preview into the sound library (deferred save — the
+    Sound Lab generates with save=false, then keeps the take here once chosen)."""
+    name = req.temp.strip()
+    if not name or "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(400, "Bad temp reference")
+    src = TMP_DIR / name
+    if not src.exists():
+        raise HTTPException(404, "That preview has expired — regenerate it.")
+    rel = req.path.strip()
+    if not rel:
+        raise HTTPException(400, "A save path is required")
+    try:
+        return samples.import_file(src, rel)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/sounds/transform")
+def transform_sound(req: SoundTransformRequest):
+    """Sample editor (sound side): bake vocal/audio transforms onto an existing
+    library sound, then save a copy or overwrite it in place. Transforms run via
+    the shared 24k-mono engine, so the edited sample is a 24k-mono WAV (fine for
+    SFX/foley; the original verbatim file is untouched unless overwriting)."""
+    from .voice_transforms import apply_transforms, has_effect
+
+    try:
+        samples.resolve_sound_path(req.id)  # validates + 404s on a bad/missing id
+        audio = samples.load_sound_audio(req.id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Sound not found")
+    audio = np.asarray(audio, dtype=np.float32)
+    if has_effect(req.transforms):
+        audio = apply_transforms(audio, 24000, req.transforms)
+    audio = peak_normalize(audio, 0.98)
+
+    if req.overwrite:
+        # Replace in place; transformed audio is always WAV, so drop the original
+        # if it was a different container to avoid leaving a stale duplicate.
+        rel = req.id
+        stem = rel[: -len(Path(rel).suffix)] if Path(rel).suffix else rel
+        desc = samples.save_sound(stem, audio, 24000, overwrite=True)
+        if not rel.lower().endswith(".wav") and str(desc["id"]) != rel:
+            try:
+                samples.delete_sound(rel)
+            except Exception:  # noqa: BLE001
+                pass
+        return desc
+
+    target = (req.save_as or "").strip()
+    if not target:
+        raise HTTPException(400, "A save name is required")
+    return samples.save_sound(target, audio, 24000)
+
+
+@app.post("/api/sounds/upload")
+async def upload_sound(file: UploadFile = File(...), folder: str = Form("")):
+    """Import an external audio file straight into the sound library (verbatim,
+    preserving sample rate / channels — SFX aren't downmixed to 24k mono)."""
+    suffix = Path(file.filename or "sound.wav").suffix or ".wav"
+    stem = Path(file.filename or "sound").stem or "sound"
+    tmp = TMP_DIR / f"{uuid.uuid4().hex}{suffix}"
+    tmp.write_bytes(await file.read())
+    rel = f"{folder.strip('/')}/{stem}" if folder.strip("/") else stem
+    try:
+        desc = samples.import_file(tmp, rel)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return desc
+
+
+# ---------------------------------------------------------------------------
+# Plug-ins (external, isolated) — discovery, lifecycle, invocation.
+# ---------------------------------------------------------------------------
+@app.get("/api/plugins")
+def list_plugins():
+    plugin_host.discover()
+    return {"plugins": plugin_host.list()}
+
+
+@app.get("/api/plugins/{plugin_id}")
+def plugin_info(plugin_id: str):
+    try:
+        return plugin_host.info(plugin_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(404, str(e))
+
+
+@app.get("/api/plugins/{plugin_id}/help")
+def plugin_help(plugin_id: str):
+    """Serve a plug-in's bundled troubleshooting page (e.g. gated-model help).
+    The manifest may name the file via `needs.help` (default `HELP.html`); the
+    file lives inside the plug-in dir so plug-in authors own their own docs."""
+    try:
+        m = plugin_host.get(plugin_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(404, str(e))
+    name = str((m.needs or {}).get("help") or "HELP.html")
+    # keep it inside the plug-in dir — no traversal
+    path = (m.root / name).resolve()
+    if m.root not in path.parents or not path.is_file():
+        raise HTTPException(404, "No help page for this plug-in.")
+    media = "text/html" if path.suffix.lower() in (".html", ".htm") else "text/markdown"
+    return FileResponse(str(path), media_type=media)
+
+
+@app.post("/api/plugins/install")
+def plugin_install(req: PluginInstallRequest):
+    """Install a plug-in from a git URL into plugins/ (clone + optional bootstrap),
+    then re-discover. Returns a job id — poll /api/jobs/{id} for clone/build
+    progress; bootstrap can take minutes (it builds an isolated venv)."""
+    from .plugins import InstallError, install_from_git
+
+    def job(progress_cb):
+        try:
+            res = install_from_git(
+                req.git_url, PLUGINS_DIR,
+                name=req.name, bootstrap=req.bootstrap, force=req.force,
+                progress=progress_cb,
+            )
+        except InstallError as e:
+            raise RuntimeError(str(e))
+        plugin_host.discover()  # surface it immediately
+        return res
+
+    job_id = job_manager.submit(job, meta={"kind": "plugin-install"})
+    return {"job_id": job_id}
+
+
+@app.post("/api/plugins/{plugin_id}/unload")
+def plugin_unload(plugin_id: str):
+    plugin_host.unload(plugin_id)
+    return {"ok": True}
+
+
+@app.post("/api/plugins/{plugin_id}/health")
+def plugin_health(plugin_id: str):
+    try:
+        return plugin_host.invoke(plugin_id, "health", {})
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/plugins/{plugin_id}/generate")
+def plugin_generate(plugin_id: str, req: PluginGenerateRequest):
+    """Generic audio-generator job for any plug-in declaring a `generate` capability
+    and a UI `lab` schema. `fields` is the schema-driven payload → returns {job_id}."""
+    job = plugin_service.make_generate_job(
+        plugin_host, plugin_id, req.fields,
+        reprompt=req.reprompt, provider_id=req.provider_id,
+        save=req.save, save_path=req.save_path, session_id=req.session_id,
+    )
+    try:
+        job_id = job_manager.submit(
+            job, meta={"kind": "plugin", "plugin": plugin_id},
+            dedup_group=f"plugin-generate-{plugin_id}", cooldown_s=1.0,
+        )
+    except DuplicateJobError:
+        raise HTTPException(409, "A generation was just submitted.")
+    return {"job_id": job_id}
+
+
+@app.post("/api/plugins/{plugin_id}/invoke")
+def plugin_invoke(plugin_id: str, req: PluginInvokeRequest):
+    """Generic plug-in command as a background job (advanced / custom plug-ins)."""
+    def job(progress_cb):
+        return plugin_host.invoke(plugin_id, req.cmd, req.payload, progress_cb=progress_cb)
+
+    job_id = job_manager.submit(job, meta={"kind": "plugin", "plugin": plugin_id, "cmd": req.cmd})
+    return {"job_id": job_id}
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +953,15 @@ def multitrack_history_jump(sid: str, payload: dict | None = None):
 def multitrack_add_speaker(sid: str, cfg: SpeakerConfig):
     try:
         return sessions.add_speaker(sid, cfg.model_dump())
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/audio-track")
+def multitrack_add_audio_track(sid: str):
+    """Append a new empty audio (soundtrack/SFX) track for foley/uploads."""
+    try:
+        return sessions.add_audio_track(sid)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
 
@@ -1242,9 +1522,39 @@ def multitrack_edit(sid: str, index: int, req: EditSegmentRequest):
             start_s=req.start_s, trim_start_s=req.trim_start_s,
             trim_end_s=req.trim_end_s, speed=req.speed, gain_db=req.gain_db,
             fade_in_s=req.fade_in_s, fade_out_s=req.fade_out_s,
+            text=req.text, kind=req.kind, meta=req.meta,
         )
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
+
+
+@app.post("/api/multitrack/{sid}/segment/{index}/regenerate-foley")
+def multitrack_regen_foley(sid: str, index: int):
+    """Re-roll a foley clip in place via the generator plug-in that made it,
+    using the segment's current dialogue (prompt) and on-timeline length ("current
+    time"). The clip must have been placed by a plug-in (kind="foley" + meta.plugin)."""
+    try:
+        spec = sessions.get_segment_meta(sid, index)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    meta = spec.get("meta") or {}
+    plugin_id = meta.get("plugin")
+    if spec.get("kind") != "foley" or not plugin_id:
+        raise HTTPException(400, "This clip wasn't generated by a plug-in — nothing to re-roll.")
+    fields: Dict[str, Any] = dict(meta.get("fields") or {})
+    fields["prompt"] = (spec.get("text") or meta.get("prompt") or fields.get("prompt") or "").strip()
+    if meta.get("category"):
+        fields["category"] = meta["category"]
+    # "current time" — the clip's present on-timeline length drives the new take.
+    cur = round(float(spec.get("duration_s") or 0.0), 2)
+    if cur > 0:
+        fields["duration"] = cur
+    job = plugin_service.make_foley_regen_job(
+        plugin_host, sid, index, plugin_id, fields,
+        reprompt=bool(meta.get("reprompt")), provider_id=meta.get("provider_id"),
+    )
+    job_id = job_manager.submit(job, meta={"multitrack": True, "regen": index})
+    return {"job_id": job_id}
 
 
 @app.post("/api/multitrack/{sid}/segment/{index}/move")
@@ -1700,6 +2010,15 @@ def audio_voice(voice_id: str):
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "Not found")
     return FileResponse(path)
+
+
+@app.get("/api/audio/sound/{sound_id:path}")
+def audio_sound(sound_id: str):
+    try:
+        path = samples.resolve_sound_path(sound_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "Not found")
+    return FileResponse(path, media_type=media_type_for(path))
 
 
 # ---------------------------------------------------------------------------

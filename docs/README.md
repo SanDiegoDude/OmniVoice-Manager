@@ -7,7 +7,9 @@ Feature guides for the OmniVoice Manager studio. Start with the [main README](..
 | [ADR Studio](adr-studio.md) | The multitrack timeline editor — tracks, clips, regeneration and ripple rules, Pin Current Voice to Segment, manual slice, per-segment vocal transforms, Record Dialog, merge/collapse/mute, editing tools, transport and shortcuts |
 | [Performance Transfer](performance-transfer.md) | Voice-to-voice (V2V): act a line yourself and paint a cloned voice over your performance. Character vs. Voice modes, strength, Redub chains, A/B inspection and exports |
 | [Voice Clone](voice-clone.md) | The single-voice tab — high-quality one-shot clones from text or a guided performance, the Voice Lab, reference cleanup, and the AI scriptwriter |
-| [HTTP API](api.md) | The JSON API for automation (ComfyUI, scripts, CI) — system/provider routes, scripts & synthesis, voices, the multitrack timeline, and a one-shot script-and-speak call |
+| [Sound library](sound-library.md) | The foley / SFX sample library — browse, organize, import, and drop non-vocal audio onto timeline channels (where Stable Audio 3 generations land) |
+| [External plug-ins](plugins.md) | Author your own isolated, sidecar plug-ins — the manifest, the SDK, host hooks (reprompt / save-sound / project-data), memory management, and the Stable Audio 3 reference plug-in |
+| [HTTP API](api.md) | The JSON API for automation (ComfyUI, scripts, CI) — system/provider routes, scripts & synthesis, voices, sounds, plug-ins, the multitrack timeline, and a one-shot script-and-speak call |
 
 ## The 60-second tour
 

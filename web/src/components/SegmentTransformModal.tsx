@@ -11,6 +11,12 @@ const transformActive = (t: VocalTransform) =>
   t.drive > 0.01 ||
   t.ringmod > 0.01 ||
   t.vibrato > 0.01 ||
+  (t.tremolo ?? 0) > 0.01 ||
+  (t.gate ?? 0) > 0.01 ||
+  (t.chorus ?? 0) > 0.01 ||
+  (t.muffle ?? 0) > 0.01 ||
+  (t.echo ?? 0) > 0.01 ||
+  (t.reverb ?? 0) > 0.01 ||
   (t.telephone ?? 0) > 0.01
 
 /** Dedicated per-segment vocal-transforms plug-in. Reuses the shared transform
@@ -105,7 +111,7 @@ export default function SegmentTransformModal({
       open={open}
       title={
         <span>
-          🎚 Vocal transforms — <span style={{ opacity: 0.8 }}>segment {seg.index + 1}</span>
+          🎚 Vocal &amp; audio transforms — <span style={{ opacity: 0.8 }}>segment {seg.index + 1}</span>
         </span>
       }
       width={620}
@@ -113,12 +119,13 @@ export default function SegmentTransformModal({
       onSpace={() => playerRef.current?.toggle()}
     >
       <div className="hint" style={{ opacity: 0.85, marginBottom: 8 }}>
-        Reshape this clip's own audio — pitch/formant move the register, the colours add character, and{' '}
-        <strong>☎️ Telephone</strong> crushes it down to a bad-phone / voicemail sound. Preview, then bake it onto the
-        segment (reversible, single-step undo).
+        Reshape this clip's own audio (voice <em>or</em> foley) — pitch/formant move the register, the colours add
+        character, <strong>🧱 Echo</strong>/<strong>🕳 Reverb</strong> place it in a space (alley bounce, big hall), and{' '}
+        <strong>☎️ Telephone</strong> crushes it to a bad-phone sound. Preview, then bake it onto the segment
+        (reversible, single-step undo).
       </div>
 
-      <VocalTransforms value={tf} onChange={setTf} target="take" defaultOpen />
+      <VocalTransforms value={tf} onChange={setTf} target="take" defaultOpen title="🎚 Vocal & audio transforms" />
 
       <div style={{ marginTop: 12 }}>
         <div className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 6 }}>

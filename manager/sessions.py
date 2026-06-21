@@ -475,6 +475,12 @@ def public(session: Dict[str, Any]) -> Dict[str, Any]:
                 "preserve_nonvocal": bool(s.get("preserve_nonvocal", False)),
                 # Baked-in per-segment vocal transforms (None = clip is original).
                 "fx": s.get("transforms") or None,
+                # Audio provenance: what this clip *is* and arbitrary first-party /
+                # plug-in metadata. `kind` drives the timeline colour + which menu
+                # actions show (e.g. foley clips can be re-rolled by their plug-in);
+                # `meta` is an open bag — plug-ins namespace their own data under it.
+                "kind": s.get("kind") or None,
+                "meta": s.get("meta") or None,
                 "perform": (
                     {
                         "mode": s["perform"].get("mode", "character"),
@@ -998,6 +1004,21 @@ def set_segment(sid: str, index: int, **fields: Any) -> Dict[str, Any]:
             seg["fade_in_s"] = round(float(np.clip(float(fields["fade_in_s"]), 0.0, 30.0)), 3)
         if fields.get("fade_out_s") is not None:
             seg["fade_out_s"] = round(float(np.clip(float(fields["fade_out_s"]), 0.0, 30.0)), 3)
+        # Provenance / dialogue / open metadata (no model run). `text` is set
+        # plainly here (used when a placed clip carries its source prompt as the
+        # segment's dialogue). `meta` merges so a plug-in can patch its own keys
+        # without clobbering others; pass an explicit null value to drop a key.
+        if fields.get("text") is not None:
+            seg["text"] = str(fields["text"])
+        if fields.get("kind") is not None:
+            seg["kind"] = (str(fields["kind"]) or None)
+        if fields.get("meta") is not None:
+            meta = fields["meta"]
+            if isinstance(meta, dict):
+                cur = seg.get("meta")
+                seg["meta"] = {**cur, **meta} if isinstance(cur, dict) else dict(meta)
+            else:
+                seg["meta"] = meta
         _stitch(session)
         _write(session)
         return public(session)
@@ -1167,6 +1188,31 @@ def add_speaker(sid: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         return public(session)
 
 
+def add_audio_track(sid: str, name: Optional[str] = None) -> Dict[str, Any]:
+    """Append a new EMPTY audio (soundtrack / SFX) track — a blank lane with no
+    clips, ready to receive uploads or generated foley via the timeline
+    double-click menu. Audio channels use their own "a#" id namespace so they
+    never disturb the generative speakers' contiguous 1..N roster."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        aids = [int(k[1:]) for k in session.get("speakers", {}) if str(k).startswith("a") and k[1:].isdigit()]
+        pos = "a" + str((max(aids) + 1) if aids else 1)
+        label = (name or "Audio").strip() or "Audio"
+        session.setdefault("speakers", {})[pos] = {
+            "mode": "audio",
+            "kind": "audio",
+            "name": label,
+            "custom_name": label,
+            "gain_db": 0.0,
+        }
+        if session.get("track_order"):
+            session["track_order"].append(pos)
+        _write(session)
+        return public(session)
+
+
 def update_speaker(sid: str, pos: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Update a speaker's config. If the voice changed, drop its cleaned ref so
     the next take cold-builds from the new sample."""
@@ -1328,6 +1374,66 @@ def add_audio_segment(
                 "start_s": round(start, 3),
             }
         )
+        _stitch(session)
+        _write(session)
+        return public(session)
+
+
+def get_segment_meta(sid: str, index: int) -> Dict[str, Any]:
+    """Read a segment's dialogue + provenance for re-running a generator plug-in.
+    Returns the editable `text`, the current on-timeline `duration_s` ("current
+    time" for a re-roll), the raw length, and the `kind`/`meta` bag."""
+    session = _read(sid)
+    if not session:
+        raise FileNotFoundError("Session not found")
+    seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
+    if seg is None:
+        raise FileNotFoundError(f"Segment {index} not found")
+    return {
+        "index": int(seg["index"]),
+        "text": seg.get("text") or "",
+        "duration_s": float(seg.get("duration_s", _eff_duration(seg)) or 0.0),
+        "raw_duration_s": float(seg.get("raw_duration_s", 0.0) or 0.0),
+        "kind": seg.get("kind") or None,
+        "meta": seg.get("meta") or None,
+    }
+
+
+def replace_segment_audio(
+    sid: str,
+    index: int,
+    audio_path: str,
+    *,
+    keep_trim: bool = False,
+    meta_patch: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Swap a segment's audio in place (same file slot) — used when a generator
+    plug-in re-rolls a foley clip. Resets the trim window to the fresh take by
+    default (a re-roll is a new sound), keeps start/gain/speed/kind, and patches
+    the provenance `meta`. Overwriting the file bumps its mtime so the clip's
+    cache-busted URL refreshes."""
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        seg = next((s for s in session["segments"] if int(s["index"]) == int(index)), None)
+        if seg is None:
+            raise FileNotFoundError(f"Segment {index} not found")
+        sr = int(session["sample_rate"])
+        wav = load_audio(Path(audio_path), sr=sr).astype(np.float32)
+        save_wav(_dir(sid) / seg["file"], wav, sr)
+        dur = duration_seconds(wav, sr)
+        seg["raw_duration_s"] = round(dur, 3)
+        if keep_trim:
+            seg["trim_start_s"] = min(float(seg.get("trim_start_s", 0.0) or 0.0), dur)
+            te = seg.get("trim_end_s")
+            seg["trim_end_s"] = round(min(float(te) if te else dur, dur), 3)
+        else:
+            seg["trim_start_s"] = 0.0
+            seg["trim_end_s"] = round(dur, 3)
+        if meta_patch:
+            cur = seg.get("meta")
+            seg["meta"] = {**cur, **meta_patch} if isinstance(cur, dict) else dict(meta_patch)
         _stitch(session)
         _write(session)
         return public(session)
@@ -2605,6 +2711,16 @@ def import_voices(sid: str, imports: List[Dict[str, Any]]) -> Dict[str, Any]:
             cfg.pop("voice_missing", None)
         _write(session)
         return public(session)
+
+
+def get_plugin_data(sid: str, plugin: str) -> Any:
+    """Read a single plug-in's persisted data off a project (or None)."""
+    plugin = str(plugin or "").strip()
+    with _lock:
+        session = _read(sid)
+        if not session:
+            raise FileNotFoundError("Session not found")
+        return (session.get("plugin_data") or {}).get(plugin)
 
 
 def set_plugin_data(sid: str, plugin: str, data: Any, merge: bool = True) -> Dict[str, Any]:

@@ -8,6 +8,7 @@ import PerformanceModal from './PerformanceModal'
 import SegmentTransformModal from './SegmentTransformModal'
 import ToolModal from './ToolModal'
 import { SpeakerCard } from './SpeakerCard'
+import { useContributions } from '../pluginRegistry'
 
 const newSpeakerCfg = (): SpeakerConfig => ({
   mode: 'clone',
@@ -79,6 +80,7 @@ type TrimDraft = { trimStart: number; trimEnd: number; speed: number; gain: numb
 export function MultitrackEditor({
   session,
   onRegen,
+  onRegenFoley,
   onEditSegment,
   onReflow,
   onInsertSegment,
@@ -93,6 +95,7 @@ export function MultitrackEditor({
   onRegenChannel,
   onUploadChannel,
   onUploadAudioSegment,
+  onPluginGenerate,
   onAutoSlice,
   onBulkSlice,
   onSetInpaint,
@@ -100,6 +103,7 @@ export function MultitrackEditor({
   onPromoteChannel,
   onRemoveTrack,
   onAddSpeaker,
+  onAddAudioTrack,
   voices,
   onMergeSegments,
   onCollapseTrack,
@@ -127,6 +131,7 @@ export function MultitrackEditor({
   session: MultitrackSession
   playCue: { nonce: number; index?: number; channel?: string; at?: number } | null
   onRegen: (index: number, text?: string) => void
+  onRegenFoley: (index: number) => void
   onEditSegment: (index: number, fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number; gain_db?: number; fade_in_s?: number; fade_out_s?: number }) => void
   onReflow: (fields: { gap_ms?: number; speed?: number }) => void
   onInsertSegment: (speakerId: string, text: string, startS: number, ripple: boolean) => void
@@ -141,6 +146,7 @@ export function MultitrackEditor({
   onRegenChannel: (pos: string) => void
   onUploadChannel: (file: File, name: string, startS?: number) => void | Promise<void>
   onUploadAudioSegment: (pos: string, file: File, startS: number, ripple: boolean) => void | Promise<void>
+  onPluginGenerate: (pluginId: string, track: { pos: string; startS: number; ripple: boolean }) => void
   onAutoSlice: (index: number) => Promise<void>
   onBulkSlice: () => Promise<void>
   onSetInpaint: (index: number, enabled: boolean) => Promise<void>
@@ -148,6 +154,7 @@ export function MultitrackEditor({
   onPromoteChannel: (pos: string, name: string) => Promise<MultitrackSession | null>
   onRemoveTrack: (pos: string) => Promise<void>
   onAddSpeaker: (cfg: SpeakerConfig) => void
+  onAddAudioTrack: () => void
   voices: Voice[]
   onMergeSegments: (indices: number[]) => Promise<void>
   onCollapseTrack: (pos: string) => Promise<void>
@@ -196,6 +203,9 @@ export function MultitrackEditor({
   const [playingSeg, setPlayingSeg] = useState<number | null>(null)
   const [head, setHead] = useState({ cur: 0, playing: false })
   const [follow, setFollow] = useState(true)
+  // Plug-in-contributed actions for the empty-track double-click menu (e.g.
+  // "Generate Foley…"). Sourced from the registry — core never names a plug-in.
+  const trackMenuActions = useContributions('track.menu.empty')
   const [edits, setEdits] = useState<Record<number, string>>({})
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
   const [editText, setEditText] = useState('')
@@ -1133,6 +1143,16 @@ export function MultitrackEditor({
           {trackDrag && (
             <div className="mtk-track-drop" style={{ top: RULER_H + trackDrag.slot * rowH - 1 }} />
           )}
+          <button
+            type="button"
+            className="mtk-add-track mtk-add-audio"
+            style={{ height: RULER_H }}
+            disabled={!!busy}
+            onClick={() => onAddAudioTrack()}
+            title="Add an empty audio track at the bottom — drop foley/uploads onto it via the timeline double-click menu"
+          >
+            + Audio track
+          </button>
         </div>
 
         <div className="mtk-scroll" ref={scrollRef} onWheel={onWheelZoom}>
@@ -1219,11 +1239,20 @@ export function MultitrackEditor({
                     const isTrimming = trimIndex === seg.index
                     const text = edits[seg.index] ?? seg.text
                     const dirty = edits[seg.index] !== undefined && edits[seg.index] !== seg.text
+                    // Provenance: foley (plug-in generated, re-rollable) vs a plain
+                    // uploaded clip. Colour them apart from voiced/perform clips so
+                    // the timeline reads at a glance (gold is taken by performances).
+                    const isFoley = seg.kind === 'foley' && !!seg.meta?.plugin
+                    const isUpload = laneAudio && !isFoley
+                    const segBg = isFoley ? 'hsl(184 48% 22%)' : isUpload ? 'hsl(214 16% 27%)' : `hsl(${hue} 45% 22%)`
+                    const segBorder = dirty
+                      ? 'var(--warn)'
+                      : isFoley ? 'hsl(184 66% 46%)' : isUpload ? 'hsl(214 22% 50%)' : `hsl(${hue} 60% 45%)`
                     return (
                       <div
                         key={seg.index}
-                        className={`mtk-seg${isRegen ? ' regen' : ''}${dirty ? ' dirty' : ''}${isTrimming ? ' trimming' : ''}${seg.inpaint ? ' inpaint' : ''}${seg.perform ? ' perform' : ''}${seg.perform?.dirty ? ' perform-dirty' : ''}${selSegs.has(seg.index) ? ' selected' : ''}${drag && drag.index === seg.index ? ' dragging' : ''}${lifting ? ' lifting' : ''}${sliceArmed === seg.index ? ' slice-armed' : ''}`}
-                        style={{ left, width, background: `hsl(${hue} 45% 22%)`, borderColor: dirty ? 'var(--warn)' : `hsl(${hue} 60% 45%)` }}
+                        className={`mtk-seg${isRegen ? ' regen' : ''}${dirty ? ' dirty' : ''}${isTrimming ? ' trimming' : ''}${seg.inpaint ? ' inpaint' : ''}${isFoley ? ' foley' : ''}${isUpload ? ' uploaded' : ''}${seg.perform ? ' perform' : ''}${seg.perform?.dirty ? ' perform-dirty' : ''}${selSegs.has(seg.index) ? ' selected' : ''}${drag && drag.index === seg.index ? ' dragging' : ''}${lifting ? ' lifting' : ''}${sliceArmed === seg.index ? ' slice-armed' : ''}`}
+                        style={{ left, width, background: segBg, borderColor: segBorder }}
                         title={sliceArmed === seg.index ? 'Press on the clip and release to slice here (Esc to cancel)' : `${text}\n(drag to move · pull up/down to another track · alt+drag to copy · ctrl+click to slice)`}
                         onMouseDown={(e) => {
                           // Ctrl/Cmd+click = jump straight into a manual slice gesture
@@ -1265,7 +1294,12 @@ export function MultitrackEditor({
                               {isPlaying ? '■' : '▶'}
                             </button>
                           )}
-                          {tier >= 2 && (
+                          {tier >= 2 && isFoley && (
+                            <button className="mtk-ic" onClick={() => onRegenFoley(seg.index)} disabled={busy} title="Re-roll foley — a fresh take at this clip's current prompt & length">
+                              {isRegen ? <span className="spinner sm" /> : '↻'}
+                            </button>
+                          )}
+                          {tier >= 2 && !laneAudio && (
                             <button className={`mtk-ic${dirty ? ' warn' : ''}`} onClick={() => onRegen(seg.index, dirty ? edits[seg.index].trim() : undefined)} disabled={busy} title={dirty ? 'Regenerate with edited line' : 'Regenerate'}>
                               {isRegen ? <span className="spinner sm" /> : '↻'}
                             </button>
@@ -1678,6 +1712,20 @@ export function MultitrackEditor({
                     >
                       ⇥🎵 Upload Audio (ripple — push later lines)
                     </button>
+                    {trackMenuActions.map((c) => (
+                      <button
+                        key={`${c.plugin.id}:${c.label}`}
+                        className="btn sm"
+                        title={`${c.plugin.name}: ${c.plugin.description}`}
+                        onClick={() => {
+                          const track = { pos: insert.speakerId, startS: insert.start_s, ripple: false }
+                          setInsert(null)
+                          onPluginGenerate(c.plugin.id, track)
+                        }}
+                      >
+                        {c.icon ? `${c.icon} ` : ''}{c.label}
+                      </button>
+                    ))}
                   </>
                 )}
                 <button
@@ -1715,12 +1763,23 @@ export function MultitrackEditor({
         const canSplit = head.cur > seg.start_s + 0.05 && head.cur < seg.start_s + seg.duration_s - 0.05
         const track = session.tracks.find((t) => t.speaker_id === seg.speaker_id)
         const isAudioChan = track?.kind === 'audio'
+        const isFoleySeg = seg.kind === 'foley' && !!seg.meta?.plugin
         return (
           <>
             <div className="mtk-backdrop" onClick={() => setSegMenu(null)} />
             <div ref={segMenuRef} className="mtk-menu" style={{ left: segMenu.x, top: segMenu.y }}>
-              <div className="mtk-menu-title">{(isAudioChan ? '🎵 ' : '') + (seg.text.slice(0, 32) || `Segment #${seg.index}`)}</div>
+              <div className="mtk-menu-title">{(isFoleySeg ? '🎛 ' : isAudioChan ? '🎵 ' : '') + (seg.text.slice(0, 32) || `Segment #${seg.index}`)}</div>
               <button className="btn sm" onClick={() => { playSeg(seg); setSegMenu(null) }}>{isPlaying ? '■ Stop' : '▶ Play'}</button>
+              {isFoleySeg && (
+                <button
+                  className="btn sm"
+                  disabled={busy}
+                  title="Re-roll this foley clip — a fresh take from the same plug-in at the clip's current prompt (dialogue) and length"
+                  onClick={() => { onRegenFoley(seg.index); setSegMenu(null) }}
+                >
+                  ↻ Re-roll foley
+                </button>
+              )}
               {!isAudioChan && (
                 <button
                   className={`btn sm${seg.perform?.dirty ? ' perf-glow' : ''}`}
@@ -1806,13 +1865,43 @@ export function MultitrackEditor({
               >
                 ⧉ Duplicate…
               </button>
+              {(() => {
+                // Context-aware merge: only when 2+ clips are shift-selected on
+                // THIS clip's track (single-track merge — no cross-track yet).
+                // The clicked clip is folded into the set so right-clicking any
+                // clip in the selection offers the merge.
+                const mergeIndices =
+                  canMerge && selValid[0]?.speaker_id === seg.speaker_id
+                    ? Array.from(new Set([...selValid.map((s) => s.index), seg.index]))
+                    : []
+                if (mergeIndices.length < 2) return null
+                return (
+                  <button
+                    className="btn sm"
+                    disabled={busy || merging}
+                    title="Merge the selected clips on this track into one continuous clip (gaps become silence). Works on audio / foley channels too."
+                    onClick={async () => {
+                      setSegMenu(null)
+                      setMerging(true)
+                      try {
+                        await onMergeSegments(mergeIndices)
+                        setSelSegs(new Set())
+                      } finally {
+                        setMerging(false)
+                      }
+                    }}
+                  >
+                    {merging ? '… ' : '🔗 '}Merge {mergeIndices.length} selected
+                  </button>
+                )
+              })()}
               <div className="mtk-menu-sep" />
               <button
                 className={`btn sm${seg.fx ? ' on' : ''}`}
-                title="Vocal transforms plug-in: reshape this clip — pitch, formant, growl, robot, and a 'bad telephone call' lo-fi — baked onto the clip (reversible)"
+                title="Vocal & audio transforms: reshape this clip (voice or foley) — pitch, formant, growl, robot, echo, reverb, and a 'bad telephone call' lo-fi — baked onto the clip (reversible)"
                 onClick={() => { setFxModal(seg.index); setSegMenu(null) }}
               >
-                🎚 Vocal transforms…{seg.fx ? ' (applied)' : ''}
+                🎚 Vocal &amp; audio transforms…{seg.fx ? ' (applied)' : ''}
               </button>
               <button
                 className="btn sm"

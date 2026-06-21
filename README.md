@@ -10,7 +10,7 @@ https://github.com/user-attachments/assets/69f211b9-c8ae-49dd-a050-cddcd7ee8bdf
 
 OmniVoice generates a single utterance per call. The Manager wraps it with everything needed to turn that primitive into finished audio: a full **multitrack timeline editor (ADR Studio)**, **vocal performance transfer** (act a line yourself, hear it in a cloned voice — timing, emphasis, and emotion preserved), multi-speaker dialogue stitching, reference-audio cleanup, perceptual loudness matching, an AI scriptwriter, a rich audio editor, and a clean API for automation.
 
-**📚 Full feature documentation lives in [`docs/`](docs/README.md):** [ADR Studio](docs/adr-studio.md) · [Performance Transfer](docs/performance-transfer.md) · [Voice Clone](docs/voice-clone.md) · [HTTP API](docs/api.md)
+**📚 Full feature documentation lives in [`docs/`](docs/README.md):** [ADR Studio](docs/adr-studio.md) · [Performance Transfer](docs/performance-transfer.md) · [Voice Clone](docs/voice-clone.md) · [Sound library](docs/sound-library.md) · [External plug-ins](docs/plugins.md) · [HTTP API](docs/api.md)
 
 ---
 
@@ -84,6 +84,12 @@ Optional, persistent silence trimming shaves dead air (and near-silent hiss/arti
 
 ### Projects that fully restore
 The right-hand column splits into **Projects · Outputs · Action history**. Every scene is an auto-saved, **re-openable project**: a browser crash or stray reload never costs you work — click it and the whole timeline (clips, edits, voices, performances) is restored, ready to keep editing. Share or archive a project as a single `.omvp` bundle, or export **per-track, t=0-aligned FLAC stems** for any DAW. **Outputs** are the finished, non-project files; **History** is the project's labeled, navigable **multi-step undo/redo** chain (content-addressed, so it survives reloads without bloating disk). Smart-script drafts still restore their prompt/script/speakers into the Studio with one click.
+
+### Foley / SFX sound library
+A browseable, folder-tree **sound library** for non-vocal audio — footsteps, doors, ambience, stingers, music beds — that sits beside the voice library and drops straight onto timeline audio channels. Sounds are content-addressed (no duplicate imports) and preserved verbatim (native sample rate / channels — SFX aren't downmixed). → [Full guide](docs/sound-library.md)
+
+### Generative foley via external plug-ins
+OmniVoice runs third-party generators as **isolated sidecar plug-ins** — each in its own virtualenv with an independent dependency set — so a plug-in can never destabilize the core (the lesson from ComfyUI custom nodes). Plug-ins get robust hooks: reuse the host's Script-AI for prompt rewriting, save into the sound library, and persist state onto projects (it travels in the `.omvp` bundle). The host serializes the GPU (frees the TTS model first) and honors Low-VRAM, keeping plug-ins accessible on home GPUs. The first plug-in is **[Stable Audio 3](docs/plugins.md#reference-plug-in-stable-audio-3)** for text-to-audio foley, SFX, music and one-shots. → [Author your own](docs/plugins.md)
 
 ### API-first
 Every UI capability is also an HTTP endpoint, including the Smart Script system — so you can drive generation from your own tools (e.g. a ComfyUI connector) and not just basic synthesis.

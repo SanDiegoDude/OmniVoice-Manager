@@ -135,6 +135,12 @@ class ModelManager:
         # Actual device/dtype the worker resolved (e.g. "auto" -> "mps").
         self._resolved_device: Optional[str] = None
         self._resolved_dtype: Optional[str] = None
+        # Called before the worker (re)acquires the GPU to release VRAM held by
+        # GPU plug-in sidecars (set by the server to plugin_host.free_gpu). The
+        # mirror of the plug-in host's free_host_gpu, so the TTS model and a
+        # plug-in never fight over VRAM. Invoked OUTSIDE _lock to avoid an
+        # A-B/B-A deadlock with the plug-in host's lock.
+        self.before_gpu: Optional[Callable[[], None]] = None
         # Ensure the worker is torn down on graceful interpreter exit.
         atexit.register(self.shutdown_worker)
 
@@ -186,6 +192,15 @@ class ModelManager:
         self._started_at = None
 
     def _request(self, cmd: str, payload: Dict[str, Any], progress_cb: ProgressCb = None, kill_after: bool = False) -> Dict[str, Any]:
+        # Free any GPU plug-in sidecar BEFORE we touch the worker/GPU. Done
+        # outside _lock so it can take the plug-in host's lock without risking a
+        # cross-lock deadlock (plug-in jobs take plugin-lock→model-lock; here we
+        # only ever take plugin-lock then release before model-lock).
+        if self.before_gpu is not None:
+            try:
+                self.before_gpu()
+            except Exception:  # noqa: BLE001
+                pass
         with self._lock:
             self._ensure_started()
             rid = uuid.uuid4().hex

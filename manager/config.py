@@ -16,15 +16,34 @@ ENV_PATH = REPO_ROOT / ".env"
 load_dotenv(ENV_PATH)
 
 CUSTOM_VOICES_DIR = REPO_ROOT / "custom_voices"
+# Foley / SFX sample library (the non-vocal counterpart to custom_voices/):
+# browseable, folder-tree, content-addressed audio dropped onto audio channels.
+CUSTOM_SOUNDS_DIR = REPO_ROOT / "custom_sounds"
 OUTPUT_DIR = REPO_ROOT / "output"
 DATA_DIR = REPO_ROOT / "data"
 HISTORY_DIR = DATA_DIR / "history"
 MODELS_DIR = REPO_ROOT / "models"
 WEB_DIST_DIR = REPO_ROOT / "web" / "dist"
 
+# External plug-ins (each isolated in its own venv) + their runtime scratch/logs.
+PLUGINS_DIR = REPO_ROOT / "plugins"
+PLUGIN_DATA_DIR = DATA_DIR / "plugins"
+PLUGIN_TMP_DIR = PLUGIN_DATA_DIR / "tmp"
+PLUGIN_LOG_DIR = PLUGIN_DATA_DIR / "logs"
+
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"}
 
-for _d in (CUSTOM_VOICES_DIR, OUTPUT_DIR, DATA_DIR, HISTORY_DIR, MODELS_DIR):
+for _d in (
+    CUSTOM_VOICES_DIR,
+    CUSTOM_SOUNDS_DIR,
+    OUTPUT_DIR,
+    DATA_DIR,
+    HISTORY_DIR,
+    MODELS_DIR,
+    PLUGIN_DATA_DIR,
+    PLUGIN_TMP_DIR,
+    PLUGIN_LOG_DIR,
+):
     _d.mkdir(parents=True, exist_ok=True)
 
 
@@ -104,7 +123,37 @@ def list_available_models() -> List[str]:
 #   AI_PROVIDER_<ID> = Label | model | base_url (blank = OpenAI) | api_key
 # Legacy single-provider vars (OPENAI_* / SCRIPT_AI_*) are also recognized.
 
+# Small persisted UI/runtime settings (survive server restarts) — e.g. which
+# Script-AI provider the user last picked, so it doesn't snap back to the first
+# .env entry on every restart.
+_SETTINGS_PATH = DATA_DIR / "settings.json"
+
+
+def _load_settings() -> Dict[str, object]:
+    try:
+        import json
+
+        data = json.loads(_SETTINGS_PATH.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_settings(patch: Dict[str, object]) -> None:
+    import json
+
+    data = _load_settings()
+    data.update(patch)
+    try:
+        _SETTINGS_PATH.write_text(json.dumps(data, indent=2))
+    except OSError:
+        pass
+
+
 _active_provider_id: Optional[str] = None
+_persisted = _load_settings().get("active_provider")
+if isinstance(_persisted, str) and _persisted:
+    _active_provider_id = _persisted
 
 
 def _endpoint_kind(url: str) -> str:
@@ -257,6 +306,7 @@ def set_active_provider(pid: str) -> bool:
     global _active_provider_id
     if get_provider(pid):
         _active_provider_id = pid
+        _save_settings({"active_provider": pid})  # persist across restarts
         return True
     return False
 

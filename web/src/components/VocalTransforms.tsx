@@ -19,6 +19,16 @@ const PRESETS: Preset[] = [
   { label: 'Chipmunk', emoji: '🐿', values: { pitch: 9, formant: 6 } },
   { label: 'Robot', emoji: '🤖', values: { ringmod: 0.7, ringmod_hz: 120, drive: 0.2 } },
   { label: 'Telephone', emoji: '☎️', values: { telephone: 0.35, tel_crackle: 0.1 } },
+  // Space / foley presets — echo + reverb shaping the room the sound lives in.
+  { label: 'Alley', emoji: '🧱', values: { echo: 0.45, echo_ms: 180, echo_feedback: 0.4, reverb: 0.18, reverb_size: 0.4 } },
+  { label: 'Slapback', emoji: '🪃', values: { echo: 0.5, echo_ms: 95, echo_feedback: 0 } },
+  { label: 'Hall', emoji: '⛪', values: { reverb: 0.5, reverb_size: 0.8 } },
+  { label: 'Cave', emoji: '🕳', values: { echo: 0.4, echo_ms: 330, echo_feedback: 0.55, reverb: 0.55, reverb_size: 0.95 } },
+  // Movement / distance foley presets.
+  { label: 'Distant', emoji: '🌫', values: { muffle: 0.6, reverb: 0.35, reverb_size: 0.7 } },
+  { label: 'Underwater', emoji: '💧', values: { muffle: 0.75, chorus: 0.6, chorus_hz: 0.6 } },
+  { label: 'Helicopter', emoji: '🚁', values: { tremolo: 0.9, tremolo_hz: 11 } },
+  { label: 'Stutter', emoji: '📻', values: { gate: 0.85, gate_hz: 12 } },
 ]
 
 const isActive = (t: VocalTransform) =>
@@ -28,6 +38,12 @@ const isActive = (t: VocalTransform) =>
   t.drive > 0.01 ||
   t.ringmod > 0.01 ||
   t.vibrato > 0.01 ||
+  (t.tremolo ?? 0) > 0.01 ||
+  (t.gate ?? 0) > 0.01 ||
+  (t.chorus ?? 0) > 0.01 ||
+  (t.muffle ?? 0) > 0.01 ||
+  (t.echo ?? 0) > 0.01 ||
+  (t.reverb ?? 0) > 0.01 ||
   (t.telephone ?? 0) > 0.01
 
 function summary(t: VocalTransform): string {
@@ -38,6 +54,12 @@ function summary(t: VocalTransform): string {
   if (t.drive > 0.01) bits.push('drive')
   if (t.ringmod > 0.01) bits.push('ring')
   if (t.vibrato > 0.01) bits.push('vibrato')
+  if ((t.tremolo ?? 0) > 0.01) bits.push('tremolo')
+  if ((t.gate ?? 0) > 0.01) bits.push('gate')
+  if ((t.chorus ?? 0) > 0.01) bits.push('chorus')
+  if ((t.muffle ?? 0) > 0.01) bits.push('muffle')
+  if ((t.echo ?? 0) > 0.01) bits.push('echo')
+  if ((t.reverb ?? 0) > 0.01) bits.push('reverb')
   if ((t.telephone ?? 0) > 0.01) bits.push('telephone')
   return bits.join(' · ')
 }
@@ -54,6 +76,7 @@ export function VocalTransforms({
   target = 'take',
   defaultOpen,
   disabled = false,
+  title = '🎚 Vocal transforms',
 }: {
   value: VocalTransform
   onChange: (t: VocalTransform) => void
@@ -73,6 +96,9 @@ export function VocalTransforms({
   target?: 'take' | 'output'
   defaultOpen?: boolean
   disabled?: boolean
+  /** Header label — defaults to "Vocal transforms"; the per-segment modal passes
+   * "Vocal & audio transforms" since it works on foley clips too. */
+  title?: string
 }) {
   // Auto-pitch is on by default and transparent, so it shouldn't force the box
   // open — only genuinely-active creative transforms do.
@@ -133,7 +159,7 @@ export function VocalTransforms({
           onClick={() => setOpen((o) => !o)}
           title="Render-time vocal transforms applied to your take before the voice clone"
         >
-          {open ? '▾' : '▸'} 🎚 Vocal transforms
+          {open ? '▾' : '▸'} {title}
           {!open && applied ? ' · ✅ applied' : ''}
           {!open && autoPitch ? ' · 🎯 auto-pitch' : ''}
           {!open && active ? ` · ${summary(value)}` : ''}
@@ -193,6 +219,38 @@ export function VocalTransforms({
           {value.ringmod > 0.01 && row('  ↳ carrier', 'ringmod_hz', 10, 400, 5, (v) => `${v} Hz`)}
           {row('Vibrato', 'vibrato', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`)}
           {value.vibrato > 0.01 && row('  ↳ rate', 'vibrato_hz', 0.5, 12, 0.5, (v) => `${v} Hz`)}
+          {row('🚁 Tremolo', 'tremolo', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`)}
+          {(value.tremolo ?? 0) > 0.01 && row('  ↳ rate', 'tremolo_hz', 0.5, 20, 0.5, (v) => `${v} Hz`)}
+          {row('📻 Gate (chop)', 'gate', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`)}
+          {(value.gate ?? 0) > 0.01 && row('  ↳ rate', 'gate_hz', 1, 30, 1, (v) => `${v} Hz`)}
+          {row('💧 Chorus', 'chorus', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`)}
+          {(value.chorus ?? 0) > 0.01 && row('  ↳ rate', 'chorus_hz', 0.1, 5, 0.1, (v) => `${v.toFixed(1)} Hz`)}
+          {row('🌫 Muffle (distance)', 'muffle', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`)}
+          {(value.muffle ?? 0) > 0.01 && (
+            <div className="hint" style={{ opacity: 0.65, margin: '2px 0 4px 0' }}>
+              Low-pass roll-off — gentle = a touch dull, full = behind a door / far down the hall.
+            </div>
+          )}
+          {row('🧱 Echo', 'echo', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`)}
+          {(value.echo ?? 0) > 0.01 && (
+            <>
+              {row('  ↳ time', 'echo_ms', 20, 1500, 5, (v) => `${Math.round(v)} ms`)}
+              {row('  ↳ feedback', 'echo_feedback', 0, 0.92, 0.02, (v) => `${Math.round(v * 100)}%`)}
+              <div className="hint" style={{ opacity: 0.65, margin: '2px 0 4px 0' }}>
+                Bouncing repeats — short time + low feedback = a slap off a near wall; longer + more feedback = a deep
+                alley/canyon.
+              </div>
+            </>
+          )}
+          {row('🕳 Reverb', 'reverb', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`)}
+          {(value.reverb ?? 0) > 0.01 && (
+            <>
+              {row('  ↳ size', 'reverb_size', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`)}
+              <div className="hint" style={{ opacity: 0.65, margin: '2px 0 4px 0' }}>
+                Room ambience — small = tiled room, large = cathedral/cave. Adds a decaying tail past the clip end.
+              </div>
+            </>
+          )}
           {row('☎️ Telephone', 'telephone', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`)}
           {(value.telephone ?? 0) > 0.01 && (
             <>

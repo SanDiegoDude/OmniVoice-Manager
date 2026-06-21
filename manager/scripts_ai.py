@@ -262,21 +262,24 @@ def _uses_completion_tokens(model: str) -> bool:
     return m.startswith("gpt-5") or m.startswith("o1") or m.startswith("o3") or m.startswith("o4")
 
 
-def _chat_create(client, model: str, messages: list, max_tokens: int, temperature: float):
+def _chat_create(client, model: str, messages: list, max_tokens: int, temperature: float, json_mode: bool = True):
     """Call chat.completions.create, adapting to per-model parameter quirks.
 
     Different providers reject different optional params (legacy 'max_tokens' vs
     'max_completion_tokens', non-default temperature/top_p, or 'response_format').
     We start with our preferred set and strip/swap unsupported params on 400s,
-    retrying until the call succeeds."""
+    retrying until the call succeeds. ``json_mode`` requests a JSON object back
+    (used by the script writer); plain-text callers (e.g. prompt rewriting) pass
+    False."""
     kwargs: Dict[str, Any] = {
         "model": model,
         "messages": messages,
         "top_p": 0.9,
         "temperature": temperature,
-        # Force well-formed JSON when the provider supports it (dropped below if not).
-        "response_format": {"type": "json_object"},
     }
+    if json_mode:
+        # Force well-formed JSON when the provider supports it (dropped below if not).
+        kwargs["response_format"] = {"type": "json_object"}
     if _uses_completion_tokens(model):
         kwargs["max_completion_tokens"] = max_tokens
     else:
@@ -309,7 +312,7 @@ def _chat_create(client, model: str, messages: list, max_tokens: int, temperatur
 
 
 def _openai_complete(
-    provider: dict, system_message: str, user_message: str, max_tokens: int, temperature: float
+    provider: dict, system_message: str, user_message: str, max_tokens: int, temperature: float, json_mode: bool = True
 ) -> Tuple[str, Optional[str]]:
     """Run one completion against an OpenAI-compatible endpoint."""
     client = _client(provider)
@@ -317,7 +320,7 @@ def _openai_complete(
         {"role": "system", "content": system_message},
         {"role": "user", "content": user_message},
     ]
-    resp = _chat_create(client, provider["model"], messages, max_tokens, temperature)
+    resp = _chat_create(client, provider["model"], messages, max_tokens, temperature, json_mode=json_mode)
     choice = resp.choices[0] if resp.choices else None
     content = (getattr(getattr(choice, "message", None), "content", None) or "") if choice else ""
     finish = getattr(choice, "finish_reason", None)
@@ -325,7 +328,7 @@ def _openai_complete(
 
 
 def _vertex_complete(
-    provider: dict, system_message: str, user_message: str, max_tokens: int, temperature: float
+    provider: dict, system_message: str, user_message: str, max_tokens: int, temperature: float, json_mode: bool = True
 ) -> Tuple[str, Optional[str]]:
     """Run one completion against Google Vertex AI (Gemini) via the google-genai
     SDK. Auth is Application Default Credentials, or a service-account JSON when
@@ -364,7 +367,7 @@ def _vertex_complete(
             temperature=temperature,
             top_p=0.9,
             max_output_tokens=max_tokens,
-            response_mime_type="application/json",
+            response_mime_type="application/json" if json_mode else "text/plain",
         ),
     )
 
@@ -380,13 +383,40 @@ def _vertex_complete(
 
 
 def _complete(
-    provider: dict, system_message: str, user_message: str, max_tokens: int, temperature: float
+    provider: dict, system_message: str, user_message: str, max_tokens: int, temperature: float, json_mode: bool = True
 ) -> Tuple[str, Optional[str]]:
     """Dispatch one completion to the right backend, returning (content,
     finish_reason). finish_reason == 'length' means the output was truncated."""
     if provider.get("endpoint") == "vertex":
-        return _vertex_complete(provider, system_message, user_message, max_tokens, temperature)
-    return _openai_complete(provider, system_message, user_message, max_tokens, temperature)
+        return _vertex_complete(provider, system_message, user_message, max_tokens, temperature, json_mode=json_mode)
+    return _openai_complete(provider, system_message, user_message, max_tokens, temperature, json_mode=json_mode)
+
+
+def rewrite_prompt(
+    system_message: str,
+    user_message: str,
+    temperature: float = 0.7,
+    max_tokens: int = 400,
+    provider_id: Optional[str] = None,
+) -> str:
+    """Single plain-text completion against the configured Script-AI provider.
+
+    Used to turn a short user description into a detailed, model-ready prompt
+    (e.g. the Stable Audio 3 plug-in's category-driven reprompt step). Reuses the
+    same provider plumbing as the script writer but returns raw text, not JSON.
+    Raises ``ScriptAIError`` when no provider is configured so callers can fall
+    back to the user's raw text."""
+    provider = _resolve(provider_id)
+    content, _finish = _complete(
+        provider, system_message, user_message, max(64, max_tokens), temperature, json_mode=False
+    )
+    text = (content or "").strip()
+    # Strip accidental markdown fences / surrounding quotes some models add.
+    text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+    text = re.sub(r"\s*```$", "", text).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return text
 
 
 # Token ceiling for the grow-on-truncation retry. Reasoning models (GPT-5 /

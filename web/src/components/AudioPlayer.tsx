@@ -7,14 +7,19 @@ export interface AudioPlayerHandle {
   play: () => void
   pause: () => void
   toggle: () => void
+  /** Render the current trim window + output gain into a WAV Blob (same bake as
+   * the ⬇ Download button). Returns null if the buffer isn't decoded yet. */
+  exportBlob: () => Promise<Blob | null>
+  /** Current trim window + gain, in the clip's own timebase. */
+  getEdits: () => { start: number; end: number; duration: number; gainDb: number }
 }
 
 function fmt(t: number) {
   if (!isFinite(t) || t < 0) t = 0
   const m = Math.floor(t / 60)
   const s = Math.floor(t % 60)
-  const ds = Math.floor((t * 10) % 10)
-  return `${m}:${s.toString().padStart(2, '0')}.${ds}`
+  const cs = Math.floor((t * 100) % 100) // hundredths — audio needs sub-second accuracy
+  return `${m}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`
 }
 
 function encodeWav(buffer: AudioBuffer): Blob {
@@ -412,6 +417,32 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   // If this player unmounts while holding the bus, let go of it.
   useEffect(() => () => releasePlayback(busIdRef.current), [])
 
+  // Bake the current trim window + output gain into a WAV blob (no pitch-altering
+  // speed — that's applied non-destructively on the timeline). Shared by the ⬇
+  // Download button and the imperative `exportBlob()` (Sound Lab library save).
+  const renderEditedBlob = useCallback(async (): Promise<Blob | null> => {
+    const buf = bufferRef.current
+    if (!buf) return null
+    const sr = buf.sampleRate
+    const s = Math.floor(start * sr)
+    const e = Math.floor(end * sr)
+    const len = Math.max(1, e - s)
+    const offline = new OfflineAudioContext(buf.numberOfChannels, len, sr)
+    const sliced = offline.createBuffer(buf.numberOfChannels, len, sr)
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      sliced.copyToChannel(buf.getChannelData(c).subarray(s, e), c)
+    }
+    const node = offline.createBufferSource()
+    node.buffer = sliced
+    const g = offline.createGain()
+    g.gain.value = Math.pow(10, gainDb / 20)
+    node.connect(g)
+    g.connect(offline.destination)
+    node.start()
+    const rendered = await offline.startRendering()
+    return encodeWav(rendered)
+  }, [start, end, gainDb])
+
   useImperativeHandle(
     ref,
     () => ({
@@ -426,8 +457,10 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
       play: () => play(),
       pause: () => stop(),
       toggle: () => (playingRef.current ? stop() : play()),
+      exportBlob: () => renderEditedBlob(),
+      getEdits: () => ({ start, end, duration, gainDb }),
     }),
-    [applySeek, play, stop],
+    [applySeek, play, stop, renderEditedBlob, start, end, duration, gainDb],
   )
 
   // Auto-play once the buffer is decoded (so start/end are set first). Runs after
@@ -604,24 +637,8 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
     }
     setDownloading(true)
     try {
-      const sr = buf.sampleRate
-      const s = Math.floor(start * sr)
-      const e = Math.floor(end * sr)
-      const len = Math.max(1, e - s)
-      const offline = new OfflineAudioContext(buf.numberOfChannels, len, sr)
-      const sliced = offline.createBuffer(buf.numberOfChannels, len, sr)
-      for (let c = 0; c < buf.numberOfChannels; c++) {
-        sliced.copyToChannel(buf.getChannelData(c).subarray(s, e), c)
-      }
-      const node = offline.createBufferSource()
-      node.buffer = sliced
-      const g = offline.createGain()
-      g.gain.value = Math.pow(10, gainDb / 20)
-      node.connect(g)
-      g.connect(offline.destination)
-      node.start()
-      const rendered = await offline.startRendering()
-      const blob = encodeWav(rendered)
+      const blob = await renderEditedBlob()
+      if (!blob) return
       const a = document.createElement('a')
       a.href = URL.createObjectURL(blob)
       const base = (filename || 'audio.wav').replace(/\.[^.]+$/, '')
@@ -640,7 +657,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
         <div>
           {title && <div className="ptitle">{title}</div>}
           <div className="pmeta">
-            {fmt(start)} – {fmt(end)} · {(end - start).toFixed(1)}s
+            {fmt(start)} – {fmt(end)} · {(end - start).toFixed(2)}s
             {Math.abs(gainDb) > 0.01 ? ` · ${gainDb > 0 ? '+' : ''}${gainDb} dB` : ''}
           </div>
         </div>

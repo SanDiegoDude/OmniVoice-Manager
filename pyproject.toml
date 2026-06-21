@@ -86,6 +86,7 @@ omnivoice-infer = "omnivoice.cli.infer:main"
 omnivoice-infer-batch = "omnivoice.cli.infer_batch:main"
 omnivoice-demo = "omnivoice.cli.demo:main"
 omnivoice-manager = "manager.server:main"
+omnivoice-plugin = "manager.plugin_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/SanDiegoDude/OmniVoice-Manager"

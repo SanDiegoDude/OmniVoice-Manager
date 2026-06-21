@@ -42,7 +42,8 @@ Every UI capability is also an HTTP endpoint, so you can drive the Manager from 
 | --- | --- |
 | `POST /api/multitrack/generate` · `POST /api/multitrack/empty` | Generate a scene as clips, or start a blank timeline |
 | `POST /api/multitrack/{sid}/speaker` · `POST·DELETE …/speaker/{pos}` | Add / update / remove a speaker track |
-| `POST …/segment/{i}/regenerate` · `…/edit` · `…/text` | Regenerate, move/trim/speed/gain, or align a clip's text |
+| `POST …/segment/{i}/regenerate` · `…/edit` · `…/text` | Regenerate, move/trim/speed/gain (+ `kind`/`meta`/dialogue), or align a clip's text |
+| `POST …/segment/{i}/regenerate-foley` | Re-roll a plug-in-generated (`kind:"foley"`) clip in place at its current prompt + length |
 | `POST …/segment/{i}/split` · `…/duplicate` · `…/delete` · `…/auto-slice` · `…/inpaint` · `…/inpaint-preserve` | Clip operations + Pin Current Voice to Segment (and non-vocal bed) |
 | `POST …/segment/{i}/transform` | Bake a vocal transform (pitch / formant / telephone / …) onto a clip (reversible) |
 | `POST …/delete-space` · `…/add-space` · `…/reflow` · `…/insert` | Timeline structure + global speed/gap |
@@ -55,6 +56,30 @@ Every UI capability is also an HTTP endpoint, so you can drive the Manager from 
 | `GET …/{sid}/export` · `GET …/{sid}/export-stems` · `POST /api/projects/import` | Download a self-contained `.omvp` bundle (voices snapshotted inside) / per-track FLAC stems; import a bundle → `{session, import_report}` |
 | `POST /api/projects/{sid}/import-voices` | Add a bundle's missing voices to the library and relink the project's tracks |
 | `GET …/{sid}/assets` · `POST …/{sid}/plugin-data` | Project asset inventory (voices / uploads / plug-in data); 3rd-party plug-in persistence hook |
+
+## Sound library (foley / SFX)
+
+| Method & Path | Purpose |
+| --- | --- |
+| `GET /api/sounds` | Whole library: `{tree, flat, folders}` |
+| `POST /api/sounds/folder` · `…/move` · `…/rename` | Create folder · move · rename a sound |
+| `DELETE /api/sounds/{id}` · `POST /api/sounds/upload` | Delete · import (verbatim, no resample) |
+| `GET /api/audio/sound/{id}` | Serve a sound file for preview / download |
+
+See the [sound library guide](sound-library.md).
+
+## External plug-ins
+
+| Method & Path | Purpose |
+| --- | --- |
+| `GET /api/plugins` · `GET /api/plugins/{id}` | List plug-ins / one manifest (public + `installed`) |
+| `POST /api/plugins/{id}/health` · `…/unload` | Start+ping the sidecar · stop it and free resources |
+| `POST /api/plugins/{id}/generate` | Generic audio-generator job: schema-driven `{fields, reprompt, save, save_path, session_id}` → queued job |
+| `POST /api/plugins/{id}/invoke` | Generic command (`{cmd, payload}`) → queued job |
+| `POST /api/sounds/import-temp` | Save a generated preview (`{temp, path}`) into the sound library (deferred save) |
+
+Plug-in work runs as **async jobs** (poll `/api/jobs/{job_id}`). See the
+[plug-in authoring guide](plugins.md).
 
 ## Async vs. sync
 

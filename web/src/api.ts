@@ -38,6 +38,103 @@ export interface VoiceNode {
   voices: Voice[]
 }
 
+/** A foley / SFX sample in the sound library (non-vocal counterpart to Voice). */
+export interface Sound {
+  id: string
+  name: string
+  folder: string
+  filename: string
+  size_kb: number
+  duration_s?: number
+}
+
+export interface SoundNode {
+  name: string
+  folders: Record<string, SoundNode>
+  sounds: Sound[]
+}
+
+/** One declarative UI contribution a plug-in injects into a host "slot"
+ * (e.g. a left-bar panel action, or an item in the track double-click menu). */
+export interface PluginContribution {
+  slot: string
+  label: string
+  icon?: string
+  opens?: string // key of a ui block to open (e.g. "lab")
+}
+
+/** A field in a plug-in's generation schema, rendered generically by Sound Lab. */
+export interface PluginLabField {
+  key: string
+  type: 'textarea' | 'number' | 'text' | 'toggle' | 'select' | 'seed'
+  label: string
+  primary?: boolean
+  advanced?: boolean
+  unit?: string
+  min?: number
+  max?: number
+  step?: number
+  rows?: number
+  default?: unknown
+  options?: string[]
+  placeholder?: string
+}
+
+export interface PluginLabCategory {
+  id: string
+  duration?: number
+  placeholder?: string
+}
+
+/** A plug-in's generation modal schema (the "lab"). */
+export interface PluginLab {
+  title?: string
+  filename_from?: string
+  categories?: PluginLabCategory[]
+  fields: PluginLabField[]
+  reprompt?: boolean
+}
+
+export interface PluginUI {
+  kind?: string
+  contributions?: PluginContribution[]
+  lab?: PluginLab
+}
+
+/** A discovered external plug-in (manifest view). */
+export interface Plugin {
+  id: string
+  name: string
+  version: string
+  description: string
+  author?: string
+  homepage?: string
+  source?: string
+  license?: string
+  isolation: string
+  gpu: boolean
+  vram_mb?: number | null
+  supports_low_vram: boolean
+  supports_cpu_offload: boolean
+  capabilities: string[]
+  needs?: Record<string, unknown>
+  ui?: PluginUI
+  installed: boolean
+  running?: boolean
+  /** Whether the plug-in's gated HF model is downloaded locally. `null` when the
+   * plug-in declares no model; `false` drives the gated-model help note. */
+  model_present?: boolean | null
+}
+
+export interface PluginGenerateBody {
+  fields: Record<string, unknown>
+  reprompt?: boolean
+  provider_id?: string | null
+  save?: boolean
+  save_path?: string | null
+  session_id?: string | null
+}
+
 export type SpeakerMode = 'clone' | 'design' | 'auto'
 
 export interface SpeakerConfig {
@@ -83,6 +180,15 @@ export interface Job {
         inserted_index?: number
         channel_regen?: string
         bulk_sliced?: number
+        // Plug-in (Stable Audio 3) generation results.
+        plugin?: string
+        category?: string
+        prompt?: string
+        raw_prompt?: string
+        reprompted?: boolean
+        sample_rate?: number
+        sound?: Sound
+        temp?: string
       }
     | null
   error: string | null
@@ -100,6 +206,27 @@ export interface VocalTransform {
   ringmod_hz: number
   vibrato: number
   vibrato_hz: number
+  /** Tremolo — amplitude LFO (throb/helicopter). Depth 0..1, rate Hz. */
+  tremolo: number
+  tremolo_hz: number
+  /** Gate / chop — rhythmic on-off stutter. Depth 0..1, rate Hz. */
+  gate: number
+  gate_hz: number
+  /** Chorus — short modulated delay (shimmer/whoosh). 0..1, rate Hz. */
+  chorus: number
+  chorus_hz: number
+  /** Muffle / distance — low-pass (behind a door / far away). 0..1. */
+  muffle: number
+  /** Echo / delay (slap-back → alley-wall bounce). Wet 0..1. */
+  echo: number
+  /** Echo delay time in ms. */
+  echo_ms: number
+  /** Echo feedback — repeats / decay length. 0..0.92. */
+  echo_feedback: number
+  /** Reverb (room/hall/cave space). Wet 0..1. */
+  reverb: number
+  /** Reverb size — decay length. 0..1. */
+  reverb_size: number
   /** "Bad telephone call" lo-fi: band-limit + sample-rate/bit crush. 0..1. */
   telephone: number
   /** Crackle / line-noise riding on top of the telephone effect. 0..1. */
@@ -115,6 +242,18 @@ export const DEFAULT_TRANSFORM: VocalTransform = {
   ringmod_hz: 80,
   vibrato: 0,
   vibrato_hz: 5,
+  tremolo: 0,
+  tremolo_hz: 6,
+  gate: 0,
+  gate_hz: 8,
+  chorus: 0,
+  chorus_hz: 1.5,
+  muffle: 0,
+  echo: 0,
+  echo_ms: 180,
+  echo_feedback: 0.35,
+  reverb: 0,
+  reverb_size: 0.5,
   telephone: 0,
   tel_crackle: 0,
 }
@@ -171,8 +310,40 @@ export interface MultitrackSegment {
   /** Baked-in per-segment vocal transforms (null = clip is original). */
   fx?: Partial<VocalTransform> | null
   perform?: PerformInfo | null
+  /** Audio provenance: "foley" (plug-in generated) vs "upload" (static file);
+   * null/undefined for generated-voice clips. Drives the timeline colour. */
+  kind?: string | null
+  /** Open metadata bag — first-party + plug-in segment data (e.g. a foley clip's
+   * origin plug-in, prompt and generation fields for re-rolling). */
+  meta?: SegmentMeta | null
   url: string
   clip_url: string
+}
+
+/** Per-segment metadata. `plugin`/`category`/`prompt`/`fields` describe a foley
+ * clip's origin so it can be re-rolled; plug-ins may stash arbitrary extra keys. */
+export interface SegmentMeta {
+  plugin?: string
+  category?: string
+  prompt?: string
+  fields?: Record<string, unknown>
+  reprompt?: boolean
+  provider_id?: string | null
+  [k: string]: unknown
+}
+
+/** Non-generative segment edits, including dialogue/provenance/metadata. */
+export interface SegmentEdit {
+  start_s?: number
+  trim_start_s?: number
+  trim_end_s?: number
+  speed?: number
+  gain_db?: number
+  fade_in_s?: number
+  fade_out_s?: number
+  text?: string
+  kind?: string
+  meta?: SegmentMeta
 }
 
 export interface MultitrackTrack {
@@ -370,6 +541,41 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // ---- Sound library (foley / SFX) ----
+  sounds: () => jfetch<{ tree: SoundNode; flat: Sound[]; folders: string[] }>('/api/sounds'),
+  deleteSound: (id: string) => jfetch<{ ok: boolean }>(`/api/sounds/${id}`, { method: 'DELETE' }),
+  createSoundFolder: (folder: string) =>
+    jfetch<{ folder: string }>('/api/sounds/folder', { method: 'POST', body: JSON.stringify({ folder }) }),
+  moveSound: (id: string, folder: string) =>
+    jfetch<Sound>('/api/sounds/move', { method: 'POST', body: JSON.stringify({ id, folder }) }),
+  renameSound: (id: string, name: string) =>
+    jfetch<Sound>('/api/sounds/rename', { method: 'POST', body: JSON.stringify({ id, name }) }),
+  transformSound: (body: SoundTransformBody) =>
+    jfetch<Sound & { duration_s?: number }>('/api/sounds/transform', { method: 'POST', body: JSON.stringify(body) }),
+  async uploadSound(file: File, folder = '') {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('folder', folder)
+    const res = await fetch('/api/sounds/upload', { method: 'POST', body: fd })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Upload failed')
+    return res.json() as Promise<Sound>
+  },
+  /** Save a generated temp preview into the library (deferred save). */
+  importTempSound: (temp: string, path: string) =>
+    jfetch<Sound>('/api/sounds/import-temp', { method: 'POST', body: JSON.stringify({ temp, path }) }),
+
+  // ---- Plug-ins (external, isolated) ----
+  plugins: () => jfetch<{ plugins: Plugin[] }>('/api/plugins'),
+  pluginInfo: (id: string) => jfetch<Plugin>(`/api/plugins/${id}`),
+  pluginUnload: (id: string) => jfetch<{ ok: boolean }>(`/api/plugins/${id}/unload`, { method: 'POST' }),
+  pluginHealth: (id: string) => jfetch<Record<string, unknown>>(`/api/plugins/${id}/health`, { method: 'POST' }),
+  /** Generic audio-generator job for any plug-in (schema-driven `fields`). */
+  pluginGenerate: (id: string, body: PluginGenerateBody) =>
+    jfetch<{ job_id: string }>(`/api/plugins/${id}/generate`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   script: (body: ScriptBody) =>
     jfetch<{ title: string; script: string; model: string; num_speakers: number }>('/api/script', {
       method: 'POST',
@@ -405,10 +611,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ text: text ?? null, plain: plain ?? false }),
     }),
+  /** Re-roll a foley clip in place via its origin plug-in (current prompt + length). */
+  regenFoley: (sid: string, index: number) =>
+    jfetch<{ job_id: string }>(`/api/multitrack/${sid}/segment/${index}/regenerate-foley`, {
+      method: 'POST',
+    }),
   editSegment: (
     sid: string,
     index: number,
-    fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number; gain_db?: number; fade_in_s?: number; fade_out_s?: number },
+    fields: SegmentEdit,
   ) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/segment/${index}/edit`, {
       method: 'POST',
@@ -439,6 +650,8 @@ export const api = {
   discardSession: (sid: string) => jfetch<{ ok: boolean }>(`/api/multitrack/${sid}`, { method: 'DELETE' }),
   addSpeaker: (sid: string, cfg: SpeakerConfig) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/speaker`, { method: 'POST', body: JSON.stringify(cfg) }),
+  addAudioTrack: (sid: string) =>
+    jfetch<MultitrackSession>(`/api/multitrack/${sid}/audio-track`, { method: 'POST' }),
   updateSpeaker: (sid: string, pos: string, cfg: SpeakerConfig) =>
     jfetch<MultitrackSession>(`/api/multitrack/${sid}/speaker/${pos}`, { method: 'POST', body: JSON.stringify(cfg) }),
   removeSpeaker: (sid: string, pos: string) =>
@@ -688,6 +901,14 @@ export interface ProcessVoiceBody {
   trim_end?: number
   overwrite?: boolean
   save_as: string
+  transforms?: VocalTransform
+}
+
+export interface SoundTransformBody {
+  id: string
+  transforms: VocalTransform
+  overwrite?: boolean
+  save_as?: string
 }
 
 export interface ScriptBody {

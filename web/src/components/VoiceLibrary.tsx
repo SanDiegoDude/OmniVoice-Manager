@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { Voice, VoiceNode } from '../api'
+import { usePersistentBool } from '../uiState'
 
 // Windows Explorer-style ordering: case-insensitive and number-aware, so
 // "clip2" sorts before "clip10" and casing doesn't fragment the list.
@@ -17,6 +18,7 @@ interface RowActions {
   onDelete: (v: Voice) => void
   onMove: (id: string, folder: string) => void
   onRename: (id: string, name: string) => void
+  onEdit: (v: Voice) => void
   folders: string[]
 }
 
@@ -30,6 +32,7 @@ function VoiceRow({
   onDelete,
   onMove,
   onRename,
+  onEdit,
   folders,
 }: { v: Voice } & RowActions) {
   const [renaming, setRenaming] = useState<string | null>(null)
@@ -98,6 +101,7 @@ function VoiceRow({
         <span className="vrow-actions" onClick={(e) => e.stopPropagation()}>
           <button className="vplay" title="Move to folder…" onClick={() => setMoving(true)}>📂</button>
           <button className="vplay" title="Rename" onClick={() => setRenaming(baseName(v))}>✎</button>
+          <button className="vplay" title="Edit — add transforms (echo, reverb, pitch…), save copy or overwrite" onClick={() => onEdit(v)}>🎚</button>
           <button className="vplay" title="Delete" onClick={() => setConfirmDel(true)}>🗑</button>
         </span>
       )}
@@ -143,6 +147,7 @@ export function VoiceLibrary({
   onDelete,
   onMove,
   onRename,
+  onEdit,
   onCreateFolder,
   onRefresh,
   onOpenLab,
@@ -159,14 +164,16 @@ export function VoiceLibrary({
   onDelete: (v: Voice) => void
   onMove: (id: string, folder: string) => void
   onRename: (id: string, name: string) => void
+  onEdit: (v: Voice) => void
   onCreateFolder: (path: string) => void
   onRefresh: () => void
   onOpenLab: () => void
 }) {
   const [query, setQuery] = useState('')
   const [newFolder, setNewFolder] = useState<string | null>(null)
+  const [open, setOpen] = usePersistentBool('ov-voicelib', true)
 
-  const actions: RowActions = { selected, playingUrl, onPlay, onCast, onPick, onDelete, onMove, onRename, folders }
+  const actions: RowActions = { selected, playingUrl, onPlay, onCast, onPick, onDelete, onMove, onRename, onEdit, folders }
 
   const q = query.trim().toLowerCase()
   const matches = q
@@ -183,9 +190,11 @@ export function VoiceLibrary({
   }
 
   return (
-    <div className="card flush col vlib" style={{ flex: 1, minHeight: 240 }}>
+    <div className={`card flush col vlib${open ? '' : ' collapsed'}`} style={{ flex: open ? 1 : '0 0 auto', minHeight: open ? 240 : 0 }}>
       <div className="card-head">
-        <h3>Voice Library ({count})</h3>
+        <h3 style={{ cursor: 'pointer' }} onClick={() => setOpen(!open)} title={open ? 'Collapse' : 'Expand'}>
+          {open ? '▾' : '▸'} Voice Library ({count})
+        </h3>
         <div className="row" style={{ gap: 4 }}>
           <button className="btn ghost sm" onClick={() => setNewFolder(newFolder == null ? '' : null)} title="New folder">
             📁+
@@ -195,7 +204,8 @@ export function VoiceLibrary({
           </button>
         </div>
       </div>
-
+      {!open ? null : (
+       <>
       <div className="vlib-search">
         <input
           className="input"
@@ -249,10 +259,12 @@ export function VoiceLibrary({
         )}
       </div>
       <div style={{ padding: 12, borderTop: '1px solid var(--border-soft)' }}>
-        <button className="btn primary block" onClick={onOpenLab}>
+        <button className="btn" onClick={onOpenLab}>
           ⚗ Voice Lab — Isolate & Boost
         </button>
       </div>
+       </>
+      )}
     </div>
   )
 }

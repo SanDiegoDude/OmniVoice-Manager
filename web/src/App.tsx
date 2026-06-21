@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
-import type { GenParams, GenerateBody, HistoryEntry, HistoryState, ImportableVoice, Job, MultitrackSegment, MultitrackSession, OutputFile, Project, Provider, SpeakerConfig, SystemInfo, Voice, VocalTransform, VoiceNode } from './api'
+import type { GenParams, GenerateBody, HistoryEntry, HistoryState, ImportableVoice, Job, MultitrackSegment, MultitrackSession, OutputFile, Project, Provider, SegmentEdit, Sound, SoundNode, SpeakerConfig, SystemInfo, Voice, VocalTransform, VoiceNode } from './api'
 import { SidePanel } from './components/SidePanel'
 import ProjectImportModal from './components/ProjectImportModal'
 import { Studio, type Injected } from './components/Studio'
@@ -11,6 +11,10 @@ import { Toasts, type ToastItem } from './components/ui'
 import { VoiceLab } from './components/VoiceLab'
 import { TagLibrary } from './components/TagLibrary'
 import { VoiceLibrary } from './components/VoiceLibrary'
+import { SoundLibrary } from './components/SoundLibrary'
+import { SoundLab } from './components/SoundLab'
+import { SampleEditModal, type EditTarget } from './components/SampleEditModal'
+import { usePlugins } from './pluginRegistry'
 import { claimPlayback, releasePlayback } from './audioBus'
 
 export default function App() {
@@ -27,10 +31,23 @@ export default function App() {
   const [tree, setTree] = useState<VoiceNode | null>(null)
   const [folders, setFolders] = useState<string[]>([])
   const [selectedVoice, setSelectedVoice] = useState<string>()
+  // Foley / SFX sound library (the non-vocal counterpart to the voice library).
+  const [sounds, setSounds] = useState<Sound[]>([])
+  const [soundTree, setSoundTree] = useState<SoundNode | null>(null)
+  const [soundFolders, setSoundFolders] = useState<string[]>([])
+  const [selectedSound, setSelectedSound] = useState<string>()
+  // Sound Lab (generic plug-in generation modal): which plug-in, and whether
+  // we're generating standalone (library) or to drop onto a timeline track.
+  const [soundLab, setSoundLab] = useState<
+    { pluginId: string; placement: 'library' | 'track'; track?: { pos: string; startS: number; ripple: boolean } } | null
+  >(null)
+  const plugins = usePlugins()
   // Studio exposes its cast-voice action through this ref so the library can
   // load a clicked voice into a track without lifting all of Studio's state.
   const castRef = useRef<((voiceId: string, opts?: { newTrack?: boolean }) => void) | null>(null)
   const [labOpen, setLabOpen] = useState(false)
+  // Sample editor (transforms → save copy / overwrite) shared by both libraries.
+  const [editTarget, setEditTarget] = useState<EditTarget | null>(null)
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [outputs, setOutputs] = useState<OutputFile[]>([])
   const [projects, setProjects] = useState<Project[]>([])
@@ -70,6 +87,10 @@ export default function App() {
 
   useEffect(() => {
     sessionRef.current = session
+    // Remember the last project on screen so a refresh restores it (a brand-new
+    // scene is a deliberate click on "new blank project", not a side effect of
+    // reloading the page).
+    if (session?.id) localStorage.setItem('ov-last-project', session.id)
   }, [session])
 
   const notify = useCallback((message: string, kind: 'info' | 'error' | 'success' = 'info') => {
@@ -85,6 +106,17 @@ export default function App() {
       /* server may be starting */
     }
   }, [])
+
+  const refreshSounds = useCallback(async () => {
+    try {
+      const s = await api.sounds()
+      setSounds(s.flat)
+      setSoundTree(s.tree)
+      setSoundFolders(s.folders ?? [])
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }, [notify])
 
   const refreshVoices = useCallback(async () => {
     try {
@@ -158,13 +190,14 @@ export default function App() {
   useEffect(() => {
     refreshInfo()
     refreshVoices()
+    refreshSounds()
     refreshHistory()
     refreshOutputs()
     refreshProjects()
     refreshProviders()
     const iv = setInterval(refreshInfo, 4000)
     return () => clearInterval(iv)
-  }, [refreshInfo, refreshVoices, refreshHistory, refreshOutputs, refreshProjects, refreshProviders])
+  }, [refreshInfo, refreshVoices, refreshSounds, refreshHistory, refreshOutputs, refreshProjects, refreshProviders])
 
   // Keep the open project's action-history (undo/redo chain) in sync. The
   // session object changes identity on every edit, so this refetches the
@@ -391,6 +424,117 @@ export default function App() {
     castRef.current(voiceId, opts)
   }
 
+  // ---- Sound library handlers ----
+  const deleteSound = async (s: Sound) => {
+    try {
+      await api.deleteSound(s.id)
+      refreshSounds()
+      notify('Sound deleted')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const moveSound = async (id: string, folder: string) => {
+    try {
+      const r = await api.moveSound(id, folder)
+      refreshSounds()
+      notify(`Moved to ${r.folder || 'the library root'}`)
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const renameSound = async (id: string, name: string) => {
+    try {
+      await api.renameSound(id, name)
+      refreshSounds()
+      notify('Sound renamed')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const createSoundFolder = async (path: string) => {
+    try {
+      await api.createSoundFolder(path)
+      refreshSounds()
+      notify('Folder created')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  const uploadSoundFn = async (file: File) => {
+    try {
+      await api.uploadSound(file)
+      refreshSounds()
+      notify(`Added “${file.name}” to the sound library`, 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+  // Drop a freshly-generated (or library-picked) sound onto a specific audio
+  // track at the double-clicked position — the in-track Sound Lab flow.
+  const placeGeneratedInTrack = async (url: string, filename: string, edit?: SegmentEdit) => {
+    const t = soundLab?.track
+    if (!session || !t) {
+      notify('Open a project to drop generated sounds onto the timeline.', 'error')
+      return
+    }
+    try {
+      const res = await fetch(url)
+      if (!res.ok) throw new Error('Could not load the generated sound')
+      const blob = await res.blob()
+      const file = new File([blob], filename, { type: blob.type || 'audio/wav' })
+      // Remember which clips exist so we can find the one we just dropped and
+      // bake the Sound Lab's previewed trim/speed/gain (and foley provenance +
+      // full prompt as dialogue) onto it — "what you previewed is what lands".
+      const before = new Set(session.tracks.flatMap((tr) => tr.segments.map((s) => s.index)))
+      const updated = await api.uploadAudioSegment(session.id, t.pos, file, t.startS, t.ripple)
+      setSession(updated)
+      if (edit && Object.keys(edit).length) {
+        const placed = updated.tracks.flatMap((tr) => tr.segments).find((s) => !before.has(s.index))
+        if (placed) {
+          const fields: SegmentEdit = { ...edit }
+          // The clip's dialogue is its source prompt (full text, not the slug).
+          if (edit.meta?.prompt && !fields.text) fields.text = edit.meta.prompt
+          setSession(await api.editSegment(updated.id, placed.index, fields))
+        }
+      }
+      notify(`Audio sample dropped${t.ripple ? ' (rippled later clips)' : ''}`, 'success')
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+
+  // Re-roll a foley clip in place via the plug-in that made it (current prompt + length).
+  const regenFoley = async (index: number) => {
+    if (!session) return
+    try {
+      setRegenIndex(index)
+      const { job_id } = await api.regenFoley(session.id, index)
+      setJob({ id: job_id, status: 'queued', progress: {}, result: null, error: null, meta: { multitrack: true, regen: index } })
+    } catch (e) {
+      notify(String(e), 'error')
+      setRegenIndex(null)
+    }
+  }
+
+  // Drop a library sound onto the open project as a new audio channel. Fetches
+  // the sample from the server and reuses the existing upload-channel plumbing.
+  const addSoundToProject = async (s: Sound) => {
+    if (!session) {
+      notify('Open or create a project first to drop sounds onto the timeline.', 'error')
+      return
+    }
+    try {
+      const res = await fetch(`/api/audio/sound/${s.id}`)
+      if (!res.ok) throw new Error('Could not load sound')
+      const blob = await res.blob()
+      const file = new File([blob], s.filename, { type: blob.type || 'audio/wav' })
+      await uploadChannel(file, s.name.split('/').pop() || s.name)
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+  }
+
   const stopPlayback = () => {
     if (audioRef.current) {
       audioRef.current.pause()
@@ -475,7 +619,10 @@ export default function App() {
   }
 
   // ---- multitrack composition: blank skeleton + on-the-fly speakers ----
-  const creatingRef = useRef(false)
+  // Seed "creating" true when we have a last project to restore, so the Studio's
+  // auto-create-blank effect (which fires before parent effects on mount) stands
+  // down until the restore below resolves. Cleared once restore completes/fails.
+  const creatingRef = useRef(!!localStorage.getItem('ov-last-project'))
   const ensureEmptySession = useCallback(
     async (speakers: Record<string, SpeakerConfig>, params: GenParams) => {
       if (sessionRef.current || creatingRef.current) return
@@ -540,6 +687,16 @@ export default function App() {
     if (!s) return
     try {
       setSession(await api.addSpeaker(s.id, cfg))
+    } catch (e) {
+      notify(String(e), 'error')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  const addAudioTrackToSession = useCallback(async () => {
+    const s = sessionRef.current
+    if (!s) return
+    try {
+      setSession(await api.addAudioTrack(s.id))
     } catch (e) {
       notify(String(e), 'error')
     }
@@ -1039,6 +1196,30 @@ export default function App() {
       notify(String(e), 'error')
     }
   }
+  // On first load, restore the last project that was on screen (if it still
+  // exists). `creatingRef` was seeded true to hold off the auto-blank scene.
+  const restoredRef = useRef(false)
+  useEffect(() => {
+    if (restoredRef.current) return
+    restoredRef.current = true
+    const last = localStorage.getItem('ov-last-project')
+    if (!last) return
+    ;(async () => {
+      try {
+        const s = await api.openProject(last)
+        sessionRef.current = s
+        setSession(s)
+        setInjected(injectedFromSession(s))
+      } catch {
+        // The project was deleted/renamed away — fall back to a fresh scene.
+        localStorage.removeItem('ov-last-project')
+      } finally {
+        creatingRef.current = false
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const renameProject = async (sid: string, title: string) => {
     try {
       const s = await api.renameProject(sid, title)
@@ -1178,9 +1359,30 @@ export default function App() {
             onDelete={deleteVoice}
             onMove={moveVoice}
             onRename={renameVoiceFn}
+            onEdit={(v) => setEditTarget({ kind: 'voice', id: v.id, name: v.name, folder: v.folder })}
             onCreateFolder={createFolderFn}
             onRefresh={refreshVoices}
             onOpenLab={() => setLabOpen(true)}
+          />
+          <SoundLibrary
+            tree={soundTree}
+            flat={sounds}
+            folders={soundFolders}
+            count={sounds.length}
+            selected={selectedSound}
+            playingUrl={playingUrl}
+            hasSession={!!session}
+            onPlay={(s) => togglePlay(`/api/audio/sound/${s.id}`)}
+            onPick={(s) => setSelectedSound(s.id)}
+            onAddToProject={addSoundToProject}
+            onDelete={deleteSound}
+            onMove={moveSound}
+            onRename={renameSound}
+            onEdit={(s) => setEditTarget({ kind: 'sound', id: s.id, name: s.name, folder: s.folder })}
+            onCreateFolder={createSoundFolder}
+            onUpload={uploadSoundFn}
+            onRefresh={refreshSounds}
+            onGenerate={(pluginId) => setSoundLab({ pluginId, placement: 'library' })}
           />
           <TagLibrary notify={notify} />
         </div>
@@ -1202,12 +1404,14 @@ export default function App() {
           onGenerateScript={generateScript}
           onLucky={startGenerate}
           onRegenSegment={regenSegment}
+          onRegenFoley={regenFoley}
           onEditSegment={editSegment}
           onReflow={reflowSession}
           onInsertSegment={insertSegment}
           onEnsureSession={ensureEmptySession}
           onImportToStudio={importClipToStudio}
           onAddSpeaker={addSpeakerToSession}
+          onAddAudioTrack={addAudioTrackToSession}
           onUpdateSpeaker={updateSpeakerInSession}
           onRemoveSpeaker={removeSpeakerFromSession}
           onDeleteSegment={deleteSegment}
@@ -1242,6 +1446,7 @@ export default function App() {
           onRegenChannel={regenChannel}
           onUploadChannel={uploadChannel}
           onUploadAudioSegment={uploadAudioSegment}
+          onPluginGenerate={(pluginId, track) => setSoundLab({ pluginId, placement: 'track', track })}
           onFinalize={finalizeSession}
           notify={notify}
           submitting={submitting}
@@ -1308,6 +1513,28 @@ export default function App() {
       {labOpen && (
           <VoiceLab voices={voices} folders={folders} onClose={() => setLabOpen(false)} onSaved={refreshVoices} notify={notify} />
       )}
+      <SoundLab
+        open={!!soundLab}
+        plugin={plugins.find((p) => p.id === soundLab?.pluginId) ?? null}
+        onClose={() => setSoundLab(null)}
+        placement={soundLab?.placement ?? 'library'}
+        sessionId={session?.id ?? null}
+        folders={soundFolders}
+        scriptConfigured={!!info?.script_ai?.configured}
+        scriptLabel={info?.script_ai?.label ?? null}
+        librarySounds={sounds}
+        onGenerated={refreshSounds}
+        onPlaceInTrack={placeGeneratedInTrack}
+        notify={notify}
+      />
+      <SampleEditModal
+        open={!!editTarget}
+        target={editTarget}
+        folders={editTarget?.kind === 'sound' ? soundFolders : folders}
+        onClose={() => setEditTarget(null)}
+        onSaved={editTarget?.kind === 'sound' ? refreshSounds : refreshVoices}
+        notify={notify}
+      />
       {voiceImport && (
         <ProjectImportModal voices={voiceImport.voices} onImport={importVoices} onClose={() => setVoiceImport(null)} />
       )}

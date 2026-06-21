@@ -29,6 +29,15 @@ venv/
 /output/
 /data/
 /custom_voices/
+/custom_sounds/
+# External plug-ins are DROP-IN: installed into plugins/ via `omnivoice-plugin
+# install <git-url>`, a plain git clone, a copy, or a platform installer. Only the
+# host-provided SDK and this directory's README are tracked here — every installed
+# plug-in lives in its own repo (with its own license) and stays untracked, as
+# does the isolated venv each one builds via its bootstrap.
+plugins/*
+!plugins/_sdk/
+!plugins/README.md
 *.wav
 *.mp3
 *.flac

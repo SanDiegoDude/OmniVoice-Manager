@@ -3,9 +3,9 @@
 # Uses the local .venv directly so `uv` does not need to be on your PATH.
 #
 # Script-level flags (consumed here, NOT passed to the server):
-#   --rebuild    Sync Python deps (uv sync) AND force a fresh web UI build,
-#                even if a build already exists. Catches libraries added during
-#                active development.
+#   --rebuild    Sync Python deps + CLI commands (uv sync) AND force a fresh web
+#                UI build, even if a build already exists. Catches libraries and
+#                console scripts (e.g. omnivoice-plugin) added during active dev.
 #   --forceup    Kill any process already listening on the port first.
 # Everything else is passed through, e.g.: ./run_manager.sh --ssl --lod
 set -euo pipefail
@@ -46,16 +46,26 @@ if [ "$FORCEUP" = "1" ]; then
   fi
 fi
 
-# --- Sync Python deps on --rebuild (catches libs added during active dev) ---
-# Best-effort: the launcher is designed to run off .venv without uv on PATH, so
-# if uv isn't available we just warn and carry on with the existing env.
+# --- Sync Python deps + CLI commands on --rebuild ---
+# `uv sync` re-syncs dependencies AND regenerates the project's console scripts
+# (omnivoice-manager, omnivoice-plugin, …), so newly added CLI commands show up
+# after a rebuild. The launcher normally runs off .venv without uv on PATH, so we
+# look for uv in the usual install locations too before giving up.
 if [ "$REBUILD" = "1" ]; then
+  UV_BIN=""
   if command -v uv >/dev/null 2>&1; then
-    echo "Syncing Python dependencies (uv sync) ..."
-    uv sync || echo "uv sync failed — continuing with the existing environment." >&2
+    UV_BIN="$(command -v uv)"
   else
-    echo "--rebuild: 'uv' not on PATH — skipping dependency sync." >&2
-    echo "  Run 'uv sync' yourself if dependencies have changed." >&2
+    for c in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" "/usr/local/bin/uv" ".venv/bin/uv"; do
+      [ -x "$c" ] && { UV_BIN="$c"; break; }
+    done
+  fi
+  if [ -n "$UV_BIN" ]; then
+    echo "Syncing Python deps + CLI commands (uv sync) ..."
+    "$UV_BIN" sync || echo "uv sync failed — continuing with the existing environment." >&2
+  else
+    echo "--rebuild: 'uv' not found (PATH, ~/.local/bin, ~/.cargo/bin) — skipping sync." >&2
+    echo "  Install uv or run 'uv sync' yourself if deps/CLI commands changed." >&2
   fi
 fi
 

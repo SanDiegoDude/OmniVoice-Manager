@@ -47,6 +47,37 @@ class GenerateRequest(BaseModel):
     save: bool = True
 
 
+class PluginInvokeRequest(BaseModel):
+    """Generic plug-in command invocation (advanced / for custom plug-ins)."""
+    cmd: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PluginInstallRequest(BaseModel):
+    """Install a plug-in from a git URL into the host's plugins/ directory."""
+    git_url: str
+    name: Optional[str] = None       # folder under plugins/ (default: from URL)
+    bootstrap: bool = True           # also run its bootstrap to build the venv
+    force: bool = False              # overwrite an existing folder
+
+
+class PluginGenerateRequest(BaseModel):
+    """Generic audio-generator plug-in request. `fields` is the plug-in's own
+    UI-schema payload (prompt, duration, etc.) passed through to its sidecar."""
+    fields: Dict[str, Any] = Field(default_factory=dict)
+    reprompt: bool = True
+    provider_id: Optional[str] = None
+    save: bool = True
+    save_path: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+class ImportTempSoundRequest(BaseModel):
+    """Save a previously-generated temp preview into the sound library."""
+    temp: str  # the temp filename returned by a generate job (result.temp)
+    path: str  # library rel path/folder + filename to save under
+
+
 class RegenSegmentRequest(BaseModel):
     # Optional edited dialogue for the segment; if set, it replaces the stored
     # line before regenerating (and is persisted to the session).
@@ -65,6 +96,13 @@ class EditSegmentRequest(BaseModel):
     gain_db: Optional[float] = None
     fade_in_s: Optional[float] = None
     fade_out_s: Optional[float] = None
+    # Dialogue + provenance. `text` sets the segment's dialogue plainly (e.g. a
+    # placed foley clip carries its source prompt). `kind` tags the clip
+    # ("foley" / "upload"); `meta` is an open bag (merged) for first-party and
+    # plug-in segment metadata.
+    text: Optional[str] = None
+    kind: Optional[str] = None
+    meta: Optional[Dict[str, Any]] = None
 
 
 class MoveSegmentRequest(BaseModel):
@@ -218,6 +256,19 @@ class ProcessVoiceRequest(BaseModel):
     trim_end: float = 0.0
     overwrite: bool = False  # overwrite the selected library voice in place
     save_as: str  # destination relative path in custom_voices/
+    # Creative vocal/audio transforms baked onto the processed audio (Sample
+    # editor). Same free-form dict the segment transform uses.
+    transforms: Optional[Dict[str, float]] = None
+
+
+class SoundTransformRequest(BaseModel):
+    """Sample editor (sound library side): bake vocal/audio transforms onto an
+    existing library sound and save a copy or overwrite it in place."""
+
+    id: str  # sound id (relative path) in custom_sounds/
+    transforms: Dict[str, float] = Field(default_factory=dict)
+    overwrite: bool = False  # replace the source sound in place
+    save_as: Optional[str] = None  # destination rel path when saving a copy
 
 
 class LoadModelRequest(BaseModel):

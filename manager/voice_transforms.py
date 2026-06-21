@@ -41,6 +41,25 @@ _LIMITS = {
     "ringmod_hz": (10.0, 800.0),
     "vibrato": (0.0, 1.0),
     "vibrato_hz": (0.5, 12.0),
+    # Tremolo — amplitude LFO (helicopter / throb / UFO). Depth 0..1, rate Hz.
+    "tremolo": (0.0, 1.0),
+    "tremolo_hz": (0.5, 20.0),
+    # Gate / chop — rhythmic on-off stutter (glitch / transmission). Depth 0..1.
+    "gate": (0.0, 1.0),
+    "gate_hz": (1.0, 30.0),
+    # Chorus — short modulated delay for shimmer / whoosh / underwater thicken.
+    "chorus": (0.0, 1.0),
+    "chorus_hz": (0.1, 5.0),
+    # Muffle / distance — low-pass; full = behind a door / far away. Weight 0..1.
+    "muffle": (0.0, 1.0),
+    # Echo / delay (slap-back → bouncing-off-alley-walls). Wet weight 0..1, delay
+    # time in ms, and feedback (how many repeats / how long the bounce decays).
+    "echo": (0.0, 1.0),
+    "echo_ms": (20.0, 1500.0),
+    "echo_feedback": (0.0, 0.92),
+    # Reverb (room/hall/cave space). Wet weight 0..1, size = decay length 0..1.
+    "reverb": (0.0, 1.0),
+    "reverb_size": (0.0, 1.0),
     # "Bad telephone call" lo-fi: band-limit + sample-rate/bit crush. Weight 0..1.
     "telephone": (0.0, 1.0),
     # Crackle / line-noise riding on top of the telephone effect. Weight 0..1.
@@ -56,6 +75,18 @@ _DEFAULTS = {
     "ringmod_hz": 80.0,
     "vibrato": 0.0,
     "vibrato_hz": 5.0,
+    "tremolo": 0.0,
+    "tremolo_hz": 6.0,
+    "gate": 0.0,
+    "gate_hz": 8.0,
+    "chorus": 0.0,
+    "chorus_hz": 1.5,
+    "muffle": 0.0,
+    "echo": 0.0,
+    "echo_ms": 180.0,
+    "echo_feedback": 0.35,
+    "reverb": 0.0,
+    "reverb_size": 0.5,
     "telephone": 0.0,
     "tel_crackle": 0.0,
 }
@@ -88,6 +119,12 @@ def has_effect(t: Optional[Dict[str, Any]]) -> bool:
         or n["drive"] > 1e-3
         or n["ringmod"] > 1e-3
         or n["vibrato"] > 1e-3
+        or n["tremolo"] > 1e-3
+        or n["gate"] > 1e-3
+        or n["chorus"] > 1e-3
+        or n["muffle"] > 1e-3
+        or n["echo"] > 1e-3
+        or n["reverb"] > 1e-3
         or n["telephone"] > 1e-3
     )
 
@@ -158,6 +195,134 @@ def _ringmod(wav: np.ndarray, sr: int, amount: float, hz: float) -> np.ndarray:
     carrier = np.sin(2.0 * np.pi * hz * t).astype(np.float32)
     wet = wav * carrier
     return (1.0 - amount) * wav + amount * wet
+
+
+def _tremolo(wav: np.ndarray, sr: int, depth: float, hz: float) -> np.ndarray:
+    """Amplitude LFO — throb / helicopter / UFO. ``depth`` 0 = untouched, 1 =
+    fully chopped to silence at the LFO troughs."""
+    d = float(np.clip(depth, 0.0, 1.0))
+    if d <= 1e-3 or wav.size == 0:
+        return np.asarray(wav, dtype=np.float32)
+    t = np.arange(wav.size, dtype=np.float32) / float(sr)
+    lfo = 0.5 + 0.5 * np.sin(2.0 * np.pi * float(hz) * t).astype(np.float32)
+    mod = (1.0 - d) + d * lfo
+    return (np.asarray(wav, dtype=np.float32) * mod).astype(np.float32)
+
+
+def _gate(wav: np.ndarray, sr: int, depth: float, hz: float) -> np.ndarray:
+    """Rhythmic on/off chop (glitch / stutter / bad-transmission). 50%-duty
+    square LFO with short edge ramps so it doesn't click."""
+    d = float(np.clip(depth, 0.0, 1.0))
+    if d <= 1e-3 or wav.size == 0:
+        return np.asarray(wav, dtype=np.float32)
+    t = np.arange(wav.size, dtype=np.float32) / float(sr)
+    phase = (t * float(hz)) % 1.0
+    sq = (phase < 0.5).astype(np.float32)
+    win = max(1, int(sr * 0.003))  # ~3 ms declick ramp on the edges
+    if win > 1:
+        k = np.ones(win, dtype=np.float32) / float(win)
+        sq = np.convolve(sq, k, mode="same").astype(np.float32)
+    mod = (1.0 - d) + d * sq
+    return (np.asarray(wav, dtype=np.float32) * mod).astype(np.float32)
+
+
+def _chorus(wav: np.ndarray, sr: int, amount: float, hz: float) -> np.ndarray:
+    """Short modulated delay — shimmer / whoosh / underwater thicken. A single
+    voice swept ±6 ms around an 18 ms base, mixed with the dry signal."""
+    a = float(np.clip(amount, 0.0, 1.0))
+    if a <= 1e-3 or wav.size == 0:
+        return np.asarray(wav, dtype=np.float32)
+    dry = np.asarray(wav, dtype=np.float32)
+    n = dry.size
+    base = sr * 0.018
+    depth = sr * 0.006
+    t = np.arange(n, dtype=np.float32) / float(sr)
+    lfo = np.sin(2.0 * np.pi * float(hz) * t).astype(np.float32)
+    read = np.arange(n, dtype=np.float32) - (base + depth * lfo)
+    read = np.clip(read, 0.0, n - 1.0)
+    i0 = np.floor(read).astype(np.int64)
+    i1 = np.clip(i0 + 1, 0, n - 1)
+    frac = (read - i0).astype(np.float32)
+    wet = (dry[i0] * (1.0 - frac) + dry[i1] * frac).astype(np.float32)
+    return ((1.0 - 0.5 * a) * dry + (0.5 * a) * wet).astype(np.float32)
+
+
+def _muffle(wav: np.ndarray, sr: int, amount: float) -> np.ndarray:
+    """Distance / "behind a door" low-pass. ``amount`` sweeps the cutoff from a
+    gentle 8 kHz roll-off down to a heavily-muffled ~600 Hz, wet/dry mixed so 0
+    is transparent. Best-effort: skipped if SciPy's filters aren't available."""
+    a = float(np.clip(amount, 0.0, 1.0))
+    if a <= 1e-3 or wav.size == 0:
+        return np.asarray(wav, dtype=np.float32)
+    dry = np.asarray(wav, dtype=np.float32)
+    try:
+        from scipy.signal import butter, sosfilt
+
+        cutoff = float(np.interp(a, [0.0, 1.0], [8000.0, 600.0]))
+        nyq = sr * 0.5
+        cutoff = min(cutoff, nyq * 0.98)
+        sos = butter(4, cutoff / nyq, btype="low", output="sos")
+        wet = sosfilt(sos, dry).astype(np.float32)
+    except Exception:  # noqa: BLE001 — SciPy missing / filter blew up → passthrough
+        return dry
+    return ((1.0 - a) * dry + a * wet).astype(np.float32)
+
+
+def _echo(wav: np.ndarray, sr: int, amount: float, delay_ms: float, feedback: float) -> np.ndarray:
+    """Feedback delay — a slap-back at low feedback, a bouncing-off-alley-walls
+    repeat-train as feedback climbs. Echoes are *added* on top of the dry signal
+    (ambience, not a crossfade), and the clip is extended by the decaying tail so
+    the last bounce isn't cut off. ``amount`` sets the wet level."""
+    a = float(np.clip(amount, 0.0, 1.0))
+    if a <= 1e-3 or wav.size == 0:
+        return np.asarray(wav, dtype=np.float32)
+    dry = np.asarray(wav, dtype=np.float32)
+    delay = max(1, int(round(sr * float(delay_ms) / 1000.0)))
+    fb = float(np.clip(feedback, 0.0, 0.92))
+    # How many repeats until the tail drops below ~2% (one audible slap if fb≈0).
+    taps = 1 if fb <= 1e-3 else int(min(60, max(1, np.ceil(np.log(0.02) / np.log(fb)))))
+    out = np.zeros(dry.size + delay * taps, dtype=np.float32)
+    out[: dry.size] = dry
+    for k in range(1, taps + 1):
+        g = fb ** (k - 1) if fb > 1e-3 else 1.0
+        if g < 0.02:
+            break
+        off = delay * k
+        out[off : off + dry.size] += dry * (a * g)
+    return out
+
+
+def _reverb(wav: np.ndarray, sr: int, amount: float, size: float) -> np.ndarray:
+    """Synthetic room/hall/cave reverb: convolve with an exponentially-decaying
+    noise impulse response whose length grows with ``size`` (~0.25 s small room →
+    ~2.4 s cave). The IR is energy-normalised and seeded so a given setting is
+    deterministic. Wet tail is added on top of the dry signal."""
+    a = float(np.clip(amount, 0.0, 1.0))
+    if a <= 1e-3 or wav.size == 0:
+        return np.asarray(wav, dtype=np.float32)
+    dry = np.asarray(wav, dtype=np.float32)
+    sz = float(np.clip(size, 0.0, 1.0))
+    decay_s = 0.25 + 2.15 * sz
+    ir_len = max(1, int(sr * decay_s))
+    rng = np.random.default_rng(1234567)  # deterministic IR per length
+    t = np.arange(ir_len, dtype=np.float32) / float(sr)
+    ir = rng.standard_normal(ir_len).astype(np.float32) * np.exp(-t * (6.0 / decay_s)).astype(np.float32)
+    pre = min(ir_len, int(sr * 0.012))  # small pre-delay before the tail blooms
+    if pre > 0:
+        ir[:pre] = 0.0
+    norm = float(np.sqrt(np.sum(ir * ir))) or 1.0
+    ir = ir / norm
+    try:
+        from scipy.signal import fftconvolve
+
+        wet = fftconvolve(dry, ir)[: dry.size + ir_len].astype(np.float32)
+    except Exception:  # noqa: BLE001 — SciPy missing → slower numpy conv
+        wet = np.convolve(dry, ir)[: dry.size + ir_len].astype(np.float32)
+    out = np.zeros(wet.size, dtype=np.float32)
+    out[: dry.size] = dry
+    # Energy-normalised IR makes the wet quiet; ~2x brings it to a musical level.
+    out += (a * 2.0) * wet
+    return out
 
 
 def _telephone(wav: np.ndarray, sr: int, amount: float, crackle: float) -> np.ndarray:
@@ -264,6 +429,22 @@ def apply_transforms(
         out = _drive(out, n["drive"])
     if n["ringmod"] > 1e-3:
         out = _ringmod(out, sr, n["ringmod"], n["ringmod_hz"])
+    # Amplitude movement (tremolo / gate) then chorus thickening, then distance
+    # muffle — all shaping the source before it's placed in a space.
+    if n["tremolo"] > 1e-3:
+        out = _tremolo(out, sr, n["tremolo"], n["tremolo_hz"])
+    if n["gate"] > 1e-3:
+        out = _gate(out, sr, n["gate"], n["gate_hz"])
+    if n["chorus"] > 1e-3:
+        out = _chorus(out, sr, n["chorus"], n["chorus_hz"])
+    if n["muffle"] > 1e-3:
+        out = _muffle(out, sr, n["muffle"])
+    # Space (echo → reverb) sits on the coloured source, modelling the room it's
+    # heard in before any transmission channel.
+    if n["echo"] > 1e-3:
+        out = _echo(out, sr, n["echo"], n["echo_ms"], n["echo_feedback"])
+    if n["reverb"] > 1e-3:
+        out = _reverb(out, sr, n["reverb"], n["reverb_size"])
     # Telephone last: it models the transmission channel, so it colours whatever
     # voice the earlier stages produced.
     if n["telephone"] > 1e-3:

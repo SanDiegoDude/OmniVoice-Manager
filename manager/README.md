@@ -176,15 +176,23 @@ manager/
   generation.py      script parsing (Speaker N: → lines)
   service.py         payload building + output saving
   voices.py          voice library scanning/saving
+  samples.py         foley/SFX sound library (verbatim, content-addressed)
   audio_utils.py     load / isolate-glue / RMS boost / trim / save
-  scripts_ai.py      smart-script via OpenAI-compatible APIs + Google Vertex AI
+  scripts_ai.py      smart-script + generic reprompt (OpenAI-compatible + Vertex)
   sessions.py        multitrack projects: per-clip media pool, additive mix, edits
   actionhist.py      multi-step undo/redo (content-addressed snapshot ring)
   history.py         persistent JSON history (smart-script drafts)
   jobs.py            background job manager (progress polling)
+  plugin_service.py  plug-in host wiring: host hooks + the Stable Audio 3 job
+  plugins/           plug-in host (discovery, sidecar lifecycle, GPU serialization)
   vocal_isolation/   ported Mel-Band-Roformer isolator
+plugins/             external plug-in bundles (each: plugin.json + sidecar + .venv)
+  _sdk/              the pure-stdlib sidecar SDK (omnivoice_plugin.py)
+  stable-audio-3/    first plug-in: Stable Audio 3 foley/SFX generation
 web/                 React + Vite + TS frontend (build → web/dist)
 custom_voices/       your reference voice library
+custom_sounds/       your foley/SFX sound library
 output/              generated audio
 data/history/        persisted history
+data/plugins/        plug-in runtime: tmp audio + per-plugin logs
 ```

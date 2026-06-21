@@ -84,12 +84,14 @@ export function Studio({
   onGenerateScript,
   onLucky,
   onRegenSegment,
+  onRegenFoley,
   onEditSegment,
   onReflow,
   onInsertSegment,
   onEnsureSession,
   onImportToStudio,
   onAddSpeaker,
+  onAddAudioTrack,
   onUpdateSpeaker,
   onRemoveSpeaker,
   onDeleteSegment,
@@ -103,6 +105,7 @@ export function Studio({
   onRegenChannel,
   onUploadChannel,
   onUploadAudioSegment,
+  onPluginGenerate,
   onAutoSlice,
   onBulkSlice,
   onSetInpaint,
@@ -149,6 +152,7 @@ export function Studio({
   onGenerateScript: (prompt: string, numSpeakers: number, speakers: SpeakerConfig[], existing: string, monologue: boolean) => Promise<{ title: string; script: string } | null>
   onLucky: (body: GenerateBody, title: string, multitrack?: boolean) => void
   onRegenSegment: (index: number, text?: string) => void
+  onRegenFoley: (index: number) => void
   onEditSegment: (index: number, fields: { start_s?: number; trim_start_s?: number; trim_end_s?: number; speed?: number; gain_db?: number }) => void
   onReflow: (fields: { gap_ms?: number; speed?: number }) => void
   onInsertSegment: (speakerId: string, text: string, startS: number, ripple: boolean) => void
@@ -160,6 +164,7 @@ export function Studio({
     params: GenParams,
   ) => Promise<void>
   onAddSpeaker: (cfg: SpeakerConfig) => void
+  onAddAudioTrack: () => void
   onUpdateSpeaker: (pos: string, cfg: SpeakerConfig) => void
   onRemoveSpeaker: (pos: string) => Promise<MultitrackSession | null> | void
   onDeleteSegment: (index: number, ripple: boolean) => void
@@ -173,6 +178,7 @@ export function Studio({
   onRegenChannel: (pos: string) => void
   onUploadChannel: (file: File, name: string, startS?: number) => void
   onUploadAudioSegment: (pos: string, file: File, startS: number, ripple: boolean) => void | Promise<void>
+  onPluginGenerate: (pluginId: string, track: { pos: string; startS: number; ripple: boolean }) => void
   onAutoSlice: (index: number) => Promise<void>
   onBulkSlice: () => Promise<void>
   onSetInpaint: (index: number, enabled: boolean) => Promise<void>
@@ -1055,6 +1061,7 @@ export function Studio({
           <MultitrackEditor
             session={session}
             onRegen={handleRegen}
+            onRegenFoley={onRegenFoley}
             onEditSegment={onEditSegment}
             onReflow={onReflow}
             onInsertSegment={onInsertSegment}
@@ -1069,6 +1076,7 @@ export function Studio({
             onRegenChannel={onRegenChannel}
             onUploadChannel={onUploadChannel}
             onUploadAudioSegment={onUploadAudioSegment}
+            onPluginGenerate={onPluginGenerate}
             onAutoSlice={onAutoSlice}
             onBulkSlice={onBulkSlice}
             onSetInpaint={onSetInpaint}
@@ -1076,6 +1084,7 @@ export function Studio({
             onPromoteChannel={handlePromote}
             onRemoveTrack={handleRemoveTrack}
             onAddSpeaker={addSpeakerFromEditor}
+            onAddAudioTrack={onAddAudioTrack}
             newTrackDefaults={templateOf(speakers[0])}
             voices={voices}
             onMergeSegments={onMergeSegments}
