@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from . import actionhist, samples, scripts_ai, service, sessions
+from . import actionhist, samples, scripts_ai, service, sessions, voices
 from .config import DATA_DIR, settings
 
 TMP_DIR = DATA_DIR / "tmp"
@@ -40,6 +40,14 @@ def build_host_hooks() -> Dict[str, Callable[[str, Dict[str, Any]], Any]]:
         rel = params.get("rel_path") or f"generated/{plugin_id}/sound"
         return samples.import_file(src, rel)
 
+    def save_voice(plugin_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Ingest a WAV into the shared voice library — the voice-side twin of
+        ``save_sound``. Preserves the file verbatim (native sample rate /
+        channels), de-duping against existing voices like a manual import."""
+        src = Path(params["audio_path"])
+        rel = params.get("rel_path") or f"generated/{plugin_id}/voice"
+        return voices.import_file(src, rel)
+
     def set_project_data(plugin_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
         return sessions.set_plugin_data(
             params["session_id"], plugin_id, params.get("data"), bool(params.get("merge", True))
@@ -51,6 +59,7 @@ def build_host_hooks() -> Dict[str, Callable[[str, Dict[str, Any]], Any]]:
     return {
         "reprompt": reprompt,
         "save_sound": save_sound,
+        "save_voice": save_voice,
         "set_project_data": set_project_data,
         "get_project_data": get_project_data,
     }
@@ -76,9 +85,17 @@ def make_generate_job(
     save: bool = True,
     save_path: Optional[str] = None,
     session_id: Optional[str] = None,
+    library: Optional[str] = None,
 ) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
     fields = {k: v for k, v in (fields or {}).items() if v is not None}
     raw_prompt = str(fields.get("prompt") or "").strip()
+    # Which library a host-side save (save=True) lands in. Defaults to the sound
+    # library to preserve the original foley behaviour; "voice" ingests into the
+    # voice library instead. (Deferred saves from the Lab pick the library at
+    # save time, so this only governs the eager save=True path.)
+    library = (library or "sound").strip().lower()
+    if library not in ("sound", "voice"):
+        library = "sound"
 
     def job(progress_cb: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
         # Run the isolated sidecar (GPU-serialized + reprompt handled in-sidecar).
@@ -101,19 +118,26 @@ def make_generate_job(
             "sample_rate": result.get("sample_rate"),
         }
 
-        # Persist into the sound library, or stage a one-off preview the caller
-        # can audition and (optionally) save later via /api/sounds/import-temp.
+        # Echo the requested target so the Lab can default its save-to selector.
+        out["library"] = library
+        # Persist into the chosen library, or stage a one-off preview the caller
+        # can audition and (optionally) save later via /api/{sounds,voices}/import-temp.
         if audio_path and save:
             rel = save_path or f"generated/{service.slugify(raw_prompt or plugin_id)}"
-            desc = samples.import_file(Path(audio_path), rel)
-            out["sound"] = desc
-            out["audio_url"] = f"/api/audio/sound/{desc['id']}"
+            if library == "voice":
+                desc = voices.import_file(Path(audio_path), rel)
+                out["voice"] = desc
+                out["audio_url"] = f"/api/audio/voice/{desc['id']}"
+            else:
+                desc = samples.import_file(Path(audio_path), rel)
+                out["sound"] = desc
+                out["audio_url"] = f"/api/audio/sound/{desc['id']}"
         elif audio_path:
             TMP_DIR.mkdir(parents=True, exist_ok=True)
             name = f"_plugin_{uuid.uuid4().hex}.wav"
             shutil.copy2(audio_path, TMP_DIR / name)
             out["audio_url"] = f"/api/audio/temp/{name}"
-            out["temp"] = name  # handle for a deferred save into the library
+            out["temp"] = name  # handle for a deferred save into either library
 
         # Tag the open project via the plug-in data hook (travels in the .omvp).
         if session_id:
@@ -124,7 +148,9 @@ def make_generate_job(
                     {"last_generated": {
                         "prompt": out["prompt"],
                         "category": out.get("category"),
+                        "library": out.get("library"),
                         "sound": out.get("sound"),
+                        "voice": out.get("voice"),
                     }},
                     merge=True,
                 )

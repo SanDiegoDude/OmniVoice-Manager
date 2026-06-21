@@ -262,7 +262,8 @@ export function SoundLibrary({
         )}
       </div>
       {genActions.length > 0 && (
-        <div style={{ padding: 12, borderTop: '1px solid var(--border-soft)', display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        <div style={{ padding: 12, borderTop: '1px solid var(--border-soft)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {/* Plug-in actions stack vertically and grow downward. */}
           {genActions.map((c) => (
             <button key={`${c.plugin.id}:${c.label}`} className="btn" onClick={() => onGenerate(c.plugin.id)} title={c.plugin.description}>
               {c.icon ? `${c.icon} ` : ''}{c.label}

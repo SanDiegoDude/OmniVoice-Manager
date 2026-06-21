@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { Voice, VoiceNode } from '../api'
 import { downloadFile } from '../api'
 import { usePersistentBool } from '../uiState'
+import { useContributions } from '../pluginRegistry'
 
 // Windows Explorer-style ordering: case-insensitive and number-aware, so
 // "clip2" sorts before "clip10" and casing doesn't fragment the list.
@@ -157,6 +158,7 @@ export function VoiceLibrary({
   onCreateFolder,
   onRefresh,
   onOpenLab,
+  onPluginGenerate,
 }: {
   tree: VoiceNode | null
   flat: Voice[]
@@ -174,10 +176,14 @@ export function VoiceLibrary({
   onCreateFolder: (path: string) => void
   onRefresh: () => void
   onOpenLab: () => void
+  onPluginGenerate?: (pluginId: string) => void
 }) {
   const [query, setQuery] = useState('')
   const [newFolder, setNewFolder] = useState<string | null>(null)
   const [open, setOpen] = usePersistentBool('ov-voicelib', true)
+  // Plug-ins that contribute a voice-library action (e.g. a URL grabber) light
+  // up here automatically — the voice-side twin of sound.library.action.
+  const genActions = useContributions('voice.library.action')
 
   const actions: RowActions = { selected, playingUrl, onPlay, onCast, onPick, onDelete, onMove, onRename, onEdit, folders }
 
@@ -264,10 +270,16 @@ export function VoiceLibrary({
           </div>
         )}
       </div>
-      <div style={{ padding: 12, borderTop: '1px solid var(--border-soft)' }}>
+      <div style={{ padding: 12, borderTop: '1px solid var(--border-soft)', display: 'flex', flexDirection: 'column', gap: 6 }}>
         <button className="btn" onClick={onOpenLab}>
           ⚗ Voice Lab — Isolate & Boost
         </button>
+        {/* Plug-in actions grow downward, below the built-in lab button. */}
+        {onPluginGenerate && genActions.map((c) => (
+          <button key={`${c.plugin.id}:${c.label}`} className="btn" onClick={() => onPluginGenerate(c.plugin.id)} title={c.plugin.description}>
+            {c.icon ? `${c.icon} ` : ''}{c.label}
+          </button>
+        ))}
       </div>
        </>
       )}

@@ -498,6 +498,32 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
     const rect = canvas.getBoundingClientRect()
     const x = e.clientX - rect.left
     const w = rect.width
+
+    // Middle-button drag → pan the visible window horizontally (grab-scroll).
+    // preventDefault stops the browser's middle-click autoscroll cursor.
+    if (e.button === 1) {
+      e.preventDefault()
+      const v0 = { ...viewRef.current }
+      const span = Math.max(1e-6, v0.t1 - v0.t0)
+      const startX = e.clientX
+      const onMove = (ev: MouseEvent) => {
+        const dur = duration
+        if (!dur) return
+        let dt = -((ev.clientX - startX) / Math.max(1, w)) * span
+        let t0 = v0.t0 + dt
+        let t1 = v0.t1 + dt
+        if (t0 < 0) { t1 -= t0; t0 = 0 }
+        if (t1 > dur) { t0 -= t1 - dur; t1 = dur }
+        setView({ t0: Math.max(0, t0), t1: Math.min(dur, t1) })
+      }
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+      }
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+      return
+    }
     // Hit-test handles at their drawn (possibly ghosted) position; when both
     // are within grab range prefer the closer one.
     const hs = handleDrawX(trimRef.current.start, w)
@@ -716,7 +742,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
       />
       <div className="hint" style={{ marginTop: 4, opacity: 0.7 }}>
         Drag the <span style={{ color: '#34d399' }}>green</span>/<span style={{ color: '#ef4444' }}>red</span> edges to
-        trim · shift+scroll to zoom
+        trim · shift+scroll to zoom · middle-drag to pan
       </div>
 
       <audio ref={audioElRef} src={url} preload="auto" crossOrigin="anonymous" onEnded={handleEnded} style={{ display: 'none' }} />

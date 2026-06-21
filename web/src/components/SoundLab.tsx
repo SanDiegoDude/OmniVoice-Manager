@@ -23,6 +23,8 @@ export function SoundLab({
   placement = 'library',
   sessionId,
   folders,
+  voiceFolders = [],
+  defaultLibrary,
   scriptConfigured,
   scriptLabel,
   librarySounds,
@@ -36,6 +38,8 @@ export function SoundLab({
   placement?: 'library' | 'track'
   sessionId: string | null
   folders: string[]
+  voiceFolders?: string[]
+  defaultLibrary?: 'voice' | 'sound'
   scriptConfigured: boolean
   scriptLabel?: string | null
   librarySounds?: Sound[]
@@ -50,6 +54,12 @@ export function SoundLab({
   const lab = plugin?.ui?.lab
   const fields = useMemo<PluginLabField[]>(() => lab?.fields ?? [], [lab])
   const categories = lab?.categories ?? []
+  // Which libraries this plug-in may save into. Order sets the default; a picker
+  // shows when more than one is allowed. Omitted → sound-only (legacy foley).
+  const saveTargets = useMemo<('voice' | 'sound')[]>(
+    () => (lab?.save_to && lab.save_to.length ? lab.save_to : ['sound']),
+    [lab],
+  )
 
   const [category, setCategory] = useState<string>(categories[0]?.id ?? '')
   const [vals, setVals] = useState<Vals>({})
@@ -78,6 +88,8 @@ export function SoundLab({
   const [saved, setSaved] = useState(false)
   const [saveFolder, setSaveFolder] = useState('')
   const [saveName, setSaveName] = useState('')
+  // The library a generated take saves into (voice | sound), within saveTargets.
+  const [saveLib, setSaveLib] = useState<'voice' | 'sound'>(saveTargets[0])
   // Set when a generate fails because the gated model couldn't be fetched — the
   // help note then pops with the exact reason even if the cache probe was racy.
   const [gateError, setGateError] = useState<string | null>(null)
@@ -106,6 +118,8 @@ export function SoundLab({
     setGainDb(0)
     setSaved(false)
     setSaveName('')
+    setSaveFolder('')
+    setSaveLib(defaultLibrary && saveTargets.includes(defaultLibrary) ? defaultLibrary : saveTargets[0])
     setGateError(null)
     setRepromptTried(false)
     setEnhancedPrompt(null)
@@ -218,6 +232,7 @@ export function SoundLab({
         reprompt: useReprompt,
         save: false, // always preview first; saving is a deliberate second step
         session_id: sessionId,
+        library: saveLib,
       })
       for (;;) {
         if (cancelled.current) return
@@ -277,20 +292,36 @@ export function SoundLab({
     const name = (saveName.trim() || suggestName()).replace(/\//g, '-')
     const fileName = name.toLowerCase().endsWith('.wav') ? name : `${name}.wav`
     const path = saveFolder ? `${saveFolder}/${name}` : name
+    // Bake the previewed trim + gain into the saved file (same render as the
+    // player's ⬇). Speed stays out — it's a timeline knob, not a baked one.
+    const baked = trimGainActive() && previewRef.current
     try {
-      let desc: Sound
-      if (trimGainActive() && previewRef.current) {
-        // Bake the previewed trim + gain into the saved file (same render as the
-        // player's ⬇). Speed stays out — it's a timeline knob, not a baked one.
-        const blob = await previewRef.current.exportBlob()
-        if (!blob) throw new Error('Preview is still loading — try again in a moment.')
-        desc = await api.uploadSound(new File([blob], fileName, { type: 'audio/wav' }), saveFolder)
+      let savedName: string
+      if (saveLib === 'voice') {
+        if (baked) {
+          const blob = await previewRef.current!.exportBlob()
+          if (!blob) throw new Error('Preview is still loading — try again in a moment.')
+          // Stage the trimmed take, then ingest it into the voice library.
+          const up = await api.uploadVoice(new File([blob], fileName, { type: 'audio/wav' }))
+          savedName = (await api.importTempVoice(up.upload_id, path)).name
+        } else {
+          savedName = (await api.importTempVoice(result.temp, path)).name
+        }
+        notify(`Saved “${savedName}” to the voice library`)
       } else {
-        desc = await api.importTempSound(result.temp, path)
+        let desc: Sound
+        if (baked) {
+          const blob = await previewRef.current!.exportBlob()
+          if (!blob) throw new Error('Preview is still loading — try again in a moment.')
+          desc = await api.uploadSound(new File([blob], fileName, { type: 'audio/wav' }), saveFolder)
+        } else {
+          desc = await api.importTempSound(result.temp, path)
+        }
+        savedName = desc.name
+        notify(`Saved “${savedName}” to the sound library`)
       }
       setSaved(true)
       onGenerated()
-      notify(`Saved “${desc.name}” to the sound library`)
     } catch (e) {
       notify((e as Error).message)
     }
@@ -558,19 +589,33 @@ export function SoundLab({
       {/* Save / place actions */}
       {tab === 'generate' && previewUrl && (
         <div className="card" style={{ marginTop: 12, padding: 12 }}>
-          <div className="field-label">Save to library</div>
+          <div className="field-label">Save to {saveLib === 'voice' ? 'voice' : 'sound'} library</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-            <select className="input" style={{ minWidth: 160 }} value={saveFolder} onChange={(e) => setSaveFolder(e.target.value)}>
+            {saveTargets.length > 1 && (
+              <select
+                className="input"
+                style={{ minWidth: 110 }}
+                value={saveLib}
+                onChange={(e) => { setSaveLib(e.target.value as 'voice' | 'sound'); setSaveFolder(''); setSaved(false) }}
+                title="Which library to save this clip into"
+              >
+                {saveTargets.map((t) => (
+                  <option key={t} value={t}>{t === 'voice' ? '🎙 Voice' : '🔊 Sound'}</option>
+                ))}
+              </select>
+            )}
+            <select className="input" style={{ minWidth: 150 }} value={saveFolder} onChange={(e) => setSaveFolder(e.target.value)}>
               <option value="">📁 Library root</option>
-              {folders.map((f) => (
+              {(saveLib === 'voice' ? voiceFolders : folders).map((f) => (
                 <option key={f} value={f}>📁 {f}</option>
               ))}
             </select>
-            <input className="input" style={{ flex: 1, minWidth: 160 }} placeholder="filename" value={saveName} onChange={(e) => setSaveName(e.target.value)} />
+            <input className="input" style={{ flex: 1, minWidth: 140 }} placeholder="filename" value={saveName} onChange={(e) => setSaveName(e.target.value)} />
             <button className="btn" disabled={saved} onClick={doSave}>{saved ? '✓ Saved' : '💾 Save'}</button>
           </div>
           <div className="hint" style={{ marginTop: 4 }}>
-            Saved as <code>{(saveFolder ? saveFolder + '/' : '') + (saveName.trim() || suggestName())}</code>. Use the player’s ⬇ to download without saving.
+            Saved to the <strong>{saveLib === 'voice' ? 'voice' : 'sound'}</strong> library as{' '}
+            <code>{(saveFolder ? saveFolder + '/' : '') + (saveName.trim() || suggestName())}</code>. Use the player’s ⬇ to download without saving.
             {trimGainActive() && ' Your trim & gain are baked into the saved copy.'}
             {Math.abs(speed - 1) > 0.01 && ' (Speed is a timeline knob — it applies when you place on a track, not to library copies.)'}
           </div>

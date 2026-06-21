@@ -13,6 +13,7 @@ import { TagLibrary } from './components/TagLibrary'
 import { VoiceLibrary } from './components/VoiceLibrary'
 import { SoundLibrary } from './components/SoundLibrary'
 import { SoundLab } from './components/SoundLab'
+import { ClipGrabberLab } from './components/ClipGrabberLab'
 import { SampleEditModal, type EditTarget } from './components/SampleEditModal'
 import { usePlugins } from './pluginRegistry'
 import { claimPlayback, releasePlayback } from './audioBus'
@@ -39,7 +40,7 @@ export default function App() {
   // Sound Lab (generic plug-in generation modal): which plug-in, and whether
   // we're generating standalone (library) or to drop onto a timeline track.
   const [soundLab, setSoundLab] = useState<
-    { pluginId: string; placement: 'library' | 'track'; track?: { pos: string; startS: number; ripple: boolean } } | null
+    { pluginId: string; placement: 'library' | 'track'; defaultLibrary?: 'voice' | 'sound'; track?: { pos: string; startS: number; ripple: boolean } } | null
   >(null)
   const plugins = usePlugins()
   // Studio exposes its cast-voice action through this ref so the library can
@@ -1363,6 +1364,7 @@ export default function App() {
             onCreateFolder={createFolderFn}
             onRefresh={refreshVoices}
             onOpenLab={() => setLabOpen(true)}
+            onPluginGenerate={(pluginId) => setSoundLab({ pluginId, placement: 'library', defaultLibrary: 'voice' })}
           />
           <SoundLibrary
             tree={soundTree}
@@ -1382,7 +1384,7 @@ export default function App() {
             onCreateFolder={createSoundFolder}
             onUpload={uploadSoundFn}
             onRefresh={refreshSounds}
-            onGenerate={(pluginId) => setSoundLab({ pluginId, placement: 'library' })}
+            onGenerate={(pluginId) => setSoundLab({ pluginId, placement: 'library', defaultLibrary: 'sound' })}
           />
           <TagLibrary notify={notify} />
         </div>
@@ -1513,20 +1515,45 @@ export default function App() {
       {labOpen && (
           <VoiceLab voices={voices} folders={folders} onClose={() => setLabOpen(false)} onSaved={refreshVoices} notify={notify} />
       )}
-      <SoundLab
-        open={!!soundLab}
-        plugin={plugins.find((p) => p.id === soundLab?.pluginId) ?? null}
-        onClose={() => setSoundLab(null)}
-        placement={soundLab?.placement ?? 'library'}
-        sessionId={session?.id ?? null}
-        folders={soundFolders}
-        scriptConfigured={!!info?.script_ai?.configured}
-        scriptLabel={info?.script_ai?.label ?? null}
-        librarySounds={sounds}
-        onGenerated={refreshSounds}
-        onPlaceInTrack={placeGeneratedInTrack}
-        notify={notify}
-      />
+      {(() => {
+        const labPlugin = plugins.find((p) => p.id === soundLab?.pluginId) ?? null
+        // Plug-ins that declare the "url-clipper" kind get the dedicated Clip
+        // Grabber lab (fetch → rich editor → clean → save); everything else uses
+        // the generic schema-driven Sound Lab.
+        const isClipper = labPlugin?.ui?.kind === 'url-clipper'
+        return (
+          <>
+            <SoundLab
+              open={!!soundLab && !isClipper}
+              plugin={isClipper ? null : labPlugin}
+              onClose={() => setSoundLab(null)}
+              placement={soundLab?.placement ?? 'library'}
+              sessionId={session?.id ?? null}
+              folders={soundFolders}
+              voiceFolders={folders}
+              defaultLibrary={soundLab?.defaultLibrary}
+              scriptConfigured={!!info?.script_ai?.configured}
+              scriptLabel={info?.script_ai?.label ?? null}
+              librarySounds={sounds}
+              onGenerated={() => { refreshSounds(); refreshVoices() }}
+              onPlaceInTrack={placeGeneratedInTrack}
+              notify={notify}
+            />
+            <ClipGrabberLab
+              open={!!soundLab && isClipper}
+              plugin={isClipper ? labPlugin : null}
+              onClose={() => setSoundLab(null)}
+              sessionId={session?.id ?? null}
+              folders={soundFolders}
+              voiceFolders={folders}
+              defaultLibrary={soundLab?.defaultLibrary ?? 'voice'}
+              outputFormat={info?.output_format}
+              onSaved={() => { refreshSounds(); refreshVoices() }}
+              notify={notify}
+            />
+          </>
+        )
+      })()}
       <SampleEditModal
         open={!!editTarget}
         target={editTarget}

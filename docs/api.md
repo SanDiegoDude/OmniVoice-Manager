@@ -30,6 +30,7 @@ Every UI capability is also an HTTP endpoint, so you can drive the Manager from 
 | Method & Path | Purpose |
 | --- | --- |
 | `GET /api/voices` · `POST /api/voices/upload` · `POST /api/voices/process` | Voice library + Voice Lab |
+| `POST /api/voices/import-temp` | Save a staged/generated temp preview (`{temp, path}`) into the voice library (the plug-in deferred-save twin of `/api/sounds/import-temp`) |
 | `DELETE /api/voices/{id}` | Delete a voice |
 | `GET /api/outputs` · `DELETE /api/outputs/{filename}` · `POST …/{filename}/rename` | Browse / delete / rename finished output files |
 | `GET /api/projects` | List saved, re-openable projects (multitrack sessions) |
@@ -74,9 +75,9 @@ See the [sound library guide](sound-library.md).
 | --- | --- |
 | `GET /api/plugins` · `GET /api/plugins/{id}` | List plug-ins / one manifest (public + `installed`) |
 | `POST /api/plugins/{id}/health` · `…/unload` | Start+ping the sidecar · stop it and free resources |
-| `POST /api/plugins/{id}/generate` | Generic audio-generator job: schema-driven `{fields, reprompt, save, save_path, session_id}` → queued job |
+| `POST /api/plugins/{id}/generate` | Generic audio-generator job: schema-driven `{fields, reprompt, save, save_path, session_id, library}` → queued job. `library: "voice" \| "sound"` targets the library on an eager `save=true` |
 | `POST /api/plugins/{id}/invoke` | Generic command (`{cmd, payload}`) → queued job |
-| `POST /api/sounds/import-temp` | Save a generated preview (`{temp, path}`) into the sound library (deferred save) |
+| `POST /api/sounds/import-temp` · `POST /api/voices/import-temp` | Save a generated preview (`{temp, path}`) into the sound / voice library (deferred save) |
 
 Plug-in work runs as **async jobs** (poll `/api/jobs/{job_id}`). See the
 [plug-in authoring guide](plugins.md).

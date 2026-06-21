@@ -93,6 +93,10 @@ export interface PluginLab {
   categories?: PluginLabCategory[]
   fields: PluginLabField[]
   reprompt?: boolean
+  /** Which libraries a generated take may be saved into. Order sets the
+   * default; the Lab shows a target picker when more than one is allowed.
+   * Omitted → ["sound"] (the original foley behaviour). */
+  save_to?: ('voice' | 'sound')[]
 }
 
 export interface PluginUI {
@@ -133,6 +137,7 @@ export interface PluginGenerateBody {
   save?: boolean
   save_path?: string | null
   session_id?: string | null
+  library?: 'voice' | 'sound'
 }
 
 export type SpeakerMode = 'clone' | 'design' | 'auto'
@@ -558,6 +563,24 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  // Save a staged/generated temp preview into the voice library (deferred save —
+  // the voice-side twin of importTempSound).
+  importTempVoice: (temp: string, path: string) =>
+    jfetch<Voice>('/api/voices/import-temp', { method: 'POST', body: JSON.stringify({ temp, path }) }),
+
+  /** Transcode a WAV blob to the configured export format (mp3/flac) server-side
+   * and return the encoded bytes + suggested filename (honors output_format). */
+  async encodeAudio(blob: Blob, name: string) {
+    const fd = new FormData()
+    fd.append('file', blob, `${name}.wav`)
+    fd.append('name', name)
+    const res = await fetch('/api/audio/encode', { method: 'POST', body: fd })
+    if (!res.ok) throw new Error('Encode failed')
+    const cd = res.headers.get('Content-Disposition') || ''
+    const m = /filename\*?=(?:UTF-8'')?["']?([^"';]+)/i.exec(cd)
+    return { blob: await res.blob(), filename: m ? decodeURIComponent(m[1]) : `${name}.wav` }
+  },
 
   // ---- Sound library (foley / SFX) ----
   sounds: () => jfetch<{ tree: SoundNode; flat: Sound[]; folders: string[] }>('/api/sounds'),

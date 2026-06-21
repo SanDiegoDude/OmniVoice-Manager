@@ -94,6 +94,9 @@ class Context:
             using the host's configured Script-AI provider.
           * ``save_sound(rel_path, audio_path, sample_rate=None)`` — ingest a wav
             into the shared foley/SFX sound library; returns its descriptor.
+          * ``save_voice(rel_path, audio_path)`` — ingest a wav into the shared
+            voice library (the voice-side twin of ``save_sound``); returns its
+            descriptor.
           * ``set_project_data(session_id, data, merge=True)`` — persist arbitrary
             plug-in state onto a project (travels inside the .omvp bundle).
           * ``get_project_data(session_id)`` — read this plug-in's project state.

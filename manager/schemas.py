@@ -70,6 +70,9 @@ class PluginGenerateRequest(BaseModel):
     save: bool = True
     save_path: Optional[str] = None
     session_id: Optional[str] = None
+    # Which library an eager save (save=True) lands in: "sound" (default, foley)
+    # or "voice". Deferred Lab saves choose at save time via the import-temp routes.
+    library: Optional[str] = None
 
 
 class ImportTempSoundRequest(BaseModel):

@@ -274,20 +274,41 @@ the UI just by shipping a `plugin.json`, with zero plug-in JavaScript.
 | Slot | Where it appears |
 | --- | --- |
 | `sound.library.action` | A button in the Sound Library panel footer. |
+| `voice.library.action` | A button in the Voice Library panel footer (the voice-side twin — for plug-ins that produce reference voices). |
 | `track.menu.empty` | An item in the multitrack double-click menu on an audio track (drops the result at the click point). |
 
 A contribution's `opens` names a `ui` block to open — today `"lab"`, the
-schema-driven Sound Lab. **Field types:** `textarea`, `number`, `seed`, `toggle`,
-`select`, `text`. `primary` marks the headline field, `advanced` tucks a field
-behind a disclosure, and `categories` (optional) offer one-click presets that set
+schema-driven Sound Lab.
+
+**`ui.kind` can select a dedicated lab.** Most generators use `"audio-generator"`
+→ the generic schema-driven Sound Lab. The host can also ship a *purpose-built*
+editor for a kind: `"url-clipper"` renders the **Clip Grabber** lab — a fetch box
+that runs the plug-in's `generate` (a pure download) then loads the result into
+the shared waveform editor for trim / zoom / pan / cleanup / save. A `url-clipper`
+plug-in only implements the download; trimming, cleanup and the library save are
+host-driven against the standard endpoints. Its `lab.fields` are unused beyond the
+`url` field, but `lab.save_to` still applies.
+
+For the default `audio-generator` lab — **field types:** `textarea`, `number`,
+`seed`, `toggle`, `select`, `text`. `primary` marks the headline field, `advanced`
+tucks a field behind a disclosure, and `categories` (optional) offer one-click presets that set
 field defaults (e.g. duration). `filename_from` picks the field whose first ~15
 chars seed the suggested save filename. `reprompt: true` shows the "smart
 reprompt" toggle (the plug-in's sidecar performs the rewrite via the
 [`reprompt` host hook](#host-hooks-the-api-available-to-plug-ins)).
 
+**Save target — `lab.save_to`.** By default a generated take saves into the
+**sound** library (foley). A plug-in that produces voices (or either) declares
+`"save_to": ["voice", "sound"]` (order sets the default) and the Lab shows a
+small library picker in the Save box, ingesting into whichever the user
+chooses. Omit it for the legacy sound-only behaviour. Pair it with a
+`voice.library.action` contribution so the plug-in also launches from the Voice
+Library panel.
+
 The Sound Lab generates to a temp **preview** (waveform, autoplay, speed/dB,
-download), then **saves on demand** to a chosen folder — or, from a track, drops
-straight onto the timeline. None of this is plug-in-specific code.
+download), then **saves on demand** into the chosen library + folder (voice or
+sound, per `save_to`) — or, from a track, drops straight onto the timeline. None
+of this is plug-in-specific code.
 
 ---
 
@@ -382,6 +403,7 @@ so a plug-in can only ever scope its own data. Available hooks:
 | --- | --- | --- |
 | `reprompt` | `reprompt(system=..., user=..., temperature=0.7, max_tokens=400, provider_id=None)` → `{"text": ...}` | Rewrite a prompt with the host's **configured Script-AI provider** (OpenAI-compatible or Vertex). Lets a plug-in reuse OmniVoice's LLM instead of bundling its own. |
 | `save_sound` | `save_sound(audio_path=..., rel_path=...)` → sound descriptor | Ingest a WAV into the shared [sound library](sound-library.md) (native sample rate / channels preserved). |
+| `save_voice` | `save_voice(audio_path=..., rel_path=...)` → voice descriptor | Ingest a WAV into the shared **voice library** — the voice-side twin of `save_sound` (verbatim, de-duped). Lets a plug-in add reference voices, not just foley. |
 | `set_project_data` | `set_project_data(session_id=..., data=..., merge=True)` | Persist arbitrary plug-in state onto a project. See below. |
 | `get_project_data` | `get_project_data(session_id=...)` → your stored data | Read this plug-in's project state back. |
 
@@ -508,9 +530,10 @@ all of which the reference SA3 sidecar does. Expect MVP-grade speed on MPS.
 | `POST /api/plugins/{id}/health` | Start (if needed) and ping the sidecar. |
 | `POST /api/plugins/{id}/unload` | Stop the sidecar and free its resources. |
 | `GET /api/plugins/{id}/help` | Serve the plug-in's bundled help page (`needs.help`, e.g. gated-model troubleshooting). |
-| `POST /api/plugins/{id}/generate` | Generic audio-generator job (schema-driven, see below) → queued job. |
+| `POST /api/plugins/{id}/generate` | Generic audio-generator job (schema-driven, see below) → queued job. Optional `library: "voice" \| "sound"` picks the library for an eager `save=true`. |
 | `POST /api/plugins/{id}/invoke` | Generic command invoke (`{cmd, payload}`) → queued job. |
-| `POST /api/sounds/import-temp` | Save a generated preview (`{temp, path}`) into the sound library. |
+| `POST /api/sounds/import-temp` | Save a generated preview (`{temp, path}`) into the **sound** library. |
+| `POST /api/voices/import-temp` | Save a generated preview (`{temp, path}`) into the **voice** library (the deferred-save twin). |
 
 Plug-in commands that do real work run as **async jobs**: the call returns a job
 id, poll `GET /api/jobs/{job_id}` for progress/result (same as synthesis).

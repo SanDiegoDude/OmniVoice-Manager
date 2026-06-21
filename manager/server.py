@@ -419,6 +419,26 @@ async def upload_voice(file: UploadFile = File(...)):
     }
 
 
+@app.post("/api/voices/import-temp")
+def import_temp_voice(req: ImportTempSoundRequest):
+    """Save a generated/staged temp preview into the **voice** library — the
+    voice-side twin of /api/sounds/import-temp. Lets a plug-in's Lab take land in
+    the voice library after the user auditions it (deferred save)."""
+    name = req.temp.strip()
+    if not name or "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(400, "Bad temp reference")
+    src = TMP_DIR / name
+    if not src.exists():
+        raise HTTPException(404, "That preview has expired — regenerate it.")
+    rel = req.path.strip()
+    if not rel:
+        raise HTTPException(400, "A save path is required")
+    try:
+        return voices.import_file(src, rel)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 def _load_process_source(source: str, is_upload: bool) -> np.ndarray:
     if is_upload:
         path = TMP_DIR / source
@@ -775,6 +795,7 @@ def plugin_generate(plugin_id: str, req: PluginGenerateRequest):
         plugin_host, plugin_id, req.fields,
         reprompt=req.reprompt, provider_id=req.provider_id,
         save=req.save, save_path=req.save_path, session_id=req.session_id,
+        library=req.library,
     )
     try:
         job_id = job_manager.submit(
