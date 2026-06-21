@@ -453,9 +453,14 @@ def _process_audio(
     trim_start: float = 0.0,
     trim_end: float = 0.0,
     transforms: Optional[Dict[str, float]] = None,
+    speed: float = 1.0,
     progress_cb=None,
 ) -> np.ndarray:
     audio = _manual_trim(audio, trim_start, trim_end)
+    if speed and abs(speed - 1.0) > 1e-3:
+        from .audio_utils import time_stretch
+
+        audio = time_stretch(np.asarray(audio, dtype=np.float32), speed)
     if isolate:
         res = model_manager.isolate({"waveform": audio, "sample_rate": 24000}, progress_cb=progress_cb)
         audio = np.asarray(res["waveform"], dtype=np.float32)
@@ -483,7 +488,7 @@ def preview_voice(req: ProcessVoiceRequest):
     audio = _load_process_source(req.source, req.is_upload)
     processed = _process_audio(
         audio, req.isolate, req.trim, req.normalize, req.gain_db, req.dereverb, req.dereverb_method,
-        req.trim_start, req.trim_end, req.transforms,
+        req.trim_start, req.trim_end, req.transforms, speed=req.speed,
     )
     name = f"_preview_{uuid.uuid4().hex}.wav"
     save_wav(TMP_DIR / name, processed)
@@ -495,7 +500,7 @@ def process_voice(req: ProcessVoiceRequest):
     audio = _load_process_source(req.source, req.is_upload)
     processed = _process_audio(
         audio, req.isolate, req.trim, req.normalize, req.gain_db, req.dereverb, req.dereverb_method,
-        req.trim_start, req.trim_end, req.transforms,
+        req.trim_start, req.trim_end, req.transforms, speed=req.speed,
     )
 
     # Overwrite-in-place: save back to the selected library voice. Strip the
@@ -514,6 +519,32 @@ def process_voice(req: ProcessVoiceRequest):
 
     descriptor = voices.save_voice(req.save_as, processed)
     return descriptor
+
+
+def _library_download(path: Path, base_name: str) -> FileResponse:
+    """Serve a library sample in the UI's configured export format (MP3/FLAC),
+    so downloads aren't giant WAVs. WAV setting → original file untouched."""
+    safe = service.slugify(base_name, default="sample")
+    fmt = settings.output_format
+    if (fmt or "wav").lower() == "wav":
+        return FileResponse(str(path), media_type=media_type_for(path), filename=f"{safe}{path.suffix}")
+    import librosa
+
+    from .audio_utils import encode_audio
+
+    wav, sr = librosa.load(str(path), sr=None, mono=True)
+    out = TMP_DIR / f"dl_{uuid.uuid4().hex}.{fmt}"
+    enc = encode_audio(out, np.asarray(wav, dtype=np.float32), int(sr), fmt=fmt, bitrate=settings.output_bitrate)
+    return FileResponse(str(enc), media_type=media_type_for(enc), filename=f"{safe}{enc.suffix}")
+
+
+@app.get("/api/voices/{voice_id:path}/download")
+def download_voice(voice_id: str):
+    try:
+        path = voices.resolve_voice_path(voice_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Voice not found")
+    return _library_download(path, Path(voice_id).stem)
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +594,15 @@ def del_sound(sound_id: str):
     return {"ok": True}
 
 
+@app.get("/api/sounds/{sound_id:path}/download")
+def download_sound(sound_id: str):
+    try:
+        path = samples.resolve_sound_path(sound_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Sound not found")
+    return _library_download(path, Path(sound_id).stem)
+
+
 @app.post("/api/sounds/import-temp")
 def import_temp_sound(req: ImportTempSoundRequest):
     """Save a generated temp preview into the sound library (deferred save — the
@@ -582,23 +622,38 @@ def import_temp_sound(req: ImportTempSoundRequest):
         raise HTTPException(400, str(e))
 
 
-@app.post("/api/sounds/transform")
-def transform_sound(req: SoundTransformRequest):
-    """Sample editor (sound side): bake vocal/audio transforms onto an existing
-    library sound, then save a copy or overwrite it in place. Transforms run via
-    the shared 24k-mono engine, so the edited sample is a 24k-mono WAV (fine for
-    SFX/foley; the original verbatim file is untouched unless overwriting)."""
-    from .voice_transforms import apply_transforms, has_effect
-
+def _process_sound_source(req: SoundTransformRequest) -> np.ndarray:
+    """Shared cleanup+transform render for the sound sample editor (preview/save)."""
     try:
         samples.resolve_sound_path(req.id)  # validates + 404s on a bad/missing id
         audio = samples.load_sound_audio(req.id)
     except FileNotFoundError:
         raise HTTPException(404, "Sound not found")
-    audio = np.asarray(audio, dtype=np.float32)
-    if has_effect(req.transforms):
-        audio = apply_transforms(audio, 24000, req.transforms)
-    audio = peak_normalize(audio, 0.98)
+    return _process_audio(
+        np.asarray(audio, dtype=np.float32),
+        req.isolate, req.trim, req.normalize, req.gain_db, req.dereverb, req.dereverb_method,
+        req.trim_start, req.trim_end, req.transforms, speed=req.speed,
+    )
+
+
+@app.post("/api/sounds/preview")
+def preview_sound(req: SoundTransformRequest):
+    """Audition the sample editor's cleanup/transforms on a library sound without
+    saving (parallels /api/voices/preview)."""
+    processed = _process_sound_source(req)
+    name = f"_preview_{uuid.uuid4().hex}.wav"
+    save_wav(TMP_DIR / name, processed, 24000)
+    return {"audio_url": f"/api/audio/temp/{name}", "duration_s": duration_seconds(processed, 24000)}
+
+
+@app.post("/api/sounds/transform")
+def transform_sound(req: SoundTransformRequest):
+    """Sample editor (sound side): clean up (trim/normalize/de-reverb/gain/speed)
+    and/or bake vocal/audio transforms onto an existing library sound, then save a
+    copy or overwrite it in place. Runs through the shared 24k-mono engine, so the
+    edited sample is a 24k-mono WAV (fine for SFX/foley; the original verbatim file
+    is untouched unless overwriting)."""
+    audio = _process_sound_source(req)
 
     if req.overwrite:
         # Replace in place; transformed audio is always WAV, so drop the original
@@ -1485,6 +1540,35 @@ def multitrack_segment_clip(sid: str, index: int, dl: int = 0, orig: int = 0):
     path = TMP_DIR / f"clip_{sid}_{index}{'_orig' if orig else ''}.wav"
     save_wav(path, audio, sr)
     return FileResponse(str(path), media_type="audio/wav", filename=f"{safe}.wav")
+
+
+@app.post("/api/audio/encode")
+async def audio_encode(file: UploadFile = File(...), name: str = Form("audio")):
+    """Transcode an uploaded WAV into the UI's configured export format
+    (MP3/FLAC/…). Used by the Sound Lab "Download" button: the preview audio
+    (with any client-side trim/gain baked in) is rendered to WAV in the browser,
+    then sent here so quick shares aren't giant lossless files."""
+    import librosa
+
+    from .audio_utils import encode_audio
+
+    data = await file.read()
+    tmp = TMP_DIR / f"enc_{uuid.uuid4().hex}.bin"
+    tmp.write_bytes(data)
+    try:
+        wav, in_sr = librosa.load(str(tmp), sr=None, mono=True)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Could not read audio: {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+    safe = service.slugify(name, default="audio")
+    fmt = settings.output_format
+    path = TMP_DIR / f"enc_{uuid.uuid4().hex}.{fmt}"
+    out = encode_audio(
+        path, np.asarray(wav, dtype=np.float32), int(in_sr),
+        fmt=fmt, bitrate=settings.output_bitrate,
+    )
+    return FileResponse(str(out), media_type=media_type_for(out), filename=f"{safe}{out.suffix}")
 
 
 @app.get("/api/multitrack/{sid}/download")

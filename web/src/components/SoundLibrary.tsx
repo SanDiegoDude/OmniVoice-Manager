@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import type { Sound, SoundNode } from '../api'
+import { downloadFile } from '../api'
 import { usePersistentBool } from '../uiState'
 import { useContributions } from '../pluginRegistry'
 
@@ -36,69 +37,74 @@ function SoundRow({ s, ...a }: { s: Sound } & RowActions) {
 
   return (
     <div
-      className={`voice-item ${a.selected === s.id ? 'sel' : ''}`}
-      title={`${s.id}\nClick to add to the open project · Shift-click for a new channel`}
+      className={`voice-item row2 ${a.selected === s.id ? 'sel' : ''}`}
+      title={`${s.id}\nClick the name to add to the open project · Shift-click for a new channel`}
     >
-      <button
-        className={`vplay ${playing ? 'stop' : 'go'}`}
-        onClick={(e) => { e.stopPropagation(); a.onPlay(s) }}
-        title={playing ? 'Stop' : 'Play'}
-      >
-        {playing ? '■' : '▶'}
-      </button>
-      {renaming != null ? (
-        <input
-          className="input vname-edit"
-          autoFocus
-          value={renaming}
-          onClick={(e) => e.stopPropagation()}
-          onChange={(e) => setRenaming(e.target.value)}
-          onKeyDown={(e) => {
-            e.stopPropagation()
-            if (e.key === 'Enter') commitRename()
-            else if (e.key === 'Escape') setRenaming(null)
-          }}
-          onBlur={commitRename}
-        />
-      ) : (
-        <span
-          className="vname"
-          onClick={(e) => { a.onPick(s); if (a.hasSession) a.onAddToProject(s, { newTrack: e.shiftKey }) }}
+      <div className="vrow-name">
+        {renaming != null ? (
+          <input
+            className="input vname-edit"
+            autoFocus
+            value={renaming}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => setRenaming(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation()
+              if (e.key === 'Enter') commitRename()
+              else if (e.key === 'Escape') setRenaming(null)
+            }}
+            onBlur={commitRename}
+          />
+        ) : (
+          <span
+            className="vname"
+            onClick={(e) => { a.onPick(s); if (a.hasSession) a.onAddToProject(s, { newTrack: e.shiftKey }) }}
+          >
+            {baseName(s)}
+          </span>
+        )}
+      </div>
+      <div className="vrow-bar" onClick={(e) => e.stopPropagation()}>
+        <button
+          className={`vplay ${playing ? 'stop' : 'go'}`}
+          onClick={(e) => { e.stopPropagation(); a.onPlay(s) }}
+          title={playing ? 'Stop' : 'Play'}
         >
-          {baseName(s)}
-        </span>
-      )}
-      {confirmDel ? (
-        <span className="vrow-confirm" onClick={(e) => e.stopPropagation()}>
-          <span className="hint">Delete?</span>
-          <button className="vplay danger" title="Confirm delete" onClick={() => { setConfirmDel(false); a.onDelete(s) }}>✓</button>
-          <button className="vplay" title="Cancel" onClick={() => setConfirmDel(false)}>✕</button>
-        </span>
-      ) : moving ? (
-        <select
-          className="input vmove-select"
-          autoFocus
-          defaultValue={s.folder}
-          onClick={(e) => e.stopPropagation()}
-          onChange={(e) => { setMoving(false); if (e.target.value !== s.folder) a.onMove(s.id, e.target.value) }}
-          onBlur={() => setMoving(false)}
-        >
-          <option value="">(library root)</option>
-          {a.folders.map((f) => (
-            <option key={f} value={f}>{f}</option>
-          ))}
-        </select>
-      ) : (
-        <span className="vrow-actions" onClick={(e) => e.stopPropagation()}>
-          {a.hasSession && (
-            <button className="vplay" title="Add to project" onClick={() => a.onAddToProject(s)}>＋</button>
-          )}
-          <button className="vplay" title="Move to folder…" onClick={() => setMoving(true)}>📂</button>
-          <button className="vplay" title="Rename" onClick={() => setRenaming(baseName(s))}>✎</button>
-          <button className="vplay" title="Edit — add transforms (echo, reverb, muffle…), save copy or overwrite" onClick={() => a.onEdit(s)}>🎚</button>
-          <button className="vplay" title="Delete" onClick={() => setConfirmDel(true)}>🗑</button>
-        </span>
-      )}
+          {playing ? '■' : '▶'}
+        </button>
+        {confirmDel ? (
+          <span className="vrow-confirm">
+            <span className="hint">Delete?</span>
+            <button className="vplay danger" title="Confirm delete" onClick={() => { setConfirmDel(false); a.onDelete(s) }}>✓</button>
+            <button className="vplay" title="Cancel" onClick={() => setConfirmDel(false)}>✕</button>
+          </span>
+        ) : moving ? (
+          <select
+            className="input vmove-select"
+            autoFocus
+            defaultValue={s.folder}
+            onChange={(e) => { setMoving(false); if (e.target.value !== s.folder) a.onMove(s.id, e.target.value) }}
+            onBlur={() => setMoving(false)}
+          >
+            <option value="">(library root)</option>
+            {a.folders.map((f) => (
+              <option key={f} value={f}>{f}</option>
+            ))}
+          </select>
+        ) : (
+          <>
+            {a.hasSession && (
+              <button className="vplay" title="Add to project" onClick={() => a.onAddToProject(s)}>＋</button>
+            )}
+            <span className="grow" />
+            <button className="vplay" title="Move to folder…" onClick={() => setMoving(true)}>📂</button>
+            <button className="vplay" title="Rename" onClick={() => setRenaming(baseName(s))}>✎</button>
+            <button className="vplay" title="Edit — clean up & add transforms, save a copy or overwrite" onClick={() => a.onEdit(s)}>🎚</button>
+            <button className="vplay" title="Download (honors MP3/FLAC export setting)" onClick={() => void downloadFile(`/api/sounds/${s.id}/download`, baseName(s)).catch(() => {})}>⬇</button>
+            <button className="vplay" title="Delete" onClick={() => setConfirmDel(true)}>🗑</button>
+          </>
+        )}
+      </div>
     </div>
   )
 }

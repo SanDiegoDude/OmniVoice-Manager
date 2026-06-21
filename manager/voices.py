@@ -121,13 +121,20 @@ def rename_voice(voice_id: str, new_name: str) -> Dict[str, object]:
 
 
 def voice_tree() -> Dict[str, object]:
-    """Nested folder tree for the UI."""
+    """Nested folder tree for the UI. Includes empty folders (freshly created
+    ones have no voices yet) so they show up the moment they're made."""
     root: Dict[str, object] = {"name": "", "folders": {}, "voices": []}
-    for v in list_voices():
-        parts = Path(v["id"]).parts
+
+    def _descend(parts) -> Dict[str, object]:
         node = root
-        for folder in parts[:-1]:
+        for folder in parts:
             node = node["folders"].setdefault(folder, {"name": folder, "folders": {}, "voices": []})  # type: ignore[index]
+        return node
+
+    for folder in list_folders():
+        _descend(Path(folder).parts)
+    for v in list_voices():
+        node = _descend(Path(v["id"]).parts[:-1])
         node["voices"].append(v)  # type: ignore[index]
     return root
 

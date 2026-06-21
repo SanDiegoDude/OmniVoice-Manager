@@ -490,6 +490,24 @@ async function jfetch<T>(url: string, opts?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
+/** Download a server file (honoring its Content-Disposition filename) without
+ * tripping the app's beforeunload "leave site?" guard. Fetches to a blob and
+ * clicks an anchor at the blob URL instead of navigating. Used by the library
+ * row download buttons (which hit the format-aware /download endpoints). */
+export async function downloadFile(url: string, fallbackName = 'audio') {
+  const res = await fetch(url)
+  if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Download failed')
+  const cd = res.headers.get('Content-Disposition') || ''
+  const m = /filename\*?=(?:UTF-8'')?["']?([^"';]+)/i.exec(cd)
+  const name = m ? decodeURIComponent(m[1]) : fallbackName
+  const blob = await res.blob()
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = name
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000)
+}
+
 export const api = {
   systemInfo: () => jfetch<SystemInfo>('/api/system/info'),
   loadModel: (model_id?: string, load_on_demand?: boolean) =>
@@ -552,6 +570,8 @@ export const api = {
     jfetch<Sound>('/api/sounds/rename', { method: 'POST', body: JSON.stringify({ id, name }) }),
   transformSound: (body: SoundTransformBody) =>
     jfetch<Sound & { duration_s?: number }>('/api/sounds/transform', { method: 'POST', body: JSON.stringify(body) }),
+  previewSound: (body: SoundTransformBody) =>
+    jfetch<{ audio_url: string; duration_s: number }>('/api/sounds/preview', { method: 'POST', body: JSON.stringify(body) }),
   async uploadSound(file: File, folder = '') {
     const fd = new FormData()
     fd.append('file', file)
@@ -897,6 +917,7 @@ export interface ProcessVoiceBody {
   dereverb?: boolean
   dereverb_method?: 'roformer' | 'deepfilternet'
   gain_db: number
+  speed?: number
   trim_start?: number
   trim_end?: number
   overwrite?: boolean
@@ -907,6 +928,15 @@ export interface ProcessVoiceBody {
 export interface SoundTransformBody {
   id: string
   transforms: VocalTransform
+  isolate?: boolean
+  trim?: boolean
+  normalize?: boolean
+  dereverb?: boolean
+  dereverb_method?: 'roformer' | 'deepfilternet'
+  gain_db?: number
+  speed?: number
+  trim_start?: number
+  trim_end?: number
   overwrite?: boolean
   save_as?: string
 }

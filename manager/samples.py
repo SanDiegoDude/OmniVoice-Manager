@@ -123,12 +123,20 @@ def rename_sound(sound_id: str, new_name: str) -> Dict[str, object]:
 
 
 def sound_tree() -> Dict[str, object]:
+    """Nested folder tree for the UI. Includes empty folders so a freshly
+    created folder appears immediately (before any sound lands in it)."""
     root: Dict[str, object] = {"name": "", "folders": {}, "sounds": []}
-    for s in list_sounds():
-        parts = Path(s["id"]).parts
+
+    def _descend(parts) -> Dict[str, object]:
         node = root
-        for folder in parts[:-1]:
+        for folder in parts:
             node = node["folders"].setdefault(folder, {"name": folder, "folders": {}, "sounds": []})  # type: ignore[index]
+        return node
+
+    for folder in list_folders():
+        _descend(Path(folder).parts)
+    for s in list_sounds():
+        node = _descend(Path(s["id"]).parts[:-1])
         node["sounds"].append(s)  # type: ignore[index]
     return root
 

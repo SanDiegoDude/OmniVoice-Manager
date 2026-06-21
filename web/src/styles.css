@@ -233,6 +233,20 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px;
 .vrow-confirm .hint { font-size: 11px; }
 .vname-edit { flex: 1; padding: 2px 6px; height: 24px; font-size: 12.5px; }
 .vmove-select { flex: 1; padding: 2px 4px; height: 24px; font-size: 12px; }
+/* Compact 2-row library entry: name on its own row (always has full width),
+   a quick-actions bar (play/stop + tools) underneath. Keeps names readable
+   no matter how many row tools we add. */
+.voice-item.row2 { flex-direction: column; align-items: stretch; gap: 3px; padding: 5px 8px; }
+.voice-item.row2 .vrow-name { display: flex; min-width: 0; }
+.voice-item.row2 .vrow-name .vname { flex: 1; font-size: 12.5px; }
+.voice-item.row2 .vrow-bar { display: flex; align-items: center; gap: 1px; min-width: 0; }
+.voice-item.row2 .vrow-bar .grow { flex: 1; }
+.voice-item.row2 .vrow-bar .vplay { padding: 2px 4px; font-size: 14px; opacity: .72; }
+.voice-item.row2:hover .vrow-bar .vplay { opacity: 1; }
+.voice-item.row2 .vrow-bar .vplay.go, .voice-item.row2 .vrow-bar .vplay.stop { opacity: 1; }
+.voice-item.row2 .vrow-bar .vname-edit,
+.voice-item.row2 .vrow-bar .vmove-select { flex: 1; }
+.voice-item.row2 .vrow-confirm { flex: 1; justify-content: flex-end; }
 .vlib-search { display: flex; align-items: center; gap: 6px; padding: 8px 10px 4px; }
 .vlib-search .input { flex: 1; height: 28px; padding: 2px 8px; font-size: 12.5px; }
 .tag-lib-head { display: flex; align-items: center; gap: 6px; }

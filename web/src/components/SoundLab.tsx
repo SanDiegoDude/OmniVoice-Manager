@@ -533,6 +533,7 @@ export function SoundLab({
                 autoPlay
                 playbackRate={speed}
                 filename={`${suggestName()}.wav`}
+                encodeUrl="/api/audio/encode"
                 onTrimChange={(start, end, dur) => setTrim({ start, end, dur })}
                 onGainChange={setGainDb}
               />

@@ -64,6 +64,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   showDownload?: boolean
   showPlay?: boolean
   downloadUrl?: string
+  encodeUrl?: string
   initialStart?: number
   initialEnd?: number
   initialGain?: number
@@ -80,6 +81,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
   showDownload = true,
   showPlay = true,
   downloadUrl,
+  encodeUrl,
   initialStart,
   initialEnd,
   initialGain,
@@ -639,10 +641,33 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
     try {
       const blob = await renderEditedBlob()
       if (!blob) return
-      const a = document.createElement('a')
-      a.href = URL.createObjectURL(blob)
       const base = (filename || 'audio.wav').replace(/\.[^.]+$/, '')
       const edited = start > 0.01 || end < duration - 0.01 || Math.abs(gainDb) > 0.01
+      // Transcode to the configured export format (MP3/FLAC) server-side so
+      // downloads aren't giant WAVs. Trim/gain are already baked into `blob`.
+      if (encodeUrl) {
+        try {
+          const fd = new FormData()
+          fd.append('file', blob, `${base}.wav`)
+          fd.append('name', edited ? `${base}_edited` : base)
+          const res = await fetch(encodeUrl, { method: 'POST', body: fd })
+          if (res.ok) {
+            const cd = res.headers.get('Content-Disposition') || ''
+            const m = /filename\*?=(?:UTF-8'')?["']?([^"';]+)/i.exec(cd)
+            const enc = await res.blob()
+            const a = document.createElement('a')
+            a.href = URL.createObjectURL(enc)
+            a.download = m ? decodeURIComponent(m[1]) : `${base}.wav`
+            a.click()
+            setTimeout(() => URL.revokeObjectURL(a.href), 2000)
+            return
+          }
+        } catch {
+          // Fall through to a raw WAV download if transcoding fails.
+        }
+      }
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
       a.download = edited ? `${base}_edited.wav` : `${base}.wav`
       a.click()
       setTimeout(() => URL.revokeObjectURL(a.href), 2000)

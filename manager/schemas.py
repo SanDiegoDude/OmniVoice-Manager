@@ -250,6 +250,8 @@ class ProcessVoiceRequest(BaseModel):
     dereverb: bool = False
     dereverb_method: str = "roformer"  # roformer | deepfilternet
     gain_db: float = 0.0
+    # Pitch-preserving speed (1.0 = unchanged). Sample editor's speed knob.
+    speed: float = 1.0
     # Manual trim window (seconds) applied to the source before processing. A
     # trim_end of 0 (or <= trim_start) means "keep to the end".
     trim_start: float = 0.0
@@ -262,11 +264,24 @@ class ProcessVoiceRequest(BaseModel):
 
 
 class SoundTransformRequest(BaseModel):
-    """Sample editor (sound library side): bake vocal/audio transforms onto an
-    existing library sound and save a copy or overwrite it in place."""
+    """Sample editor (sound library side): clean up and/or bake vocal/audio
+    transforms onto an existing library sound, then save a copy or overwrite it
+    in place. Shares the cleanup pipeline with the Voice Lab (the editor just
+    hides the vocal-only toggles for sounds)."""
 
     id: str  # sound id (relative path) in custom_sounds/
     transforms: Dict[str, float] = Field(default_factory=dict)
+    # Cleanup pipeline (parallels ProcessVoiceRequest). Default off so an edit
+    # only changes what the user explicitly turns on.
+    isolate: bool = False
+    trim: bool = False
+    normalize: bool = False
+    dereverb: bool = False
+    dereverb_method: str = "roformer"
+    gain_db: float = 0.0
+    speed: float = 1.0
+    trim_start: float = 0.0
+    trim_end: float = 0.0
     overwrite: bool = False  # replace the source sound in place
     save_as: Optional[str] = None  # destination rel path when saving a copy
 

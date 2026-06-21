@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { Voice, VoiceNode } from '../api'
+import { downloadFile } from '../api'
 import { usePersistentBool } from '../uiState'
 
 // Windows Explorer-style ordering: case-insensitive and number-aware, so
@@ -47,64 +48,69 @@ function VoiceRow({
   }
 
   return (
-    <div className={`voice-item ${selected === v.id ? 'sel' : ''}`} title={`${v.id}\nClick to cast · Shift-click for a new track`}>
-      <button
-        className={`vplay ${playing ? 'stop' : 'go'}`}
-        onClick={(e) => { e.stopPropagation(); onPlay(v) }}
-        title={playing ? 'Stop' : 'Play'}
-      >
-        {playing ? '■' : '▶'}
-      </button>
-      {renaming != null ? (
-        <input
-          className="input vname-edit"
-          autoFocus
-          value={renaming}
-          onClick={(e) => e.stopPropagation()}
-          onChange={(e) => setRenaming(e.target.value)}
-          onKeyDown={(e) => {
-            e.stopPropagation()
-            if (e.key === 'Enter') commitRename()
-            else if (e.key === 'Escape') setRenaming(null)
-          }}
-          onBlur={commitRename}
-        />
-      ) : (
-        <span
-          className="vname"
-          onClick={(e) => { onPick(v); onCast(v.id, { newTrack: e.shiftKey }) }}
+    <div className={`voice-item row2 ${selected === v.id ? 'sel' : ''}`} title={`${v.id}\nClick the name to cast · Shift-click for a new track`}>
+      <div className="vrow-name">
+        {renaming != null ? (
+          <input
+            className="input vname-edit"
+            autoFocus
+            value={renaming}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => setRenaming(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation()
+              if (e.key === 'Enter') commitRename()
+              else if (e.key === 'Escape') setRenaming(null)
+            }}
+            onBlur={commitRename}
+          />
+        ) : (
+          <span
+            className="vname"
+            onClick={(e) => { onPick(v); onCast(v.id, { newTrack: e.shiftKey }) }}
+          >
+            {baseName(v)}
+          </span>
+        )}
+      </div>
+      <div className="vrow-bar" onClick={(e) => e.stopPropagation()}>
+        <button
+          className={`vplay ${playing ? 'stop' : 'go'}`}
+          onClick={(e) => { e.stopPropagation(); onPlay(v) }}
+          title={playing ? 'Stop' : 'Play'}
         >
-          {baseName(v)}
-        </span>
-      )}
-      {confirmDel ? (
-        <span className="vrow-confirm" onClick={(e) => e.stopPropagation()}>
-          <span className="hint">Delete?</span>
-          <button className="vplay danger" title="Confirm delete" onClick={() => { setConfirmDel(false); onDelete(v) }}>✓</button>
-          <button className="vplay" title="Cancel" onClick={() => setConfirmDel(false)}>✕</button>
-        </span>
-      ) : moving ? (
-        <select
-          className="input vmove-select"
-          autoFocus
-          defaultValue={v.folder}
-          onClick={(e) => e.stopPropagation()}
-          onChange={(e) => { setMoving(false); if (e.target.value !== v.folder) onMove(v.id, e.target.value) }}
-          onBlur={() => setMoving(false)}
-        >
-          <option value="">(library root)</option>
-          {folders.map((f) => (
-            <option key={f} value={f}>{f}</option>
-          ))}
-        </select>
-      ) : (
-        <span className="vrow-actions" onClick={(e) => e.stopPropagation()}>
-          <button className="vplay" title="Move to folder…" onClick={() => setMoving(true)}>📂</button>
-          <button className="vplay" title="Rename" onClick={() => setRenaming(baseName(v))}>✎</button>
-          <button className="vplay" title="Edit — add transforms (echo, reverb, pitch…), save copy or overwrite" onClick={() => onEdit(v)}>🎚</button>
-          <button className="vplay" title="Delete" onClick={() => setConfirmDel(true)}>🗑</button>
-        </span>
-      )}
+          {playing ? '■' : '▶'}
+        </button>
+        {confirmDel ? (
+          <span className="vrow-confirm">
+            <span className="hint">Delete?</span>
+            <button className="vplay danger" title="Confirm delete" onClick={() => { setConfirmDel(false); onDelete(v) }}>✓</button>
+            <button className="vplay" title="Cancel" onClick={() => setConfirmDel(false)}>✕</button>
+          </span>
+        ) : moving ? (
+          <select
+            className="input vmove-select"
+            autoFocus
+            defaultValue={v.folder}
+            onChange={(e) => { setMoving(false); if (e.target.value !== v.folder) onMove(v.id, e.target.value) }}
+            onBlur={() => setMoving(false)}
+          >
+            <option value="">(library root)</option>
+            {folders.map((f) => (
+              <option key={f} value={f}>{f}</option>
+            ))}
+          </select>
+        ) : (
+          <>
+            <span className="grow" />
+            <button className="vplay" title="Move to folder…" onClick={() => setMoving(true)}>📂</button>
+            <button className="vplay" title="Rename" onClick={() => setRenaming(baseName(v))}>✎</button>
+            <button className="vplay" title="Edit — clean up & add transforms, save a copy or overwrite" onClick={() => onEdit(v)}>🎚</button>
+            <button className="vplay" title="Download (honors MP3/FLAC export setting)" onClick={() => void downloadFile(`/api/voices/${v.id}/download`, baseName(v)).catch(() => {})}>⬇</button>
+            <button className="vplay" title="Delete" onClick={() => setConfirmDel(true)}>🗑</button>
+          </>
+        )}
+      </div>
     </div>
   )
 }
