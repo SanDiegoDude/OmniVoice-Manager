@@ -1,8 +1,8 @@
 @echo off
 rem Launch the OmniVoice Manager on Windows (keeps the install current, then serves).
-rem Uses the local .venv directly so `uv` does not need to be on your PATH.
+rem Uses the local .venv directly so uv does not need to be on your PATH.
 rem
-rem By default every launch KEEPS THE INSTALL CURRENT — frees the port, syncs Python
+rem By default every launch KEEPS THE INSTALL CURRENT - frees the port, syncs Python
 rem deps/CLI (uv sync), bootstraps any new/changed built-in plug-ins, and rebuilds
 rem the web UI if its sources changed. Cheap when nothing changed.
 rem
@@ -34,7 +34,7 @@ goto :parse
 
 rem --- Always free the port (only ever one manager per host) ---
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":%PORT% " ^| findstr LISTENING') do (
-    echo Freeing port %PORT% (stopping process %%p) ...
+    echo Freeing port %PORT% - stopping process %%p
     taskkill /F /PID %%p >nul 2>nul
 )
 
@@ -98,7 +98,7 @@ if "!NEEDBUILD!"=="1" (
 )
 
 :serve
-rem Prefer the venv created by `uv sync`; fall back to `uv run` if present.
+rem Prefer the venv created by uv sync; fall back to uv run if present.
 if exist ".venv\Scripts\omnivoice-manager.exe" (
     ".venv\Scripts\omnivoice-manager.exe" --port %PORT%!PASS!
     exit /b %errorlevel%
@@ -125,11 +125,14 @@ exit /b 1
 rem --- subroutine: (re)bootstrap one built-in plug-in (PDIR set by caller) ---
 :bootstrap_builtin
 set "MARKER=!PDIR!\.venv\.ov-bootstrap-ok"
+rem Fingerprint via a temp file (a for/f with inline PowerShell parens fights cmd).
 set "FP="
-for /f "usebackq delims=" %%h in (`powershell -NoProfile -Command "$f=@('!PDIR!\bootstrap.ps1','!PDIR!\plugin.json') ^| Where-Object { Test-Path $_ }; ((Get-FileHash -Algorithm MD5 $f -ErrorAction SilentlyContinue ^| ForEach-Object Hash) -join '-')"`) do set "FP=%%h"
-set "NEED=0"
+powershell -NoProfile -Command "$f=@('!PDIR!\bootstrap.ps1','!PDIR!\plugin.json') | Where-Object { Test-Path $_ }; ((Get-FileHash -Algorithm MD5 $f -ErrorAction SilentlyContinue | ForEach-Object Hash) -join '-')" > "%TEMP%\ov_fp.txt" 2>nul
+if exist "%TEMP%\ov_fp.txt" set /p FP=<"%TEMP%\ov_fp.txt"
+del "%TEMP%\ov_fp.txt" >nul 2>nul
 set "CUR="
 if exist "!MARKER!" set /p CUR=<"!MARKER!"
+set "NEED=0"
 if not exist "!PDIR!\.venv\Scripts\python.exe" set "NEED=1"
 if "%FORCE%"=="1" set "NEED=1"
 if "%FAST%"=="0" if exist "!MARKER!" if not "!CUR!"=="!FP!" set "NEED=1"
@@ -138,12 +141,12 @@ if "!NEED!"=="1" (
     if defined UVBIN set "UV=!UVBIN!"
     call "!PDIR!\bootstrap.bat"
     if errorlevel 1 (
-        echo   bootstrap failed for !PDIR! - continuing ^(tool may be unavailable^). 1>&2
+        echo   bootstrap failed for !PDIR! - continuing; tool may be unavailable. 1>&2
     ) else (
-        (echo !FP!)> "!MARKER!"
+        >"!MARKER!" echo !FP!
     )
 ) else (
-    rem venv present but unmarked (legacy / just built) → adopt as baseline.
-    if not exist "!MARKER!" (echo !FP!)> "!MARKER!"
+    rem venv present but unmarked - adopt as baseline.
+    if not exist "!MARKER!" >"!MARKER!" echo !FP!
 )
 goto :eof
