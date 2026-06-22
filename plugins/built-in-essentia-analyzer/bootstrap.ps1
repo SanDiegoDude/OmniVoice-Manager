@@ -1,12 +1,12 @@
 <#
   Build the isolated Essentia analyzer sidecar environment on Windows (+ models).
 
-    1. uv venv (.venv)  -> plugin.json points `python` at .venv/bin/python; the
+    1. uv venv (.venv)  -> plugin.json points 'python' at .venv/bin/python; the
        host auto-translates to .venv\Scripts\python.exe on Windows.
-    2. audio-analysis deps: prefer `essentia-tensorflow` (DSP + ML taggers), fall
-       back to plain `essentia` (DSP-only) if TF wheels are unavailable.
+    2. audio-analysis deps: prefer 'essentia-tensorflow' (DSP + ML taggers), fall
+       back to plain 'essentia' (DSP-only) if TF wheels are unavailable.
     3. if TF is available -> download Discogs-EffNet + MTG-Jamendo heads -> models\
-  Re-runnable / idempotent. Pure CPU — this is a built-in *service* plug-in.
+  Re-runnable / idempotent. Pure CPU - this is a built-in *service* plug-in.
 
   Usage (normally invoked via bootstrap.bat):
     .\bootstrap.bat
@@ -14,6 +14,10 @@
     powershell -ExecutionPolicy Bypass -File bootstrap.ps1
 
   Requires: uv (https://astral.sh/uv) on PATH.  Overrides (env): UV=<path>  PYVER=<3.11>
+
+  NOTE: keep this file ASCII-only. Windows PowerShell 5.1 reads UTF-8-without-BOM
+  scripts as the system code page, so non-ASCII bytes (em dashes, arrows) can be
+  misread as smart quotes and break the parser.
 #>
 [CmdletBinding()]
 param([Parameter(ValueFromRemainingArguments = $true)] [string[]] $Rest)
@@ -55,13 +59,14 @@ Log "Installing audio-analysis deps (trying essentia-tensorflow first)..."
 $env:VIRTUAL_ENV = $Venv
 & $Uv pip install --python $PyExe "numpy<2" "essentia-tensorflow"
 if ($LASTEXITCODE -ne 0) {
-    Warn "essentia-tensorflow unavailable on this platform — falling back to DSP-only 'essentia'."
+    Warn "essentia-tensorflow unavailable on this platform - falling back to DSP-only 'essentia'."
     & $Uv pip install --python $PyExe "numpy<2" "essentia"
 }
 
-# Authoritative check for the TensorFlow predict algorithms.
-$hasTf = (& $PyExe -c "import essentia.standard as es; print('1' if hasattr(es,'TensorflowPredict2D') else '0')") 2>$null
-$hasTf = ("$hasTf").Trim()
+# Authoritative check for the TensorFlow predict algorithms. The probe prints
+# 1/0 (int of bool) to avoid nested-quote/ternary parsing surprises.
+$probe = & $PyExe -c "import essentia.standard as es; print(int(hasattr(es,'TensorflowPredict2D')))" 2>$null
+$hasTf = ("$probe").Trim()
 
 # --- models (only meaningful when TF is present) -------------------------------
 if ($hasTf -eq '1') {
@@ -79,14 +84,15 @@ if ($hasTf -eq '1') {
         'classification-heads/voice_instrumental/voice_instrumental-discogs-effnet-1.json'
     )
     foreach ($rel in $files) {
-        $out = Join-Path $Models (Split-Path $rel -Leaf)
-        if ((Test-Path $out) -and ((Get-Item $out).Length -gt 0)) { Log "have $(Split-Path $rel -Leaf)"; continue }
-        Log "fetch $(Split-Path $rel -Leaf)"
+        $leaf = Split-Path $rel -Leaf
+        $out  = Join-Path $Models $leaf
+        if ((Test-Path $out) -and ((Get-Item $out).Length -gt 0)) { Log "have $leaf"; continue }
+        Log "fetch $leaf"
         try { Invoke-WebRequest -Uri "$base/$rel" -OutFile $out -UseBasicParsing }
         catch { Warn "download failed: $base/$rel"; if (Test-Path $out) { Remove-Item $out } }
     }
 } else {
-    Warn "TensorFlow algorithms not available — skipping model download. DSP analysis (bpm/key/loudness/duration) still works; learned tags are disabled on this platform."
+    Warn "TensorFlow algorithms not available - skipping model download. DSP analysis (bpm/key/loudness/duration) still works; learned tags are disabled on this platform."
 }
 
 # --- smoke check ---------------------------------------------------------------

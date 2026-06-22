@@ -132,21 +132,25 @@ if exist "%TEMP%\ov_fp.txt" set /p FP=<"%TEMP%\ov_fp.txt"
 del "%TEMP%\ov_fp.txt" >nul 2>nul
 set "CUR="
 if exist "!MARKER!" set /p CUR=<"!MARKER!"
+rem Bootstrap when the venv is missing, the success marker is absent (no confirmed
+rem install yet), --rebuild forces it, or the fingerprint changed. We never adopt an
+rem unmarked venv - a half-built env must keep retrying instead of being masked good.
 set "NEED=0"
-if not exist "!PDIR!\.venv\Scripts\python.exe" set "NEED=1"
+if not exist "!PDIR!\.venv\Scripts\python.exe" set "NEED=1" & goto :bb_decided
+if "%FAST%"=="1" goto :bb_decided
 if "%FORCE%"=="1" set "NEED=1"
-if "%FAST%"=="0" if exist "!MARKER!" if not "!CUR!"=="!FP!" set "NEED=1"
+if not exist "!MARKER!" set "NEED=1"
+if exist "!MARKER!" if not "!CUR!"=="!FP!" set "NEED=1"
+:bb_decided
 if "!NEED!"=="1" (
     echo Bootstrapping built-in plug-in: !PDIR!
     if defined UVBIN set "UV=!UVBIN!"
     call "!PDIR!\bootstrap.bat"
     if errorlevel 1 (
+        if exist "!MARKER!" del "!MARKER!" >nul 2>nul
         echo   bootstrap failed for !PDIR! - continuing; tool may be unavailable. 1>&2
     ) else (
         >"!MARKER!" echo !FP!
     )
-) else (
-    rem venv present but unmarked - adopt as baseline.
-    if not exist "!MARKER!" >"!MARKER!" echo !FP!
 )
 goto :eof

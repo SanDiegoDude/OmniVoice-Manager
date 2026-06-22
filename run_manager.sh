@@ -80,9 +80,13 @@ fi
 # First-party plug-ins ship with the host and each need their own isolated sidecar
 # env (own deps, possibly model downloads). To avoid reinstalling on every launch,
 # we fingerprint each plug-in's bootstrap inputs (bootstrap.sh + plugin.json) and
-# only (re)bootstrap when: the venv is missing, the fingerprint changed (the plug-in
-# was updated), or --rebuild forces it. The success marker lives inside .venv, so it
-# vanishes if the env is deleted. Best-effort: a failure never blocks the server.
+# only (re)bootstrap when: the venv is missing, the success marker is absent (no
+# confirmed-good install yet), the fingerprint changed (the plug-in was updated),
+# or --rebuild forces it. The marker is written ONLY after a successful bootstrap
+# and lives inside .venv, so it vanishes if the env is deleted. Crucially we do NOT
+# "adopt" an unmarked venv: a half-built env (e.g. a platform with no essentia wheel
+# that left an empty .venv) must keep retrying rather than be masked as good.
+# Best-effort: a failure never blocks the server.
 builtin_fingerprint() { cat "$1/bootstrap.sh" "$1/plugin.json" 2>/dev/null | cksum | tr -d ' '; }
 for bs in plugins/built-in-*/bootstrap.sh; do
   [ -e "$bs" ] || continue
@@ -91,23 +95,24 @@ for bs in plugins/built-in-*/bootstrap.sh; do
   fp="$(builtin_fingerprint "$pdir")"
   need=0
   if [ ! -x "$pdir/.venv/bin/python" ]; then
-    need=1                                   # not installed
+    need=1                                   # not installed at all
+  elif [ "$FAST" = "1" ]; then
+    need=0                                   # --norebuild: trust whatever is there
   elif [ "$FORCE" = "1" ]; then
     need=1                                   # --rebuild: force
-  elif [ -f "$marker" ] && [ "$FAST" != "1" ] && [ "$(cat "$marker" 2>/dev/null || true)" != "$fp" ]; then
-    need=1                                   # plug-in changed since last bootstrap
+  elif [ ! -f "$marker" ]; then
+    need=1                                   # never confirmed a successful bootstrap
+  elif [ "$(cat "$marker" 2>/dev/null || true)" != "$fp" ]; then
+    need=1                                   # plug-in changed since last good bootstrap
   fi
   if [ "$need" = "1" ]; then
     echo "Bootstrapping built-in plug-in: $pdir"
     if ( cd "$pdir" && UV="${UV_BIN:-uv}" bash ./bootstrap.sh ); then
       echo "$fp" > "$marker" 2>/dev/null || true
     else
+      rm -f "$marker" 2>/dev/null || true    # a failed run is not "done" - retry next launch
       echo "  bootstrap failed for $pdir — continuing (tool may be unavailable until fixed)." >&2
     fi
-  elif [ ! -f "$marker" ]; then
-    # venv already present but unmarked (legacy / just built) → adopt it as the
-    # current baseline rather than reinstalling.
-    echo "$fp" > "$marker" 2>/dev/null || true
   fi
 done
 
