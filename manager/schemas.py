@@ -73,6 +73,11 @@ class PluginGenerateRequest(BaseModel):
     # Which library an eager save (save=True) lands in: "sound" (default, foley)
     # or "voice". Deferred Lab saves choose at save time via the import-temp routes.
     library: Optional[str] = None
+    # Optional reference-audio handle for plug-ins that condition on input audio
+    # (e.g. ACE-Step's reference/cover). The host resolves it to a local file path
+    # the sidecar can read: "sound:<id>" (a library sound) or "temp:<name>" (an
+    # upload staged via /api/plugins/ref-upload). Never a raw client path.
+    reference_audio: Optional[str] = None
 
 
 class ImportTempSoundRequest(BaseModel):

@@ -19,6 +19,37 @@ from .config import DATA_DIR, settings
 TMP_DIR = DATA_DIR / "tmp"
 
 
+def _resolve_reference_audio(handle: Optional[str]) -> Optional[str]:
+    """Turn a reference-audio handle into a local file path for the sidecar.
+
+    Accepted forms (the only things the client may send):
+      * ``"sound:<sound_id>"`` — a sound already in the shared library.
+      * ``"temp:<name>"``      — an upload staged under ``data/tmp`` via
+        ``/api/plugins/ref-upload`` (name is a bare filename, no separators).
+
+    Returns an absolute path string, or ``None`` if the handle is empty/invalid
+    (a bad reference is treated as "no reference" rather than failing the job).
+    """
+    handle = (handle or "").strip()
+    if not handle:
+        return None
+    kind, _, rest = handle.partition(":")
+    rest = rest.strip()
+    if not rest:
+        return None
+    if kind == "sound":
+        try:
+            return str(samples.resolve_sound_path(rest))
+        except Exception:  # noqa: BLE001 — missing/invalid id → no reference
+            return None
+    if kind == "temp":
+        if "/" in rest or "\\" in rest or ".." in rest:
+            return None
+        p = TMP_DIR / rest
+        return str(p) if p.exists() else None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Host hooks — the API a plug-in sidecar can call back into via host_call().
 # Each is (plugin_id, params) -> json-serializable result. plugin_id is injected
@@ -86,9 +117,18 @@ def make_generate_job(
     save_path: Optional[str] = None,
     session_id: Optional[str] = None,
     library: Optional[str] = None,
+    reference_audio: Optional[str] = None,
 ) -> Callable[[Callable[[Dict[str, Any]], None]], Dict[str, Any]]:
     fields = {k: v for k, v in (fields or {}).items() if v is not None}
     raw_prompt = str(fields.get("prompt") or "").strip()
+
+    # Resolve an optional reference-audio *handle* into a concrete local path the
+    # sidecar can read, then hand it over in the field payload as
+    # `reference_audio_path`. Handles are opaque ("sound:<id>" / "temp:<name>") so
+    # the browser never sees or supplies a raw filesystem path.
+    ref_path = _resolve_reference_audio(reference_audio)
+    if ref_path:
+        fields["reference_audio_path"] = ref_path
     # Which library a host-side save (save=True) lands in. Defaults to the sound
     # library to preserve the original foley behaviour; "voice" ingests into the
     # voice library instead. (Deferred saves from the Lab pick the library at

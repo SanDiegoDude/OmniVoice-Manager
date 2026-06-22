@@ -138,6 +138,10 @@ export interface PluginGenerateBody {
   save_path?: string | null
   session_id?: string | null
   library?: 'voice' | 'sound'
+  /** Optional input-audio guidance handle the host resolves to a local path for
+   * the sidecar: "sound:<id>" (a library sound) or "temp:<name>" (an upload
+   * staged via uploadPluginRef). Used by music generators (e.g. ACE-Step). */
+  reference_audio?: string | null
 }
 
 export type SpeakerMode = 'clone' | 'design' | 'auto'
@@ -612,12 +616,32 @@ export const api = {
   pluginInfo: (id: string) => jfetch<Plugin>(`/api/plugins/${id}`),
   pluginUnload: (id: string) => jfetch<{ ok: boolean }>(`/api/plugins/${id}/unload`, { method: 'POST' }),
   pluginHealth: (id: string) => jfetch<Record<string, unknown>>(`/api/plugins/${id}/health`, { method: 'POST' }),
+  /** Run an arbitrary plug-in command as a background job (advanced plug-ins),
+   * e.g. ACE-Step's `write_lyrics` SongCraft helper. Returns {job_id}; poll via
+   * `job(id)` and read the command's return value off `job.result`. */
+  pluginInvoke: (id: string, cmd: string, payload: Record<string, unknown> = {}) =>
+    jfetch<{ job_id: string }>(`/api/plugins/${id}/invoke`, {
+      method: 'POST',
+      body: JSON.stringify({ cmd, payload }),
+    }),
   /** Generic audio-generator job for any plug-in (schema-driven `fields`). */
   pluginGenerate: (id: string, body: PluginGenerateBody) =>
     jfetch<{ job_id: string }>(`/api/plugins/${id}/generate`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  /** Stage an uploaded audio file as a transient *reference* for a plug-in
+   * generate (input-audio guidance). Returns an opaque handle to pass as
+   * `reference_audio`, plus a temp URL for previewing the clip. Does NOT add the
+   * file to any library. */
+  async uploadPluginRef(file: File) {
+    const fd = new FormData()
+    fd.append('file', file)
+    const res = await fetch('/api/plugins/ref-upload', { method: 'POST', body: fd })
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Upload failed')
+    return res.json() as Promise<{ handle: string; audio_url: string; name: string }>
+  },
 
   script: (body: ScriptBody) =>
     jfetch<{ title: string; script: string; model: string; num_speakers: number }>('/api/script', {

@@ -85,6 +85,17 @@ export function SoundLab({
   const [trim, setTrim] = useState<{ start: number; end: number; dur: number } | null>(null)
   const [gainDb, setGainDb] = useState(0)
   const previewRef = useRef<AudioPlayerHandle | null>(null)
+  // A "stamped" working clip: after the user commits a trim, we render the cut
+  // to a blob and treat it as the new source of truth (further edits + save act
+  // on it). null → preview the raw generated take. Held as an object URL.
+  const [workingUrl, setWorkingUrl] = useState<string | null>(null)
+  const objectUrlRef = useRef<string | null>(null)
+  const revokeWorking = () => {
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current)
+      objectUrlRef.current = null
+    }
+  }
   const [saved, setSaved] = useState(false)
   const [saveFolder, setSaveFolder] = useState('')
   const [saveName, setSaveName] = useState('')
@@ -116,6 +127,8 @@ export function SoundLab({
     setSpeed(1)
     setTrim(null)
     setGainDb(0)
+    revokeWorking()
+    setWorkingUrl(null)
     setSaved(false)
     setSaveName('')
     setSaveFolder('')
@@ -127,6 +140,7 @@ export function SoundLab({
     setPickedSound(null)
     return () => {
       cancelled.current = true
+      revokeWorking()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, plugin?.id])
@@ -220,6 +234,8 @@ export function SoundLab({
     setSpeed(1)
     setTrim(null)
     setGainDb(0)
+    revokeWorking()
+    setWorkingUrl(null)
     setProgress({ stage: 'queued' })
     const useReprompt = opts?.reprompt ?? repromptActive
     setRepromptTried(useReprompt)
@@ -287,14 +303,36 @@ export function SoundLab({
     return a.trim_start_s != null || a.trim_end_s != null || a.gain_db != null
   }
 
+  // Has the trim window been moved off the full clip? (Drives the Stamp button.)
+  const trimmed = !!trim && (trim.start > 0.02 || trim.end < trim.dur - 0.02)
+
+  // Bake the current trim + gain into a new working clip ("stamp"): the cut
+  // becomes the source of truth so further edits and the save/place act on it.
+  const stampTrim = async () => {
+    if (!previewRef.current) return
+    const blob = await previewRef.current.exportBlob()
+    if (!blob) {
+      notify('Preview is still loading — try again in a moment.')
+      return
+    }
+    revokeWorking()
+    const u = URL.createObjectURL(blob)
+    objectUrlRef.current = u
+    setTrim(null)
+    setGainDb(0)
+    setSpeed(1)
+    setWorkingUrl(u)
+  }
+
   const doSave = async () => {
     if (!result?.temp) return
     const name = (saveName.trim() || suggestName()).replace(/\//g, '-')
     const fileName = name.toLowerCase().endsWith('.wav') ? name : `${name}.wav`
     const path = saveFolder ? `${saveFolder}/${name}` : name
     // Bake the previewed trim + gain into the saved file (same render as the
-    // player's ⬇). Speed stays out — it's a timeline knob, not a baked one.
-    const baked = trimGainActive() && previewRef.current
+    // player's ⬇). Speed stays out — it's a timeline knob, not a baked one. A
+    // stamped working clip is always re-rendered (its temp handle is stale).
+    const baked = (trimGainActive() || workingUrl != null) && previewRef.current
     try {
       let savedName: string
       if (saveLib === 'voice') {
@@ -330,7 +368,7 @@ export function SoundLab({
   const place = async () => {
     if (!onPlaceInTrack) return
     const fromLib = tab === 'library' && !!pickedSound
-    const url = fromLib ? `/api/audio/sound/${pickedSound!.id}` : result?.audio_url
+    const url = fromLib ? `/api/audio/sound/${pickedSound!.id}` : (workingUrl ?? result?.audio_url)
     if (!url) return
     const fname = fromLib ? pickedSound!.filename : `${suggestName()}.wav`
     if (fromLib) {
@@ -351,7 +389,7 @@ export function SoundLab({
   }
 
   const stageMsg = progress.message || progress.stage || ''
-  const previewUrl = result?.audio_url
+  const previewUrl = workingUrl ?? result?.audio_url
   const canPlace = placement === 'track' && (tab === 'library' ? !!pickedSound : !!previewUrl)
 
   const renderField = (f: PluginLabField) => {
@@ -577,6 +615,15 @@ export function SoundLab({
                 >
                   ↻ Reroll Generation
                 </button>
+                {trimmed && (
+                  <button
+                    className="btn sm good"
+                    onClick={() => void stampTrim()}
+                    title="Cut the take to the trim lines for real — the cut becomes the new working clip."
+                  >
+                    ✂ Stamp trim ({trim!.start.toFixed(2)}s – {trim!.end.toFixed(2)}s)
+                  </button>
+                )}
                 <span className="hint" style={{ marginLeft: 4 }}>Speed · {speed.toFixed(2)}×</span>
                 <input type="range" min={0.5} max={2} step={0.05} value={speed} onChange={(e) => setSpeed(parseFloat(e.target.value))} style={{ flex: 1 }} />
                 {speed !== 1 && <button className="btn ghost sm" onClick={() => setSpeed(1)}>Reset</button>}

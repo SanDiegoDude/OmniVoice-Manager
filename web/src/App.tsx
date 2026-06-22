@@ -14,6 +14,7 @@ import { VoiceLibrary } from './components/VoiceLibrary'
 import { SoundLibrary } from './components/SoundLibrary'
 import { SoundLab } from './components/SoundLab'
 import { ClipGrabberLab } from './components/ClipGrabberLab'
+import { AceStepLab } from './components/AceStepLab'
 import { SampleEditModal, type EditTarget } from './components/SampleEditModal'
 import { usePlugins } from './pluginRegistry'
 import { claimPlayback, releasePlayback } from './audioBus'
@@ -1521,11 +1522,16 @@ export default function App() {
         // Grabber lab (fetch → rich editor → clean → save); everything else uses
         // the generic schema-driven Sound Lab.
         const isClipper = labPlugin?.ui?.kind === 'url-clipper'
+        // The "music-generator" kind (e.g. ACE-Step) gets its own lab: a prompt +
+        // lyrics + planner UI, optional input-audio guidance, reroll, and the
+        // shared editor → save to the sound library.
+        const isMusic = labPlugin?.ui?.kind === 'music-generator'
+        const isBespoke = isClipper || isMusic
         return (
           <>
             <SoundLab
-              open={!!soundLab && !isClipper}
-              plugin={isClipper ? null : labPlugin}
+              open={!!soundLab && !isBespoke}
+              plugin={isBespoke ? null : labPlugin}
               onClose={() => setSoundLab(null)}
               placement={soundLab?.placement ?? 'library'}
               sessionId={session?.id ?? null}
@@ -1548,6 +1554,19 @@ export default function App() {
               voiceFolders={folders}
               defaultLibrary={soundLab?.defaultLibrary ?? 'voice'}
               outputFormat={info?.output_format}
+              onSaved={() => { refreshSounds(); refreshVoices() }}
+              notify={notify}
+            />
+            <AceStepLab
+              open={!!soundLab && isMusic}
+              plugin={isMusic ? labPlugin : null}
+              onClose={() => setSoundLab(null)}
+              sessionId={session?.id ?? null}
+              folders={soundFolders}
+              librarySounds={sounds}
+              outputFormat={info?.output_format}
+              scriptConfigured={!!info?.script_ai?.configured}
+              scriptLabel={info?.script_ai?.label ?? null}
               onSaved={() => { refreshSounds(); refreshVoices() }}
               notify={notify}
             />

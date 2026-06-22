@@ -795,7 +795,7 @@ def plugin_generate(plugin_id: str, req: PluginGenerateRequest):
         plugin_host, plugin_id, req.fields,
         reprompt=req.reprompt, provider_id=req.provider_id,
         save=req.save, save_path=req.save_path, session_id=req.session_id,
-        library=req.library,
+        library=req.library, reference_audio=req.reference_audio,
     )
     try:
         job_id = job_manager.submit(
@@ -805,6 +805,21 @@ def plugin_generate(plugin_id: str, req: PluginGenerateRequest):
     except DuplicateJobError:
         raise HTTPException(409, "A generation was just submitted.")
     return {"job_id": job_id}
+
+
+@app.post("/api/plugins/ref-upload")
+async def plugin_ref_upload(file: UploadFile = File(...)):
+    """Stage an uploaded audio file as a transient *reference* for a plug-in
+    generate job (e.g. ACE-Step's input-music guidance). Unlike /api/sounds/upload
+    this does **not** add anything to the library — it just parks the bytes under
+    data/tmp and hands back a handle the Lab passes as `reference_audio` (the host
+    resolves it to a local path for the sidecar). Returns a temp URL too so the
+    Lab can preview the picked clip in the editor."""
+    suffix = Path(file.filename or "ref.wav").suffix or ".wav"
+    name = f"_ref_{uuid.uuid4().hex}{suffix}"
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    (TMP_DIR / name).write_bytes(await file.read())
+    return {"handle": f"temp:{name}", "audio_url": f"/api/audio/temp/{name}", "name": file.filename or name}
 
 
 @app.post("/api/plugins/{plugin_id}/invoke")
@@ -2131,9 +2146,25 @@ def audio_sound(sound_id: str):
 # ---------------------------------------------------------------------------
 # Static SPA
 # ---------------------------------------------------------------------------
+class _SpaStaticFiles(StaticFiles):
+    """StaticFiles with SPA-correct caching: the HTML entry point is always
+    revalidated (so a fresh build is picked up on the next load), while Vite's
+    content-hashed assets (…/assets/index-<hash>.js) are cached immutably. This
+    prevents the "I rebuilt but the browser still shows the old UI" class of bug."""
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        p = (path or "").lower()
+        if p.endswith(".html") or p in ("", "."):
+            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        elif "/assets/" in f"/{p}":
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return resp
+
+
 def _mount_spa() -> None:
     if WEB_DIST_DIR.exists() and (WEB_DIST_DIR / "index.html").exists():
-        app.mount("/", StaticFiles(directory=str(WEB_DIST_DIR), html=True), name="spa")
+        app.mount("/", _SpaStaticFiles(directory=str(WEB_DIST_DIR), html=True), name="spa")
     else:
         @app.get("/")
         def _no_ui():
