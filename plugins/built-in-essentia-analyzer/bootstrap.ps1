@@ -33,7 +33,12 @@ $PyVer  = if ($env:PYVER) { $env:PYVER } else { '3.11' }
 function Log  ($m) { Write-Host "`n[essentia-bootstrap] $m" -ForegroundColor Cyan }
 function Warn ($m) { Write-Host "`n[essentia-bootstrap] $m" -ForegroundColor Yellow }
 
-Log "Target: Windows x64 -> essentia-tensorflow (full taggers; falls back to DSP-only essentia if unavailable)."
+# Essentia publishes no Windows Python wheels (its docs note Windows Python
+# bindings are unsupported), and the source build needs an MSVC/waf toolchain it
+# can't drive here - so there is nothing to install. Skip cleanly; the launcher
+# also gates this via plugin.json "platforms". This keeps a direct run instant too.
+Warn "Essentia has no Windows build (no PyPI wheel; Python bindings unsupported on Windows). Skipping - the audio analyzer is unavailable on Windows."
+exit 0
 
 # --- uv ------------------------------------------------------------------------
 $Uv = $null

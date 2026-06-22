@@ -15,5 +15,5 @@
   "capabilities": ["analyze_audio"],
   "provides": ["analyze_audio"],
   "consumes": [],
-  "platforms": ["linux-x86_64", "windows-x86_64", "macos-arm64", "macos-x86_64"]
+  "platforms": ["linux-x86_64", "macos-arm64", "macos-x86_64"]
 }

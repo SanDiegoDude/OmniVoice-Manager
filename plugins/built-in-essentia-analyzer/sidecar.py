@@ -32,12 +32,16 @@ import sys
 
 
 def _no_prebuilt_essentia() -> bool:
-    """True on platforms where Essentia ships no installable package (notably Linux
-    aarch64 — no PyPI wheel and no conda-forge build), so a failed import is an
-    expected platform limit rather than a broken install."""
-    if platform.system() == "Linux":
+    """True on platforms where Essentia ships no installable package, so a failed
+    import is an expected platform limit rather than a broken install. Essentia's
+    Python wheels cover Linux x86_64 and macOS (x86_64/arm64) only — there are no
+    Windows wheels and no Linux aarch64 wheels (and no conda-forge build)."""
+    sysname = platform.system().lower()
+    if sysname == "windows":
+        return True
+    if sysname == "linux":
         return (platform.machine() or "").lower() not in ("x86_64", "amd64", "i686", "i386")
-    return False
+    return False  # macOS: wheels exist for x86_64 and arm64
 
 # This is a declared CPU service (plugin.json gpu:false) — the host does NOT free
 # the TTS model for us, so TensorFlow must never touch VRAM. Force CPU + quiet the
