@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
-# Launch the OmniVoice Manager (builds the web UI if needed, then serves it).
+# Launch the OmniVoice Manager (keeps the install current, then serves the UI).
 # Uses the local .venv directly so `uv` does not need to be on your PATH.
 #
+# By default every launch KEEPS THE INSTALL CURRENT — it frees the port, syncs
+# Python deps/CLI (uv sync), bootstraps any new/changed built-in plug-ins, and
+# rebuilds the web UI if its sources changed. This is the safe default: pull and
+# run, and you're up to date. Cheap when nothing changed (each step is skipped
+# when already current).
+#
 # Script-level flags (consumed here, NOT passed to the server):
-#   --rebuild    Sync Python deps + CLI commands (uv sync) AND force a fresh web
-#                UI build, even if a build already exists. Catches libraries and
-#                console scripts (e.g. omnivoice-plugin) added during active dev.
-#   --forceup    Kill any process already listening on the port first.
+#   --norebuild  Fast launch: skip uv sync + the web staleness check + built-in
+#                update checks. Only builds/bootstraps things that are missing
+#                outright. Use when you KNOW nothing changed since last launch.
+#   --rebuild    (deprecated; now the default) Force a fresh web build and
+#                re-bootstrap of built-ins even if they look current.
+#   --forceup    (deprecated; now always done) The port is always freed first.
 # Everything else is passed through, e.g.: ./run_manager.sh --ssl --lod
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -14,36 +22,34 @@ cd "$(dirname "$0")"
 PORT="${PORT:-8200}"
 
 # --- Parse our own flags; collect the rest to forward to the server ---
-REBUILD=0
-FORCEUP=0
+FAST=0      # --norebuild → skip update checks (fast launch)
+FORCE=0     # --rebuild   → force web rebuild + built-in re-bootstrap
 ARGS=()
 for a in "$@"; do
   case "$a" in
-    --rebuild) REBUILD=1 ;;
-    --forceup|--force-up) FORCEUP=1 ;;
+    --norebuild) FAST=1 ;;
+    --rebuild) FORCE=1 ;;
+    --forceup|--force-up) : ;;  # deprecated no-op: the port is always freed now
     *) ARGS+=("$a") ;;
   esac
 done
 
-# --- Free the port if asked (kills a stale/orphaned server holding it) ---
-if [ "$FORCEUP" = "1" ]; then
-  pids=""
+# --- Always free the port (only ever one manager per host) ---
+pids=""
+if command -v lsof >/dev/null 2>&1; then
+  pids=$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null || true)
+elif command -v fuser >/dev/null 2>&1; then
+  pids=$(fuser "$PORT/tcp" 2>/dev/null || true)
+fi
+if [ -n "$pids" ]; then
+  echo "Freeing port $PORT (stopping existing manager: $pids)"
+  kill $pids 2>/dev/null || true
+  sleep 1
   if command -v lsof >/dev/null 2>&1; then
     pids=$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null || true)
-  elif command -v fuser >/dev/null 2>&1; then
-    pids=$(fuser "$PORT/tcp" 2>/dev/null || true)
+    [ -n "$pids" ] && kill -9 $pids 2>/dev/null || true
   fi
-  if [ -n "$pids" ]; then
-    echo "Killing process(es) holding port $PORT: $pids"
-    kill $pids 2>/dev/null || true
-    sleep 1
-    # Force any that ignored SIGTERM.
-    if command -v lsof >/dev/null 2>&1; then
-      pids=$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null || true)
-      [ -n "$pids" ] && kill -9 $pids 2>/dev/null || true
-    fi
-    sleep 1
-  fi
+  sleep 1
 fi
 
 # --- Locate uv (PATH + the usual install locations) ---
@@ -57,46 +63,64 @@ find_uv() {
 }
 UV_BIN="$(find_uv || true)"
 
-# --- Sync Python deps + CLI commands on --rebuild ---
+# --- Sync Python deps + CLI commands (default; skipped on --norebuild) ---
 # `uv sync` re-syncs dependencies AND regenerates the project's console scripts
-# (omnivoice-manager, omnivoice-plugin, …), so newly added CLI commands show up
-# after a rebuild.
-if [ "$REBUILD" = "1" ]; then
+# (omnivoice-manager, omnivoice-plugin, …). Cheap no-op when nothing changed.
+if [ "$FAST" != "1" ]; then
   if [ -n "$UV_BIN" ]; then
     echo "Syncing Python deps + CLI commands (uv sync) ..."
     "$UV_BIN" sync || echo "uv sync failed — continuing with the existing environment." >&2
   else
-    echo "--rebuild: 'uv' not found (PATH, ~/.local/bin, ~/.cargo/bin) — skipping sync." >&2
+    echo "'uv' not found (PATH, ~/.local/bin, ~/.cargo/bin) — skipping dependency sync." >&2
     echo "  Install uv or run 'uv sync' yourself if deps/CLI commands changed." >&2
   fi
 fi
 
 # --- Bootstrap built-in plug-ins (plugins/built-in-*) ---
 # First-party plug-ins ship with the host and each need their own isolated sidecar
-# env (own deps, possibly model downloads). We bootstrap any whose env is missing
-# (first run after a pull) and re-run all of them on --rebuild. Best-effort: a
-# failure here never blocks the server — the affected tool simply stays unavailable
-# or degraded until its bootstrap succeeds.
+# env (own deps, possibly model downloads). To avoid reinstalling on every launch,
+# we fingerprint each plug-in's bootstrap inputs (bootstrap.sh + plugin.json) and
+# only (re)bootstrap when: the venv is missing, the fingerprint changed (the plug-in
+# was updated), or --rebuild forces it. The success marker lives inside .venv, so it
+# vanishes if the env is deleted. Best-effort: a failure never blocks the server.
+builtin_fingerprint() { cat "$1/bootstrap.sh" "$1/plugin.json" 2>/dev/null | cksum | tr -d ' '; }
 for bs in plugins/built-in-*/bootstrap.sh; do
   [ -e "$bs" ] || continue
   pdir="$(dirname "$bs")"
-  if [ "$REBUILD" = "1" ] || [ ! -x "$pdir/.venv/bin/python" ]; then
+  marker="$pdir/.venv/.ov-bootstrap-ok"
+  fp="$(builtin_fingerprint "$pdir")"
+  need=0
+  if [ ! -x "$pdir/.venv/bin/python" ]; then
+    need=1                                   # not installed
+  elif [ "$FORCE" = "1" ]; then
+    need=1                                   # --rebuild: force
+  elif [ -f "$marker" ] && [ "$FAST" != "1" ] && [ "$(cat "$marker" 2>/dev/null || true)" != "$fp" ]; then
+    need=1                                   # plug-in changed since last bootstrap
+  fi
+  if [ "$need" = "1" ]; then
     echo "Bootstrapping built-in plug-in: $pdir"
-    ( cd "$pdir" && UV="${UV_BIN:-uv}" bash ./bootstrap.sh ) \
-      || echo "  bootstrap failed for $pdir — continuing (tool may be unavailable until fixed)." >&2
+    if ( cd "$pdir" && UV="${UV_BIN:-uv}" bash ./bootstrap.sh ); then
+      echo "$fp" > "$marker" 2>/dev/null || true
+    else
+      echo "  bootstrap failed for $pdir — continuing (tool may be unavailable until fixed)." >&2
+    fi
+  elif [ ! -f "$marker" ]; then
+    # venv already present but unmarked (legacy / just built) → adopt it as the
+    # current baseline rather than reinstalling.
+    echo "$fp" > "$marker" 2>/dev/null || true
   fi
 done
 
 # --- Decide whether the SPA needs (re)building ---
-# Rebuild when: no build exists, --rebuild was passed, or any web source file is
-# newer than the last build. We never install Node/npm for you — bring your own
-# (https://nodejs.org, 18+). Node is only needed for this build step.
+# Build when: no build exists, --rebuild forces it, or (default) any web source
+# file is newer than the last build. --norebuild skips the staleness scan. We
+# never install Node/npm for you — bring your own (https://nodejs.org, 18+).
 need_build=0
 if [ ! -f web/dist/index.html ]; then
   need_build=1
-elif [ "$REBUILD" = "1" ]; then
+elif [ "$FORCE" = "1" ]; then
   need_build=1
-elif [ -n "$(find web/src web/index.html web/package.json web/vite.config.ts web/tsconfig.json web/tsconfig.app.json web/tsconfig.node.json -newer web/dist/index.html 2>/dev/null)" ]; then
+elif [ "$FAST" != "1" ] && [ -n "$(find web/src web/index.html web/package.json web/vite.config.ts web/tsconfig.json web/tsconfig.app.json web/tsconfig.node.json -newer web/dist/index.html 2>/dev/null)" ]; then
   echo "Web UI is older than its source — rebuilding."
   need_build=1
 fi
