@@ -42,13 +42,68 @@ if [[ ! -x "$VENV/bin/python" ]]; then
 fi
 PY="$VENV/bin/python"
 
+es_imports() {  # 0 if `import essentia.standard` works in the venv, else non-zero
+  "$PY" - <<'PY' >/dev/null 2>&1
+import essentia.standard  # noqa
+PY
+}
+
+# Experimental: compile Essentia from source for platforms with no prebuilt wheel
+# (notably Linux aarch64). Opt-in via ESSENTIA_BUILD_FROM_SOURCE=1. We never auto
+# `sudo apt` for you — if the C++ toolchain / audio dev libs are missing we print
+# the install line and bail. Best-effort: any failure falls through to a clean skip.
+build_essentia_from_source() {
+  warn "ESSENTIA_BUILD_FROM_SOURCE=1 — attempting a from-source build (experimental, slow)."
+  local missing=() c
+  for c in cc c++ pkg-config git; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    warn "Missing build tools (${missing[*]}). Install the toolchain + audio dev libs first, e.g.:"
+    warn "  sudo apt-get install -y build-essential libeigen3-dev libyaml-dev libfftw3-dev \\"
+    warn "      libavcodec-dev libavformat-dev libavutil-dev libswresample-dev \\"
+    warn "      libsamplerate0-dev libtag1-dev libchromaprint-dev"
+    return 1
+  fi
+  local src="$HERE/.essentia-src"
+  rm -rf "$src"
+  git clone --depth 1 https://github.com/MTG/essentia "$src" || return 1
+  VIRTUAL_ENV="$VENV" "$UV" pip install --python "$PY" "numpy<2" pyyaml six || return 1
+  local platlib; platlib="$("$PY" -c 'import sysconfig;print(sysconfig.get_paths()["platlib"])')"
+  ( cd "$src" \
+    && "$PY" waf configure --with-python --build-static --pythondir="$platlib" --prefix="$VENV" \
+    && "$PY" waf \
+    && "$PY" waf install ) || { warn "waf build failed (see output above)."; return 1; }
+  log "Source build complete."
+  return 0
+}
+
 # ── deps: prefer essentia-tensorflow, fall back to plain essentia ─────────────
+# Order matters and we must not abort on the fallback (set -e): on aarch64 BOTH
+# wheels are absent, and we want to skip gracefully rather than crash the launcher.
 log "Installing audio-analysis deps (trying essentia-tensorflow first)…"
 if VIRTUAL_ENV="$VENV" "$UV" pip install --python "$PY" "numpy<2" "essentia-tensorflow"; then
   log "essentia-tensorflow installed."
+elif VIRTUAL_ENV="$VENV" "$UV" pip install --python "$PY" "numpy<2" "essentia"; then
+  warn "essentia-tensorflow unavailable — installed DSP-only 'essentia' (no learned tags)."
 else
-  warn "essentia-tensorflow unavailable on this platform — falling back to DSP-only 'essentia'."
-  VIRTUAL_ENV="$VENV" "$UV" pip install --python "$PY" "numpy<2" "essentia"
+  warn "No prebuilt essentia wheel for $OS/$ARCH (expected on Linux aarch64)."
+fi
+
+# ── no usable wheel? optional source build, else a clean graceful skip ────────
+if ! es_imports; then
+  # Keep numpy present so the sidecar still starts and reports a precise message.
+  VIRTUAL_ENV="$VENV" "$UV" pip install --python "$PY" "numpy<2" >/dev/null 2>&1 || true
+  if [[ "${ESSENTIA_BUILD_FROM_SOURCE:-0}" == "1" ]]; then
+    build_essentia_from_source || true
+  fi
+fi
+if ! es_imports; then
+  warn "Essentia has no prebuilt package for $OS/$ARCH (no PyPI wheel, no conda-forge build)."
+  warn "The analyzer will report 'unavailable' here — sounds still save and metadata stays hand-editable."
+  warn "To compile it anyway, reinstall this built-in with ESSENTIA_BUILD_FROM_SOURCE=1."
+  # Exit 0 so the launcher marks this built-in 'done' and won't retry the impossible
+  # install on every launch. The sidecar degrades cleanly at runtime.
+  log "Done (analyzer unavailable on this platform — graceful skip)."
+  exit 0
 fi
 
 # Authoritative check: did we actually get the TensorFlow predict algorithms?

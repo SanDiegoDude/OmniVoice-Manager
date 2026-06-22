@@ -27,7 +27,17 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import sys
+
+
+def _no_prebuilt_essentia() -> bool:
+    """True on platforms where Essentia ships no installable package (notably Linux
+    aarch64 — no PyPI wheel and no conda-forge build), so a failed import is an
+    expected platform limit rather than a broken install."""
+    if platform.system() == "Linux":
+        return (platform.machine() or "").lower() not in ("x86_64", "amd64", "i686", "i386")
+    return False
 
 # This is a declared CPU service (plugin.json gpu:false) — the host does NOT free
 # the TTS model for us, so TensorFlow must never touch VRAM. Force CPU + quiet the
@@ -119,6 +129,8 @@ class EssentiaAnalyzer:
         return {
             "ok": self._es is not None,
             "import_error": self._import_error,
+            "platform_unsupported": self._es is None and _no_prebuilt_essentia(),
+            "platform": f"{platform.system()}/{platform.machine()}",
             "models_dir": MODELS_DIR,
         }
 
@@ -180,10 +192,20 @@ class EssentiaAnalyzer:
         if self._es is None:
             self.load(ctx)
         if self._es is None:
+            if _no_prebuilt_essentia():
+                raise RuntimeError(
+                    f"The Essentia analyzer isn't available on this platform "
+                    f"({platform.system()}/{platform.machine()}). Essentia publishes no "
+                    "installable package for it — there's no PyPI wheel and no conda-forge "
+                    "build for Linux aarch64. Sounds still save and you can edit metadata by "
+                    "hand; to enable analysis here, reinstall the built-in with "
+                    "ESSENTIA_BUILD_FROM_SOURCE=1 (compiles Essentia — needs a C++ toolchain "
+                    "and audio dev libraries)."
+                )
             raise RuntimeError(
                 "Essentia failed to import in the analyzer's venv "
                 f"({self._import_error or 'unknown error'}). The venv exists but the "
-                "native library won't load on this platform — see the plug-in log "
+                "native library won't load — see the plug-in log "
                 "(data/plugins/logs/essentia-analyzer.log) for the full traceback."
             )
         es, np = self._es, self._np
