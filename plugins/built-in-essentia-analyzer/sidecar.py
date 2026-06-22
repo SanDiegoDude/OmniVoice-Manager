@@ -91,21 +91,36 @@ class EssentiaAnalyzer:
         self._es = None          # essentia.standard module
         self._embed = None       # cached EffNet embedding model
         self._np = None
+        self._import_error = None  # why import failed (surfaced to the host)
 
     # ---- lifecycle ----
     def load(self, ctx):
+        import traceback  # noqa: PLC0415
         try:
             import numpy as np  # noqa: PLC0415
             import essentia.standard as es  # noqa: PLC0415
-        except Exception as e:  # noqa: BLE001
-            ctx.log(f"Essentia import failed ({e}); DSP+tags unavailable until bootstrap runs.", "warn")
+        except BaseException as e:  # noqa: BLE001 — catch SystemExit/abort from native libs too
+            # The venv exists but the native extension won't import here (common on
+            # platforms without prebuilt wheels — e.g. linux aarch64 / macOS arm64).
+            # Capture the real cause so the host surfaces it instead of a generic
+            # "not installed", and dump the traceback to the plug-in log.
+            self._import_error = f"{type(e).__name__}: {e}"
+            ctx.log(f"Essentia import failed — {self._import_error}", "error")
+            ctx.log(traceback.format_exc(), "error")
             return
         self._np = np
         self._es = es
+        self._import_error = None
         ctx.log("Essentia ready (DSP always; TF tags if models present).")
 
     def health(self, ctx):
-        return {"ok": self._es is not None, "models_dir": MODELS_DIR}
+        if self._es is None:
+            self.load(ctx)
+        return {
+            "ok": self._es is not None,
+            "import_error": self._import_error,
+            "models_dir": MODELS_DIR,
+        }
 
     def unload(self, ctx):
         self._embed = None
@@ -165,7 +180,12 @@ class EssentiaAnalyzer:
         if self._es is None:
             self.load(ctx)
         if self._es is None:
-            raise RuntimeError("Essentia is not installed — run the plug-in bootstrap.")
+            raise RuntimeError(
+                "Essentia failed to import in the analyzer's venv "
+                f"({self._import_error or 'unknown error'}). The venv exists but the "
+                "native library won't load on this platform — see the plug-in log "
+                "(data/plugins/logs/essentia-analyzer.log) for the full traceback."
+            )
         es, np = self._es, self._np
 
         ctx.progress(stage="dsp", message="Analyzing tempo / key / loudness…")
