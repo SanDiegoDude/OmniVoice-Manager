@@ -557,11 +557,16 @@ export function AceStepLab({
               </label>
               {refMode === 'cover' && (
                 <label className="row" style={{ gap: 6, alignItems: 'center', flex: 1, minWidth: 180 }}>
-                  <span className="hint">Strength · {refStrength.toFixed(2)}</span>
+                  <span className="hint">Keep original · {refStrength.toFixed(2)}</span>
                   <input type="range" min={0.1} max={1} step={0.05} value={refStrength} disabled={busy} onChange={(e) => setRefStrength(parseFloat(e.target.value))} style={{ flex: 1 }} />
                 </label>
               )}
             </div>
+            {refMode === 'cover' && (
+              <div className="hint" style={{ marginTop: 6 }}>
+                Higher = closer to the source's structure (and more artifacts at the top). Strong covers like a few more <b>Steps</b> below.
+              </div>
+            )}
           </>
         ))}
       </div>
@@ -573,13 +578,13 @@ export function AceStepLab({
             <span className="hint">Duration (s)</span>
             <input className="input" style={{ width: 80 }} placeholder="auto" value={duration} disabled={busy} onChange={(e) => setDuration(e.target.value)} />
           </label>
+          <label className="row" style={{ gap: 6, alignItems: 'center' }}>
+            <span className="hint">Steps</span>
+            <input className="input" style={{ width: 64 }} value={steps} disabled={busy} onChange={(e) => setSteps(e.target.value)} />
+          </label>
           <button className="btn ghost sm" onClick={() => setAdvanced(!advanced)}>{advanced ? '▾' : '▸'} Advanced</button>
           {advanced && (
             <>
-              <label className="row" style={{ gap: 6, alignItems: 'center' }}>
-                <span className="hint">Steps</span>
-                <input className="input" style={{ width: 64 }} value={steps} disabled={busy} onChange={(e) => setSteps(e.target.value)} />
-              </label>
               <label className="row" style={{ gap: 6, alignItems: 'center' }}>
                 <span className="hint">BPM</span>
                 <input className="input" style={{ width: 64 }} placeholder="auto" value={bpm} disabled={busy} onChange={(e) => setBpm(e.target.value)} />
