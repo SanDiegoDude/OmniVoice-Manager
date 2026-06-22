@@ -1,0 +1,19 @@
+{
+  "id": "audio-analyzer",
+  "name": "Audio Analyzer",
+  "version": "0.1.0",
+  "description": "Built-in universal audio analysis service — BPM, key, loudness, duration, plus genre / mood / instrument / vocal tags (PANNs). Runs everywhere OmniVoice does; enriches the sound library with no UI of its own.",
+  "author": "OmniVoice (built-in)",
+  "license": "MIT (plug-in glue) / ISC (librosa) / Apache-2.0 (PANNs)",
+  "homepage": "https://github.com/qiuqiangkong/panns_inference",
+  "isolation": "sidecar",
+  "entrypoint": "sidecar.py",
+  "python": ".venv/bin/python",
+  "gpu": false,
+  "official": true,
+  "kind": "service",
+  "capabilities": ["analyze_audio"],
+  "provides": ["analyze_audio"],
+  "consumes": [],
+  "platforms": []
+}

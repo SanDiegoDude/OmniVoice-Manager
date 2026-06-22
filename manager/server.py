@@ -736,30 +736,67 @@ async def upload_sound(file: UploadFile = File(...), folder: str = Form("")):
 # The analyzer enriches the *sample record* (the library is the integration bus);
 # consumers read cached metadata rather than calling a plug-in live.
 # ---------------------------------------------------------------------------
-_ANALYZE_CAP = "analyze_audio"
+_ANALYZE_CAP = "analyze_audio"           # base, universal (built-in Audio Analyzer)
+_ENHANCE_CAP = "enhance_audio_tags"      # optional better tagger (e.g. Essentia add-on)
+_TAG_FIELDS = ("genre", "mood", "instruments", "voice_instrumental")
 _analyze_pending: set[str] = set()
 _analyze_lock = threading.Lock()
 
 
-def _analysis_available() -> bool:
-    """True when an installed plug-in provides the analyze capability."""
-    pid = plugin_host.resolve_capability(_ANALYZE_CAP)
+def _provider_ready(cap: str) -> bool:
+    """True when a plug-in provides ``cap`` and is installed + supported on this host."""
+    pid = plugin_host.resolve_capability(cap)
     if not pid:
         return False
     try:
-        return plugin_host.get(pid).installed
+        m = plugin_host.get(pid)
+        return m.supported_here and m.installed
     except Exception:  # noqa: BLE001
         return False
 
 
+def _analysis_available() -> bool:
+    """True when an installed analyzer provides the base analyze capability."""
+    return _provider_ready(_ANALYZE_CAP)
+
+
+def _merge_enhanced(base: dict, enh: dict) -> dict:
+    """Overlay an enhancer's tag fields onto the base analysis. The enhancer wins
+    for any tag it actually produced; base DSP (bpm/key/loudness/duration) is kept.
+    The enhancer's scored extras are tucked under extra['enhanced'] so nothing is
+    lost and the base PANNs scores stay visible."""
+    out = dict(base or {})
+    extra = dict(out.get("extra") or {})
+    for field in _TAG_FIELDS:
+        val = (enh or {}).get(field)
+        if val:  # non-empty list or non-None string
+            out[field] = val
+    enh_extra = (enh or {}).get("extra")
+    if isinstance(enh_extra, dict) and enh_extra:
+        extra["enhanced"] = enh_extra
+    out["extra"] = extra
+    return out
+
+
 def _analyze_sound(sound_id: str) -> dict:
-    """Run the analyzer on one sound and persist onto its library record."""
+    """Run the analyzer on one sound and persist onto its library record. Always
+    runs the universal base analyzer; if an enhanced tagger is installed (e.g. the
+    Essentia add-on on Linux/mac), merge its richer genre/mood/instrument tags in.
+    The two run as separate brokered calls (the host forbids sidecar nesting), with
+    the core doing the merge — so analysis still 'travels with the sample'."""
     path = samples.resolve_sound_path(sound_id)
-    res = plugin_host.call_capability(_ANALYZE_CAP, {"path": str(path)})
+    res = dict(plugin_host.call_capability(_ANALYZE_CAP, {"path": str(path)}) or {})
+    analyzer = plugin_host.resolve_capability(_ANALYZE_CAP) or ""
+    if _provider_ready(_ENHANCE_CAP):
+        try:
+            enh = plugin_host.call_capability(_ENHANCE_CAP, {"path": str(path)}) or {}
+            res = _merge_enhanced(res, enh)
+            ep = plugin_host.resolve_capability(_ENHANCE_CAP) or ""
+            analyzer = f"{analyzer}+{ep}" if (analyzer and ep) else (analyzer or ep)
+        except Exception as e:  # noqa: BLE001 — enhancement is best-effort
+            print(f"[analyze] enhance {sound_id}: {type(e).__name__}: {e}", flush=True)
     name = str(Path(sound_id).with_suffix(""))
-    return library_meta.set_analysis(
-        "sound", path, sound_id, name, res or {}, analyzer=plugin_host.resolve_capability(_ANALYZE_CAP) or ""
-    )
+    return library_meta.set_analysis("sound", path, sound_id, name, res, analyzer=analyzer)
 
 
 def _analyze_sound_async(sound_id: str) -> None:

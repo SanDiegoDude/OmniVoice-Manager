@@ -119,14 +119,14 @@ export function LibraryMetadata({
               <div className="card-head">
                 <h3>Analysis</h3>
                 <button className="btn sm" disabled={busy || !meta?.analysis_available} onClick={analyze}
-                  title={meta?.analysis_available ? '' : 'Install/bootstrap the Essentia analyzer plug-in first'}>
+                  title={meta?.analysis_available ? '' : 'The built-in Audio Analyzer is still bootstrapping (or its bootstrap failed) — check the manager logs'}>
                   {busy ? 'Analyzing…' : a ? 'Re-analyze' : 'Analyze'}
                 </button>
               </div>
               <div className="card-body">
                 {!meta?.analysis_available && (
                   <div className="hint" style={{ marginBottom: 8 }}>
-                    No analyzer installed — run the built-in Essentia analyzer's bootstrap (<code>plugins/built-in-essentia-analyzer/bootstrap.sh</code>) to enable BPM / key / tagging.
+                    Analyzer not ready — the built-in Audio Analyzer bootstraps automatically on launch (<code>plugins/built-in-audio-analyzer/bootstrap.sh</code>). If this persists, check the manager logs.
                   </div>
                 )}
                 {a ? (
