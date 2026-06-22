@@ -71,7 +71,8 @@ export function AceStepLab({
   // Reference audio (input-music guidance)
   const [refSrc, setRefSrc] = useState<RefSource | null>(null)
   const [refMode, setRefMode] = useState<RefMode>('guide')
-  const [refStrength, setRefStrength] = useState(0.7)
+  const [refStrength, setRefStrength] = useState(0.7)   // cover_noise_strength — "Keep original"
+  const [refCond, setRefCond] = useState(1.0)           // audio_cover_strength — "Follow source"
   const [refBusy, setRefBusy] = useState(false)
   const [refSearch, setRefSearch] = useState('')
   const [refOpen, setRefOpen] = useState(false)   // input-music section starts collapsed
@@ -273,6 +274,7 @@ export function AceStepLab({
       enhance,
       ref_mode: refMode,
       ref_strength: refStrength,
+      ref_cond_strength: refCond,
     }
     const dur = parseFloat(duration)
     if (Number.isFinite(dur) && dur > 0) fields.duration = dur
@@ -556,15 +558,23 @@ export function AceStepLab({
                 </select>
               </label>
               {refMode === 'cover' && (
-                <label className="row" style={{ gap: 6, alignItems: 'center', flex: 1, minWidth: 180 }}>
-                  <span className="hint">Keep original · {refStrength.toFixed(2)}</span>
-                  <input type="range" min={0.1} max={1} step={0.05} value={refStrength} disabled={busy} onChange={(e) => setRefStrength(parseFloat(e.target.value))} style={{ flex: 1 }} />
-                </label>
+                <>
+                  <label className="row" style={{ gap: 6, alignItems: 'center', flex: 1, minWidth: 180 }}>
+                    <span className="hint">Keep original · {refStrength.toFixed(2)}</span>
+                    <input type="range" min={0.1} max={1} step={0.05} value={refStrength} disabled={busy} onChange={(e) => setRefStrength(parseFloat(e.target.value))} style={{ flex: 1 }} />
+                  </label>
+                  <label className="row" style={{ gap: 6, alignItems: 'center', flex: 1, minWidth: 180 }}>
+                    <span className="hint">Follow source · {refCond.toFixed(2)}</span>
+                    <input type="range" min={0} max={1} step={0.05} value={refCond} disabled={busy} onChange={(e) => setRefCond(parseFloat(e.target.value))} style={{ flex: 1 }} />
+                  </label>
+                </>
               )}
             </div>
             {refMode === 'cover' && (
               <div className="hint" style={{ marginTop: 6 }}>
-                Higher = closer to the source's structure (and more artifacts at the top). Strong covers like a few more <b>Steps</b> below.
+                <b>Keep original</b>: how much of the source's structure the diffusion starts from (higher = closer, artifacty at the top).
+                {' '}<b>Follow source</b>: how long the source's content guides before the description takes over (lower = more creative drift).
+                {' '}Strong covers like a few more <b>Steps</b> below.
               </div>
             )}
           </>
