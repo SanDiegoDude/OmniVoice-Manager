@@ -29,9 +29,33 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+
+def current_platform() -> Tuple[str, str]:
+    """This host as ``(os, arch)`` normalized tokens, e.g. ``("linux", "x86_64")``,
+    ``("linux", "aarch64")``, ``("macos", "arm64")``, ``("windows", "x86_64")``."""
+    osn = {"linux": "linux", "darwin": "macos", "windows": "windows"}.get(
+        platform.system().lower(), platform.system().lower()
+    )
+    arch = (platform.machine() or "").lower()
+    arch = {"amd64": "x86_64", "x64": "x86_64"}.get(arch, arch)
+    return osn, arch
+
+
+def platform_supported(platforms: List[str]) -> bool:
+    """Does ``platforms`` (a manifest's ``os-arch`` allow-list) include this host?
+    An empty list means "runs everywhere". Tokens accepted: exact ``os-arch``
+    (``linux-x86_64``), an OS wildcard (``linux`` or ``linux-*`` = any arch of that
+    OS), or ``*`` (everywhere)."""
+    if not platforms:
+        return True
+    osn, arch = current_platform()
+    allow = {str(p).strip().lower() for p in platforms}
+    return bool(allow & {f"{osn}-{arch}", osn, f"{osn}-*", "*"})
 
 
 @dataclass
@@ -68,10 +92,19 @@ class PluginManifest:
     # bootstrapped as part of setup) rather than a third-party drop-in. Used to
     # badge it in the UI and to skip it from third-party update flows.
     official: bool = False
+    # Optional OS/arch allow-list as ``os-arch`` tokens (e.g. ["linux-x86_64",
+    # "windows-x86_64", "macos-arm64"]). Empty = runs everywhere. The launcher uses
+    # this to skip bootstrapping on unsupported platforms, and the host uses it to
+    # return a standard "not available on this platform" instead of failing a call.
+    platforms: List[str] = field(default_factory=list)
 
     @property
     def is_service(self) -> bool:
         return self.kind == "service"
+
+    @property
+    def supported_here(self) -> bool:
+        return platform_supported(self.platforms)
 
     # ---- derived paths ----
     @property
@@ -134,6 +167,8 @@ class PluginManifest:
             "provides": self.provides,
             "consumes": self.consumes,
             "official": self.official,
+            "platforms": self.platforms,
+            "supported_here": self.supported_here,
             "installed": self.installed,
         }
 
@@ -156,7 +191,7 @@ def load_manifest(plugin_dir: Path) -> Optional[PluginManifest]:
         "version", "description", "author", "homepage", "source", "license",
         "isolation", "entrypoint", "python", "gpu", "vram_mb", "supports_low_vram",
         "supports_cpu_offload", "capabilities", "needs", "ui",
-        "kind", "provides", "consumes", "official",
+        "kind", "provides", "consumes", "official", "platforms",
     }
     kwargs = {k: data[k] for k in known if k in data}
     return PluginManifest(

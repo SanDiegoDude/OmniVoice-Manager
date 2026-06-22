@@ -63,7 +63,12 @@ rem is missing, the fingerprint changed (plug-in updated), or --rebuild forces i
 for /d %%D in (plugins\built-in-*) do (
     if exist "%%D\bootstrap.bat" (
         set "PDIR=%%D"
-        call :bootstrap_builtin
+        call :platform_check
+        if "!SUPPORTED!"=="0" (
+            echo Skipping built-in %%D - not supported on this platform.
+        ) else (
+            call :bootstrap_builtin
+        )
     )
 )
 
@@ -121,6 +126,16 @@ echo The web UI needs building, but 'npm' was not found on your PATH. 1>&2
 echo Install Node.js 18+ from https://nodejs.org, then re-run this script. 1>&2
 echo Node is only needed for the build step. 1>&2
 exit /b 1
+
+rem --- subroutine: is this built-in supported on this platform? (sets SUPPORTED) ---
+rem A plugin.json "platforms" allow-list (os-arch tokens) gates the install so we
+rem never attempt a doomed bootstrap. No list, or no parse, means supported.
+:platform_check
+set "SUPPORTED=1"
+if not exist "!PDIR!\plugin.json" goto :eof
+powershell -NoProfile -Command "try { $d = Get-Content -Raw '!PDIR!\plugin.json' | ConvertFrom-Json } catch { exit 0 }; $pf = $d.platforms; if (-not $pf) { exit 0 }; $a = $env:PROCESSOR_ARCHITECTURE; if ($a -eq 'AMD64') { $a = 'x86_64' } elseif ($a -eq 'ARM64') { $a = 'arm64' } else { $a = $a.ToLower() }; $allow = @($pf | ForEach-Object { $_.ToString().Trim().ToLower() }); if (($allow -contains ('windows-' + $a)) -or ($allow -contains 'windows') -or ($allow -contains 'windows-*') -or ($allow -contains '*')) { exit 0 } else { exit 1 }"
+if errorlevel 1 set "SUPPORTED=0"
+goto :eof
 
 rem --- subroutine: (re)bootstrap one built-in plug-in (PDIR set by caller) ---
 :bootstrap_builtin

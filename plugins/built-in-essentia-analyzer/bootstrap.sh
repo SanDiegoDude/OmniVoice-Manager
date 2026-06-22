@@ -32,6 +32,15 @@ case "$OS/$ARCH" in
   *)             warn "Unrecognized $OS/$ARCH — best effort." ;;
 esac
 
+# Fast skip: Essentia ships no prebuilt package for Linux aarch64 (no PyPI wheel,
+# no conda-forge). Bail before spinning up uv unless the user opts into a source
+# build. The launcher also gates this via plugin.json "platforms"; this keeps a
+# direct ./bootstrap.sh run instant too.
+if [[ "$OS" == "Linux" && "$ARCH" != "x86_64" && "${ESSENTIA_BUILD_FROM_SOURCE:-0}" != "1" ]]; then
+  warn "No prebuilt essentia for $OS/$ARCH — skipping (set ESSENTIA_BUILD_FROM_SOURCE=1 to compile from source)."
+  exit 0
+fi
+
 UV="${UV:-uv}"
 command -v "$UV" >/dev/null 2>&1 || { warn "uv not found on PATH (set UV=/path/to/uv)."; exit 1; }
 

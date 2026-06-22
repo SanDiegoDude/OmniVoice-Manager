@@ -88,9 +88,39 @@ fi
 # that left an empty .venv) must keep retrying rather than be masked as good.
 # Best-effort: a failure never blocks the server.
 builtin_fingerprint() { cat "$1/bootstrap.sh" "$1/plugin.json" 2>/dev/null | cksum | tr -d ' '; }
+# A built-in may declare a "platforms" allow-list in plugin.json; if this host
+# isn't on it we skip the bootstrap entirely (no doomed install attempt). Parsed
+# with python (the manager venv from uv sync, or any python3); if none is found we
+# don't gate. Returns non-zero only when the manifest *explicitly* excludes us.
+builtin_pybin=".venv/bin/python"
+[ -x "$builtin_pybin" ] || builtin_pybin="$(command -v python3 || command -v python || true)"
+builtin_supported_here() {
+  local pj="$1/plugin.json"
+  [ -f "$pj" ] || return 0
+  [ -n "$builtin_pybin" ] || return 0
+  "$builtin_pybin" - "$pj" <<'PY'
+import json, sys, platform
+try:
+    pf = (json.load(open(sys.argv[1], encoding="utf-8")).get("platforms")) or []
+except Exception:
+    sys.exit(0)
+if not pf:
+    sys.exit(0)
+osn = {"linux": "linux", "darwin": "macos", "windows": "windows"}.get(
+    platform.system().lower(), platform.system().lower())
+arch = (platform.machine() or "").lower()
+arch = {"amd64": "x86_64", "x64": "x86_64"}.get(arch, arch)
+allow = {str(p).strip().lower() for p in pf}
+sys.exit(0 if (allow & {f"{osn}-{arch}", osn, f"{osn}-*", "*"}) else 1)
+PY
+}
 for bs in plugins/built-in-*/bootstrap.sh; do
   [ -e "$bs" ] || continue
   pdir="$(dirname "$bs")"
+  if ! builtin_supported_here "$pdir"; then
+    echo "Skipping built-in $pdir — not supported on this platform."
+    continue
+  fi
   marker="$pdir/.venv/.ov-bootstrap-ok"
   fp="$(builtin_fingerprint "$pdir")"
   need=0

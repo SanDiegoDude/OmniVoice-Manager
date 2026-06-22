@@ -23,7 +23,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from .manifest import PluginManifest, load_manifest
+from .manifest import PluginManifest, current_platform, load_manifest
 
 ProgressCb = Optional[Callable[[Dict[str, Any]], None]]
 # A host hook: (plugin_id, params) -> json-serializable result.
@@ -548,6 +548,12 @@ class PluginHost:
         if not provider_id:
             raise PluginError(f"No plug-in provides capability '{capability}'.")
         m = self.get(provider_id)
+        if not m.supported_here:
+            osn, arch = current_platform()
+            raise PluginError(
+                f"'{m.name}' isn't available on this platform ({osn}-{arch}); "
+                f"'{capability}' is unsupported here."
+            )
         if not m.installed:
             raise PluginError(
                 f"Provider '{m.name}' for '{capability}' is not installed. Run its bootstrap script."
