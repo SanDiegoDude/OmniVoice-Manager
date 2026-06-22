@@ -21,6 +21,7 @@ interface RowActions {
   onMove: (id: string, folder: string) => void
   onRename: (id: string, name: string) => void
   onEdit: (v: Voice) => void
+  onMeta: (v: Voice) => void
   folders: string[]
 }
 
@@ -35,6 +36,7 @@ function VoiceRow({
   onMove,
   onRename,
   onEdit,
+  onMeta,
   folders,
 }: { v: Voice } & RowActions) {
   const [renaming, setRenaming] = useState<string | null>(null)
@@ -107,6 +109,7 @@ function VoiceRow({
             <button className="vplay" title="Move to folder…" onClick={() => setMoving(true)}>📂</button>
             <button className="vplay" title="Rename" onClick={() => setRenaming(baseName(v))}>✎</button>
             <button className="vplay" title="Edit — clean up & add transforms, save a copy or overwrite" onClick={() => onEdit(v)}>🎚</button>
+            <button className="vplay" title="Metadata — actor / character & details" onClick={() => onMeta(v)}>🏷</button>
             <button className="vplay" title="Download (honors MP3/FLAC export setting)" onClick={() => void downloadFile(`/api/voices/${v.id}/download`, baseName(v)).catch(() => {})}>⬇</button>
             <button className="vplay" title="Delete" onClick={() => setConfirmDel(true)}>🗑</button>
           </>
@@ -155,6 +158,7 @@ export function VoiceLibrary({
   onMove,
   onRename,
   onEdit,
+  onMeta,
   onCreateFolder,
   onRefresh,
   onOpenLab,
@@ -173,6 +177,7 @@ export function VoiceLibrary({
   onMove: (id: string, folder: string) => void
   onRename: (id: string, name: string) => void
   onEdit: (v: Voice) => void
+  onMeta: (v: Voice) => void
   onCreateFolder: (path: string) => void
   onRefresh: () => void
   onOpenLab: () => void
@@ -185,7 +190,7 @@ export function VoiceLibrary({
   // up here automatically — the voice-side twin of sound.library.action.
   const genActions = useContributions('voice.library.action')
 
-  const actions: RowActions = { selected, playingUrl, onPlay, onCast, onPick, onDelete, onMove, onRename, onEdit, folders }
+  const actions: RowActions = { selected, playingUrl, onPlay, onCast, onPick, onDelete, onMove, onRename, onEdit, onMeta, folders }
 
   const q = query.trim().toLowerCase()
   const matches = q

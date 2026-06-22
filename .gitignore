@@ -32,12 +32,15 @@ venv/
 /custom_sounds/
 # External plug-ins are DROP-IN: installed into plugins/ via `omnivoice-plugin
 # install <git-url>`, a plain git clone, a copy, or a platform installer. Only the
-# host-provided SDK and this directory's README are tracked here — every installed
-# plug-in lives in its own repo (with its own license) and stays untracked, as
-# does the isolated venv each one builds via its bootstrap.
+# host-provided SDK, this directory's README, and first-party "built-in-*" plug-ins
+# are tracked here — every third-party plug-in lives in its own repo (with its own
+# license) and stays untracked, as does the isolated venv each one builds via its
+# bootstrap. Built-in plug-ins ship with the core; their own .gitignore keeps the
+# venv/models out of the tree.
 plugins/*
 !plugins/_sdk/
 !plugins/README.md
+!plugins/built-in-*/
 *.wav
 *.mp3
 *.flac

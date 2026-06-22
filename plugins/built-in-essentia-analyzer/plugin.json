@@ -1,0 +1,18 @@
+{
+  "id": "essentia-analyzer",
+  "name": "Essentia Analyzer",
+  "version": "0.1.0",
+  "description": "Built-in audio analysis service — BPM, key, loudness, plus genre / mood / instrument / vocal tags. Enriches the sound library; no UI of its own.",
+  "author": "OmniVoice (built-in)",
+  "license": "AGPL-3.0 (Essentia) / MIT (plug-in glue)",
+  "homepage": "https://essentia.upf.edu/",
+  "isolation": "sidecar",
+  "entrypoint": "sidecar.py",
+  "python": ".venv/bin/python",
+  "gpu": false,
+  "official": true,
+  "kind": "service",
+  "capabilities": ["analyze_audio"],
+  "provides": ["analyze_audio"],
+  "consumes": []
+}

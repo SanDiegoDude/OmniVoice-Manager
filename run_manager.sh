@@ -46,20 +46,22 @@ if [ "$FORCEUP" = "1" ]; then
   fi
 fi
 
+# --- Locate uv (PATH + the usual install locations) ---
+# The launcher normally runs off .venv without uv on PATH, so look around before
+# giving up. Echoes the path (empty if not found).
+find_uv() {
+  if command -v uv >/dev/null 2>&1; then command -v uv; return; fi
+  for c in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" "/usr/local/bin/uv" ".venv/bin/uv"; do
+    [ -x "$c" ] && { echo "$c"; return; }
+  done
+}
+UV_BIN="$(find_uv || true)"
+
 # --- Sync Python deps + CLI commands on --rebuild ---
 # `uv sync` re-syncs dependencies AND regenerates the project's console scripts
 # (omnivoice-manager, omnivoice-plugin, …), so newly added CLI commands show up
-# after a rebuild. The launcher normally runs off .venv without uv on PATH, so we
-# look for uv in the usual install locations too before giving up.
+# after a rebuild.
 if [ "$REBUILD" = "1" ]; then
-  UV_BIN=""
-  if command -v uv >/dev/null 2>&1; then
-    UV_BIN="$(command -v uv)"
-  else
-    for c in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" "/usr/local/bin/uv" ".venv/bin/uv"; do
-      [ -x "$c" ] && { UV_BIN="$c"; break; }
-    done
-  fi
   if [ -n "$UV_BIN" ]; then
     echo "Syncing Python deps + CLI commands (uv sync) ..."
     "$UV_BIN" sync || echo "uv sync failed — continuing with the existing environment." >&2
@@ -68,6 +70,22 @@ if [ "$REBUILD" = "1" ]; then
     echo "  Install uv or run 'uv sync' yourself if deps/CLI commands changed." >&2
   fi
 fi
+
+# --- Bootstrap built-in plug-ins (plugins/built-in-*) ---
+# First-party plug-ins ship with the host and each need their own isolated sidecar
+# env (own deps, possibly model downloads). We bootstrap any whose env is missing
+# (first run after a pull) and re-run all of them on --rebuild. Best-effort: a
+# failure here never blocks the server — the affected tool simply stays unavailable
+# or degraded until its bootstrap succeeds.
+for bs in plugins/built-in-*/bootstrap.sh; do
+  [ -e "$bs" ] || continue
+  pdir="$(dirname "$bs")"
+  if [ "$REBUILD" = "1" ] || [ ! -x "$pdir/.venv/bin/python" ]; then
+    echo "Bootstrapping built-in plug-in: $pdir"
+    ( cd "$pdir" && UV="${UV_BIN:-uv}" bash ./bootstrap.sh ) \
+      || echo "  bootstrap failed for $pdir — continuing (tool may be unavailable until fixed)." >&2
+  fi
+done
 
 # --- Decide whether the SPA needs (re)building ---
 # Rebuild when: no build exists, --rebuild was passed, or any web source file is

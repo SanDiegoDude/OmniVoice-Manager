@@ -55,6 +55,23 @@ class PluginManifest:
     capabilities: List[str] = field(default_factory=list)
     needs: Dict[str, Any] = field(default_factory=dict)
     ui: Dict[str, Any] = field(default_factory=dict)
+    # Plug-in class: "tool" (default — has a UI / creative flow, shown in the
+    # library launcher) or "service" (headless — no modal/button; exists only to
+    # be brokered by the host via a capability). ``provides`` advertises the
+    # capability names a service offers; ``consumes`` declares which capabilities
+    # a plug-in expects to call (so the host can gate cross-plug-in use and the
+    # installer can warn on a missing dependency).
+    kind: str = "tool"
+    provides: List[str] = field(default_factory=list)
+    consumes: List[str] = field(default_factory=list)
+    # First-party plug-in that ships with the host (tracked in the core repo,
+    # bootstrapped as part of setup) rather than a third-party drop-in. Used to
+    # badge it in the UI and to skip it from third-party update flows.
+    official: bool = False
+
+    @property
+    def is_service(self) -> bool:
+        return self.kind == "service"
 
     # ---- derived paths ----
     @property
@@ -113,6 +130,10 @@ class PluginManifest:
             "capabilities": self.capabilities,
             "needs": self.needs,
             "ui": self.ui,
+            "kind": self.kind,
+            "provides": self.provides,
+            "consumes": self.consumes,
+            "official": self.official,
             "installed": self.installed,
         }
 
@@ -135,6 +156,7 @@ def load_manifest(plugin_dir: Path) -> Optional[PluginManifest]:
         "version", "description", "author", "homepage", "source", "license",
         "isolation", "entrypoint", "python", "gpu", "vram_mb", "supports_low_vram",
         "supports_cpu_offload", "capabilities", "needs", "ui",
+        "kind", "provides", "consumes", "official",
     }
     kwargs = {k: data[k] for k in known if k in data}
     return PluginManifest(

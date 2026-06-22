@@ -54,6 +54,33 @@ export interface SoundNode {
   sounds: Sound[]
 }
 
+/** Core-owned analysis schema, filled by an analyzer provider (Essentia). */
+export interface SampleAnalysis {
+  bpm: number | null
+  key: string | null
+  loudness_lufs: number | null
+  duration_s: number | null
+  danceability: number | null
+  instruments: string[]
+  genre: string[]
+  mood: string[]
+  voice_instrumental: string | null
+  extra: Record<string, unknown>
+}
+
+/** A sample's full metadata record: machine analysis + user-edited manual bag. */
+export interface SampleMeta {
+  analysis: SampleAnalysis | null
+  analyzer: string | null
+  analyzed_at: number | null
+  manual: Record<string, unknown>
+  path: string
+  name: string
+  updated_at: number | null
+  analysis_available: boolean
+  analyzing?: boolean
+}
+
 /** One declarative UI contribution a plug-in injects into a host "slot"
  * (e.g. a left-bar panel action, or an item in the track double-click menu). */
 export interface PluginContribution {
@@ -610,6 +637,16 @@ export const api = {
   /** Save a generated temp preview into the library (deferred save). */
   importTempSound: (temp: string, path: string) =>
     jfetch<Sound>('/api/sounds/import-temp', { method: 'POST', body: JSON.stringify({ temp, path }) }),
+
+  // ---- Library metadata + analysis (Essentia service plug-in) ----
+  soundMeta: (id: string) => jfetch<SampleMeta>(`/api/sounds/${id}/meta`),
+  setSoundMeta: (id: string, manual: Record<string, unknown>) =>
+    jfetch<SampleMeta>(`/api/sounds/${id}/meta`, { method: 'POST', body: JSON.stringify({ manual }) }),
+  analyzeSound: (id: string) => jfetch<SampleMeta>(`/api/sounds/${id}/analyze`, { method: 'POST' }),
+  scanSounds: () => jfetch<{ queued: number }>('/api/sounds/scan', { method: 'POST', body: '{}' }),
+  voiceMeta: (id: string) => jfetch<SampleMeta>(`/api/voices/${id}/meta`),
+  setVoiceMeta: (id: string, manual: Record<string, unknown>) =>
+    jfetch<SampleMeta>(`/api/voices/${id}/meta`, { method: 'POST', body: JSON.stringify({ manual }) }),
 
   // ---- Plug-ins (external, isolated) ----
   plugins: () => jfetch<{ plugins: Plugin[] }>('/api/plugins'),

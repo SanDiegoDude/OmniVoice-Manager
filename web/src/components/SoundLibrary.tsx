@@ -20,6 +20,7 @@ interface RowActions {
   onMove: (id: string, folder: string) => void
   onRename: (id: string, name: string) => void
   onEdit: (s: Sound) => void
+  onMeta: (s: Sound) => void
   folders: string[]
 }
 
@@ -100,6 +101,7 @@ function SoundRow({ s, ...a }: { s: Sound } & RowActions) {
             <button className="vplay" title="Move to folder…" onClick={() => setMoving(true)}>📂</button>
             <button className="vplay" title="Rename" onClick={() => setRenaming(baseName(s))}>✎</button>
             <button className="vplay" title="Edit — clean up & add transforms, save a copy or overwrite" onClick={() => a.onEdit(s)}>🎚</button>
+            <button className="vplay" title="Metadata — BPM / key / tags & details" onClick={() => a.onMeta(s)}>🏷</button>
             <button className="vplay" title="Download (honors MP3/FLAC export setting)" onClick={() => void downloadFile(`/api/sounds/${s.id}/download`, baseName(s)).catch(() => {})}>⬇</button>
             <button className="vplay" title="Delete" onClick={() => setConfirmDel(true)}>🗑</button>
           </>
@@ -153,6 +155,8 @@ export function SoundLibrary({
   onUpload,
   onRefresh,
   onGenerate,
+  onMeta,
+  onScan,
 }: {
   tree: SoundNode | null
   flat: Sound[]
@@ -172,6 +176,8 @@ export function SoundLibrary({
   onUpload: (file: File) => void
   onRefresh: () => void
   onGenerate: (pluginId: string) => void
+  onMeta: (s: Sound) => void
+  onScan: () => void
 }) {
   const [query, setQuery] = useState('')
   const [newFolder, setNewFolder] = useState<string | null>(null)
@@ -182,7 +188,7 @@ export function SoundLibrary({
   const genActions = useContributions('sound.library.action')
 
   const actions: RowActions = {
-    selected, playingUrl, hasSession, onPlay, onAddToProject, onPick, onDelete, onMove, onRename, onEdit, folders,
+    selected, playingUrl, hasSession, onPlay, onAddToProject, onPick, onDelete, onMove, onRename, onEdit, onMeta, folders,
   }
 
   const q = query.trim().toLowerCase()
@@ -204,6 +210,7 @@ export function SoundLibrary({
         </h3>
         <div className="row" style={{ gap: 4 }}>
           <button className="btn ghost sm" onClick={() => fileRef.current?.click()} title="Upload a sound file">⤴</button>
+          <button className="btn ghost sm" onClick={onScan} title="Scan & analyze — enrich any un-analyzed sounds (incl. files copied into the folder)">🔬</button>
           <button className="btn ghost sm" onClick={() => setNewFolder(newFolder == null ? '' : null)} title="New folder">📁+</button>
           <button className="btn ghost sm" onClick={onRefresh} title="Refresh">↻</button>
         </div>

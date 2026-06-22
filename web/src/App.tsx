@@ -12,6 +12,7 @@ import { VoiceLab } from './components/VoiceLab'
 import { TagLibrary } from './components/TagLibrary'
 import { VoiceLibrary } from './components/VoiceLibrary'
 import { SoundLibrary } from './components/SoundLibrary'
+import { LibraryMetadata, type MetaTarget } from './components/LibraryMetadata'
 import { SoundLab } from './components/SoundLab'
 import { ClipGrabberLab } from './components/ClipGrabberLab'
 import { AceStepLab } from './components/AceStepLab'
@@ -50,6 +51,8 @@ export default function App() {
   const [labOpen, setLabOpen] = useState(false)
   // Sample editor (transforms → save copy / overwrite) shared by both libraries.
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null)
+  // Library metadata viewer/editor (analysis + manual fields), both libraries.
+  const [metaTarget, setMetaTarget] = useState<MetaTarget | null>(null)
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [outputs, setOutputs] = useState<OutputFile[]>([])
   const [projects, setProjects] = useState<Project[]>([])
@@ -1362,6 +1365,7 @@ export default function App() {
             onMove={moveVoice}
             onRename={renameVoiceFn}
             onEdit={(v) => setEditTarget({ kind: 'voice', id: v.id, name: v.name, folder: v.folder })}
+            onMeta={(v) => setMetaTarget({ kind: 'voice', id: v.id, name: v.name })}
             onCreateFolder={createFolderFn}
             onRefresh={refreshVoices}
             onOpenLab={() => setLabOpen(true)}
@@ -1382,6 +1386,15 @@ export default function App() {
             onMove={moveSound}
             onRename={renameSound}
             onEdit={(s) => setEditTarget({ kind: 'sound', id: s.id, name: s.name, folder: s.folder })}
+            onMeta={(s) => setMetaTarget({ kind: 'sound', id: s.id, name: s.name })}
+            onScan={async () => {
+              try {
+                const { queued } = await api.scanSounds()
+                notify(queued ? `Analyzing ${queued} sound${queued === 1 ? '' : 's'}…` : 'All sounds already analyzed.', 'success')
+              } catch (e) {
+                notify(`Scan failed: ${e instanceof Error ? e.message : e}`, 'error')
+              }
+            }}
             onCreateFolder={createSoundFolder}
             onUpload={uploadSoundFn}
             onRefresh={refreshSounds}
@@ -1581,6 +1594,7 @@ export default function App() {
         onSaved={editTarget?.kind === 'sound' ? refreshSounds : refreshVoices}
         notify={notify}
       />
+      <LibraryMetadata target={metaTarget} onClose={() => setMetaTarget(null)} notify={notify} />
       {voiceImport && (
         <ProjectImportModal voices={voiceImport.voices} onImport={importVoices} onClose={() => setVoiceImport(null)} />
       )}

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import re
+import threading
 import time
 import json
 import uuid
@@ -24,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import (
     history,
+    library_meta,
     plugin_service,
     prefs,
     samples,
@@ -586,23 +588,29 @@ def create_sound_folder(payload: dict):
 @app.post("/api/sounds/move")
 def move_sound(payload: dict):
     payload = payload or {}
+    old = str(payload.get("id", ""))
     try:
-        return samples.move_sound(str(payload.get("id", "")), str(payload.get("folder", "")))
+        desc = samples.move_sound(old, str(payload.get("folder", "")))
     except FileNotFoundError:
         raise HTTPException(404, "Sound not found")
     except ValueError as e:
         raise HTTPException(400, str(e))
+    library_meta.reprice_move("sound", old, str(desc["id"]))  # content unchanged → keep analysis
+    return desc
 
 
 @app.post("/api/sounds/rename")
 def rename_sound(payload: dict):
     payload = payload or {}
+    old = str(payload.get("id", ""))
     try:
-        return samples.rename_sound(str(payload.get("id", "")), str(payload.get("name", "")))
+        desc = samples.rename_sound(old, str(payload.get("name", "")))
     except FileNotFoundError:
         raise HTTPException(404, "Sound not found")
     except ValueError as e:
         raise HTTPException(400, str(e))
+    library_meta.reprice_move("sound", old, str(desc["id"]))
+    return desc
 
 
 @app.delete("/api/sounds/{sound_id:path}")
@@ -611,6 +619,7 @@ def del_sound(sound_id: str):
         samples.delete_sound(sound_id)
     except FileNotFoundError:
         raise HTTPException(404, "Sound not found")
+    library_meta.forget_path("sound", sound_id)
     return {"ok": True}
 
 
@@ -637,9 +646,11 @@ def import_temp_sound(req: ImportTempSoundRequest):
     if not rel:
         raise HTTPException(400, "A save path is required")
     try:
-        return samples.import_file(src, rel)
+        desc = samples.import_file(src, rel)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    _analyze_sound_async(str(desc["id"]))
+    return desc
 
 
 def _process_sound_source(req: SoundTransformRequest) -> np.ndarray:
@@ -686,12 +697,16 @@ def transform_sound(req: SoundTransformRequest):
                 samples.delete_sound(rel)
             except Exception:  # noqa: BLE001
                 pass
+        library_meta.forget_path("sound", rel)  # content changed → re-analyze
+        _analyze_sound_async(str(desc["id"]))
         return desc
 
     target = (req.save_as or "").strip()
     if not target:
         raise HTTPException(400, "A save name is required")
-    return samples.save_sound(target, audio, 24000)
+    desc = samples.save_sound(target, audio, 24000)
+    _analyze_sound_async(str(desc["id"]))
+    return desc
 
 
 @app.post("/api/sounds/upload")
@@ -712,7 +727,146 @@ async def upload_sound(file: UploadFile = File(...), folder: str = Form("")):
             tmp.unlink()
         except OSError:
             pass
+    _analyze_sound_async(str(desc["id"]))
     return desc
+
+
+# ---------------------------------------------------------------------------
+# Library metadata + analysis (Essentia service plug-in via the capability hook).
+# The analyzer enriches the *sample record* (the library is the integration bus);
+# consumers read cached metadata rather than calling a plug-in live.
+# ---------------------------------------------------------------------------
+_ANALYZE_CAP = "analyze_audio"
+_analyze_pending: set[str] = set()
+_analyze_lock = threading.Lock()
+
+
+def _analysis_available() -> bool:
+    """True when an installed plug-in provides the analyze capability."""
+    pid = plugin_host.resolve_capability(_ANALYZE_CAP)
+    if not pid:
+        return False
+    try:
+        return plugin_host.get(pid).installed
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _analyze_sound(sound_id: str) -> dict:
+    """Run the analyzer on one sound and persist onto its library record."""
+    path = samples.resolve_sound_path(sound_id)
+    res = plugin_host.call_capability(_ANALYZE_CAP, {"path": str(path)})
+    name = str(Path(sound_id).with_suffix(""))
+    return library_meta.set_analysis(
+        "sound", path, sound_id, name, res or {}, analyzer=plugin_host.resolve_capability(_ANALYZE_CAP) or ""
+    )
+
+
+def _analyze_sound_async(sound_id: str) -> None:
+    """Fire-and-forget enrichment on ingest — never blocks the add response, and
+    never the creative flow (the analyzer is a CPU service in its own lane)."""
+    if not sound_id or not _analysis_available():
+        return
+    with _analyze_lock:
+        if sound_id in _analyze_pending:
+            return
+        _analyze_pending.add(sound_id)
+
+    def work():
+        try:
+            _analyze_sound(sound_id)
+        except Exception as e:  # noqa: BLE001
+            print(f"[analyze] {sound_id}: {type(e).__name__}: {e}", flush=True)
+        finally:
+            with _analyze_lock:
+                _analyze_pending.discard(sound_id)
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+def _meta_response(record: dict) -> dict:
+    return {**record, "analysis_available": _analysis_available()}
+
+
+@app.get("/api/sounds/{sound_id:path}/meta")
+def get_sound_meta(sound_id: str):
+    try:
+        path = samples.resolve_sound_path(sound_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Sound not found")
+    rec = library_meta.get("sound", path, sound_id, str(Path(sound_id).with_suffix("")))
+    return {**_meta_response(rec), "analyzing": sound_id in _analyze_pending}
+
+
+@app.post("/api/sounds/{sound_id:path}/meta")
+def set_sound_meta(sound_id: str, payload: dict):
+    try:
+        path = samples.resolve_sound_path(sound_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Sound not found")
+    fields = (payload or {}).get("manual")
+    if not isinstance(fields, dict):
+        raise HTTPException(400, "Expected a 'manual' object.")
+    rec = library_meta.set_manual("sound", path, sound_id, str(Path(sound_id).with_suffix("")), fields)
+    return _meta_response(rec)
+
+
+@app.post("/api/sounds/{sound_id:path}/analyze")
+def analyze_sound(sound_id: str):
+    if not _analysis_available():
+        raise HTTPException(409, "No analyzer is installed (run the built-in Essentia analyzer's bootstrap).")
+    try:
+        samples.resolve_sound_path(sound_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Sound not found")
+    try:
+        return _meta_response(_analyze_sound(sound_id))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Analysis failed: {e}")
+
+
+@app.post("/api/sounds/scan")
+def scan_sounds(payload: dict | None = None):
+    """Adopt/enrich: find library sounds with no analysis yet (incl. files copied
+    straight into the dir) and analyze them in the background. Returns the count
+    queued so the UI can show progress by polling each item's /meta."""
+    if not _analysis_available():
+        raise HTTPException(409, "No analyzer is installed (run the built-in Essentia analyzer's bootstrap).")
+    pending = []
+    for s in samples.list_sounds():
+        sid = str(s["id"])
+        try:
+            path = samples.resolve_sound_path(sid)
+        except FileNotFoundError:
+            continue
+        if not library_meta.has_analysis("sound", path, sid):
+            pending.append(sid)
+    for sid in pending:
+        _analyze_sound_async(sid)
+    return {"queued": len(pending)}
+
+
+@app.get("/api/voices/{voice_id:path}/meta")
+def get_voice_meta(voice_id: str):
+    try:
+        path = voices.resolve_voice_path(voice_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Voice not found")
+    rec = library_meta.get("voice", path, voice_id, str(Path(voice_id).with_suffix("")))
+    return _meta_response(rec)
+
+
+@app.post("/api/voices/{voice_id:path}/meta")
+def set_voice_meta(voice_id: str, payload: dict):
+    try:
+        path = voices.resolve_voice_path(voice_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Voice not found")
+    fields = (payload or {}).get("manual")
+    if not isinstance(fields, dict):
+        raise HTTPException(400, "Expected a 'manual' object.")
+    rec = library_meta.set_manual("voice", path, voice_id, str(Path(voice_id).with_suffix("")), fields)
+    return _meta_response(rec)
 
 
 # ---------------------------------------------------------------------------

@@ -284,12 +284,28 @@ class PluginHost:
         self.plugins_dir = Path(plugins_dir)
         self.tmp_root = Path(tmp_root)
         self.log_root = Path(log_root)
-        self._host_hooks = host_hooks or {}
+        self._host_hooks = dict(host_hooks or {})
         self._is_lod = is_lod or (lambda: False)
         self._free_host_gpu = free_host_gpu
         self._manifests: Dict[str, PluginManifest] = {}
         self._sidecars: Dict[str, _Sidecar] = {}
         self._lock = threading.Lock()
+        # ---- service lane ----
+        # Service (headless, CPU) plug-ins run OUTSIDE the GPU-serialization lock
+        # so enrichment never disturbs a resident GPU plug-in or the creative
+        # flow. They live in their own sidecar dict, are kept warm, and are
+        # serialized among themselves by `_svc_lock`. `_providers` maps a
+        # capability name → the plug-in that provides it. `_svc_local` is a
+        # thread-local re-entrancy/cycle guard: v1 is depth-1 (a service can be
+        # called, but can't itself call a capability), which also makes cycles
+        # impossible without touching the GPU lock.
+        self._providers: Dict[str, str] = {}
+        self._svc_sidecars: Dict[str, _Sidecar] = {}
+        self._svc_lock = threading.Lock()
+        self._svc_local = threading.local()
+        # Built-in host hook: let core or a plug-in request a capability and have
+        # the host broker it to the registered provider (never peer-to-peer).
+        self._host_hooks.setdefault("invoke_capability", self._hook_invoke_capability)
         # Single-instance enforcement: a plug-in may only have ONE task in flight
         # at a time (one process, one job). `_active` tracks plug-ins currently
         # running a command; it's guarded by the fast `_active_lock` so a second
@@ -314,6 +330,17 @@ class PluginHost:
                 if m is not None:
                     found[m.id] = m
         self._manifests = found
+        # Capability registry: capability name → provider plug-in id. Service
+        # plug-ins win over tools when both advertise the same capability; within
+        # a class, first by sorted id (deterministic). A provider must list the
+        # capability in BOTH `provides` (the contract) and `capabilities` (the
+        # invokable command) — the command name equals the capability name.
+        providers: Dict[str, str] = {}
+        for m in sorted(found.values(), key=lambda x: (not x.is_service, x.id)):
+            for cap in m.provides:
+                if cap in m.capabilities and cap not in providers:
+                    providers[cap] = m.id
+        self._providers = providers
 
     def _reap_orphan_sidecars(self) -> None:
         """Kill leftover sidecar processes from a prior manager instance.
@@ -405,6 +432,17 @@ class PluginHost:
                     self._stop_sidecar(pid)
             else:
                 self._stop_sidecar(plugin_id)
+        # Service sidecars live in their own lane / lock.
+        with self._svc_lock:
+            if plugin_id is None:
+                for pid in list(self._svc_sidecars):
+                    sc = self._svc_sidecars.pop(pid, None)
+                    if sc is not None:
+                        sc.stop()
+            else:
+                sc = self._svc_sidecars.pop(plugin_id, None)
+                if sc is not None:
+                    sc.stop()
 
     def free_gpu(self) -> None:
         """Release VRAM held by GPU plug-in sidecars — the symmetric counterpart
@@ -472,6 +510,75 @@ class PluginHost:
             if gate:
                 with self._active_lock:
                     self._active.discard(plugin_id)
+
+    # ---- capability brokering (service lane) ----
+    def resolve_capability(self, capability: str) -> Optional[str]:
+        """The plug-in id registered to provide ``capability``, or None."""
+        return self._providers.get(capability)
+
+    def _ensure_svc_sidecar(self, m: PluginManifest) -> _Sidecar:
+        sc = self._svc_sidecars.get(m.id)
+        if sc is not None and sc.alive:
+            return sc
+        sc = _Sidecar(
+            m,
+            sdk_dir=_SDK_DIR,
+            tmp_dir=self.tmp_root / m.id,
+            log_path=self.log_root / f"{m.id}.log",
+        )
+        sc.start()
+        self._svc_sidecars[m.id] = sc
+        return sc
+
+    def call_capability(
+        self,
+        capability: str,
+        payload: Optional[Dict[str, Any]] = None,
+        progress_cb: ProgressCb = None,
+    ) -> Dict[str, Any]:
+        """Broker a capability to its registered provider — usable by core code
+        and (via the ``invoke_capability`` hook) by other plug-ins.
+
+        Runs in the **service lane**: it does NOT take the GPU-serialization lock
+        and does NOT free the host GPU, so a CPU service (e.g. the Essentia
+        analyzer) can run concurrently with a resident GPU plug-in. v1 constraints
+        keep this provably safe: the provider must be a non-GPU plug-in, and calls
+        cannot nest (depth-1) — which also rules out cycles."""
+        provider_id = self._providers.get(capability)
+        if not provider_id:
+            raise PluginError(f"No plug-in provides capability '{capability}'.")
+        m = self.get(provider_id)
+        if not m.installed:
+            raise PluginError(
+                f"Provider '{m.name}' for '{capability}' is not installed. Run its bootstrap script."
+            )
+        if m.gpu:
+            # v1: GPU providers would need the GPU mutex (model churn). Deferred —
+            # GPU analyzers belong in ingest/idle enrichment, not this live lane.
+            raise PluginError(
+                f"Capability '{capability}' is provided by a GPU plug-in; live brokering is CPU-only in v1."
+            )
+        if getattr(self._svc_local, "active", False):
+            raise PluginError(
+                "Capability calls cannot nest (v1 is depth-1): a service plug-in "
+                "may be called but cannot itself call a capability."
+            )
+        with self._svc_lock:
+            self._svc_local.active = True
+            try:
+                sc = self._ensure_svc_sidecar(m)
+                return sc.request(capability, payload or {}, progress_cb, self._host_hooks, provider_id)
+            finally:
+                self._svc_local.active = False
+
+    def _hook_invoke_capability(self, caller_id: str, params: Dict[str, Any]) -> Any:
+        """Host hook backing ``ctx.host_call('invoke_capability', capability=…,
+        payload=…)`` so one plug-in can request another's capability, brokered by
+        the host."""
+        capability = str(params.get("capability") or "").strip()
+        if not capability:
+            raise PluginError("invoke_capability requires a 'capability' name.")
+        return self.call_capability(capability, params.get("payload") or {})
 
     def is_busy(self, plugin_id: str) -> bool:
         """True while the plug-in has a task in flight (single-instance gate)."""
