@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, type Job, type Plugin, type Sound } from '../api'
 import ToolModal from './ToolModal'
 import { AudioPlayer, type AudioPlayerHandle } from './AudioPlayer'
+import { usePersistentString } from '../uiState'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -62,6 +63,9 @@ export function AceStepLab({
   const [writingLyrics, setWritingLyrics] = useState(false)
 
   // Settings
+  // DiT decoder — remembered across modal opens. Turbo (2B) is the fast default;
+  // XL (4B) is higher quality but needs ~20 GB VRAM and a ~9 GB first-use pull.
+  const [ditModel, setDitModel] = usePersistentString('ov-acestep-dit-model', 'acestep-v15-turbo')
   const [advanced, setAdvanced] = useState(false)
   const [duration, setDuration] = useState('')   // blank = auto
   const [steps, setSteps] = useState('8')
@@ -203,12 +207,15 @@ export function AceStepLab({
   // keywords — the structured guidance the model responds to well. Runs through
   // OmniVoice's Script-AI provider (host `reprompt` hook); fills the boxes so the
   // user can review & edit before generating.
-  const writeLyrics = async () => {
-    if (writingLyrics || phase === 'generating' || !installed) return
-    if (!scriptConfigured) { notify('Set up a Script-AI provider in settings to use SongCraft.'); return }
+  // Returns what it wrote ({ caption, lyrics, bpm }) so callers like "Feeling
+  // lucky" can generate immediately without waiting for React state to flush.
+  type Written = { caption: string; lyrics: string; bpm: string }
+  const writeLyrics = async (): Promise<Written | null> => {
+    if (writingLyrics || phase === 'generating' || !installed) return null
+    if (!scriptConfigured) { notify('Set up a Script-AI provider in settings to use SongCraft.'); return null }
     const idea = prompt.trim()
     const draft = lyrics.trim()
-    if (!idea && !draft) { notify('Describe the song you want (or paste a rough draft) first.'); return }
+    if (!idea && !draft) { notify('Describe the song you want (or paste a rough draft) first.'); return null }
 
     // The brief is the user's idea; fold the current style box in as direction
     // (so editing the style and re-running steers the next pass).
@@ -228,13 +235,14 @@ export function AceStepLab({
         ref_mode: refMode,
       })
       for (;;) {
-        if (cancelled.current) return
+        if (cancelled.current) return null
         const j = await api.job(job_id)
         if (j.status === 'done') {
           const r = (j.result || {}) as {
             title?: string; lyrics?: string; key?: string; bpm?: number
             song_profile?: string; vocal_profile?: string; tags?: string[]
           }
+          const nextLyrics = r.lyrics || lyrics
           if (r.lyrics) setLyrics(r.lyrics)
           if (r.title) {
             setTitle(r.title)
@@ -242,35 +250,48 @@ export function AceStepLab({
           }
           // Set/update the style caption from SongCraft's profile + keywords —
           // this is the guidance ACE-Step's planner keys off.
+          let nextCaption = caption
           if (r.song_profile || (r.tags && r.tags.length)) {
             const bits: string[] = []
             if (r.song_profile) bits.push(r.song_profile)
             if (r.vocal_profile) bits.push(r.vocal_profile)
             if (r.key) bits.push(`Key: ${r.key}.`)
             if (r.tags && r.tags.length) bits.push(`Style: ${r.tags.join(', ')}.`)
-            if (bits.length) setCaption(bits.join(' '))
+            if (bits.length) { nextCaption = bits.join(' '); setCaption(nextCaption) }
           }
+          let nextBpm = bpm
           if (!bpm.trim() && typeof r.bpm === 'number' && r.bpm > 0) {
-            setBpm(String(r.bpm))
+            nextBpm = String(r.bpm)
+            setBpm(nextBpm)
             setAdvanced(true)
           }
           notify(r.title ? `SongCraft wrote “${r.title}”` : 'SongCraft updated the song')
-          break
+          return { caption: nextCaption, lyrics: nextLyrics, bpm: nextBpm }
         }
         if (j.status === 'error') throw new Error(j.error || 'SongCraft failed')
         await sleep(700)
       }
     } catch (e) {
       notify(`SongCraft: ${(e as Error).message}`)
+      return null
     } finally {
       setWritingLyrics(false)
     }
   }
 
-  const runGenerate = async (forceRandomSeed: boolean) => {
+  // "Feeling lucky": write the song with SongCraft, then immediately generate it
+  // (fresh seed) — mirrors the main UI's write+speak lucky button. Uses the
+  // freshly-written values directly so it doesn't race React state.
+  const handleLucky = async () => {
+    if (writingLyrics || phase === 'generating' || !installed) return
+    const written = await writeLyrics()
+    if (written) await runGenerate(true, written)
+  }
+
+  const runGenerate = async (forceRandomSeed: boolean, written?: Written) => {
     // Style is the caption; fall back to the raw idea if the user skipped it.
-    const cap = caption.trim() || prompt.trim()
-    const lyr = lyrics.trim()
+    const cap = (written?.caption ?? caption).trim() || prompt.trim()
+    const lyr = (written?.lyrics ?? lyrics).trim()
     if (!cap && !lyr) { notify('Add a style description (or some lyrics) first.'); return }
     if (phase === 'generating' || !installed) return
 
@@ -279,6 +300,7 @@ export function AceStepLab({
       lyrics: lyr,
       instrumental,
       enhance,
+      dit_model: ditModel,
       ref_mode: refMode,
       ref_strength: refStrength,
       ref_cond_strength: refCond,
@@ -287,7 +309,7 @@ export function AceStepLab({
     if (Number.isFinite(dur) && dur > 0) fields.duration = dur
     const st = parseInt(steps, 10)
     if (Number.isFinite(st) && st > 0) fields.steps = st
-    const bp = parseInt(bpm, 10)
+    const bp = parseInt(written?.bpm ?? bpm, 10)
     if (Number.isFinite(bp) && bp > 0) fields.bpm = bp
     if (forceRandomSeed) fields.seed = -1
     else {
@@ -428,6 +450,15 @@ export function AceStepLab({
           onClick={() => void writeLyrics()}
         >
           {writingLyrics ? '✍ Writing…' : '✨ Write with SongCraft'}
+        </button>
+        <button
+          className="btn lucky"
+          style={{ whiteSpace: 'nowrap' }}
+          disabled={busy || writingLyrics || !installed || !scriptConfigured || (!prompt.trim() && !lyrics.trim())}
+          title="Write the song with SongCraft, then generate it automatically"
+          onClick={() => void handleLucky()}
+        >
+          🍀 Feeling lucky
         </button>
         <span className="hint" style={{ flex: 1, minWidth: 200 }}>
           {scriptConfigured
@@ -592,6 +623,28 @@ export function AceStepLab({
 
       {/* 3) Settings */}
       <div className="card" style={{ marginTop: 12, padding: 12 }}>
+        <div className="row" style={{ gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+          <span className="hint">Model</span>
+          <div className="row" style={{ gap: 6 }}>
+            <button
+              className={`btn sm ${ditModel === 'acestep-v15-turbo' ? 'primary' : 'ghost'}`}
+              disabled={busy}
+              title="2B turbo decoder — fast, the default daily driver (~4.7 GB)."
+              onClick={() => setDitModel('acestep-v15-turbo')}
+            >Turbo · 2B</button>
+            <button
+              className={`btn sm ${ditModel === 'acestep-v15-xl-turbo' ? 'primary' : 'ghost'}`}
+              disabled={busy}
+              title="4B XL turbo decoder — higher quality; needs ~20 GB VRAM (12 GB with offload)."
+              onClick={() => setDitModel('acestep-v15-xl-turbo')}
+            >XL · 4B</button>
+          </div>
+          <span className="hint" style={{ flex: 1, minWidth: 220 }}>
+            {ditModel === 'acestep-v15-xl-turbo'
+              ? 'Higher-quality 4B decoder · ~20 GB VRAM (12 GB w/ offload) · first use downloads ~9 GB · switching reloads the model.'
+              : 'Fast 2B decoder · the default daily driver.'}
+          </span>
+        </div>
         <div className="row" style={{ gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           <label className="row" style={{ gap: 6, alignItems: 'center' }}>
             <span className="hint">Duration (s)</span>

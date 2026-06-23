@@ -13,3 +13,14 @@ export function usePersistentBool(key: string, def: boolean) {
   }
   return [v, set] as const
 }
+
+/** A string that persists to localStorage — used for sticky dropdown/segmented
+ * choices (e.g. the ACE-Step model selector) so the pick survives modal reopen. */
+export function usePersistentString(key: string, def: string) {
+  const [v, setV] = useState(() => localStorage.getItem(key) ?? def)
+  const set = (next: string) => {
+    localStorage.setItem(key, next)
+    setV(next)
+  }
+  return [v, set] as const
+}
