@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from . import actionhist, samples, scripts_ai, service, sessions, voices
+from . import actionhist, library_meta, samples, scripts_ai, service, sessions, voices
 from .config import DATA_DIR, settings
 
 TMP_DIR = DATA_DIR / "tmp"
@@ -87,12 +87,43 @@ def build_host_hooks() -> Dict[str, Callable[[str, Dict[str, Any]], Any]]:
     def get_project_data(plugin_id: str, params: Dict[str, Any]) -> Any:
         return sessions.get_plugin_data(params["session_id"], plugin_id)
 
+    def get_library_meta(plugin_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Look up stored analysis/manual metadata for a library reference handle
+        (``sound:<id>`` / ``voice:<id>``). Best-effort and never raises — so a
+        sidecar can *silently* fold a reference track's analyzed profile (genre,
+        key, instruments, mood…) into its own prompt. Uploads (``temp:``) and
+        unknown/empty handles return ``{}`` (nothing to add). The handle stays
+        opaque to the browser; the host owns the path resolution."""
+        handle = str((params or {}).get("handle") or "").strip()
+        kind, _, rest = handle.partition(":")
+        rest = rest.strip()
+        if not rest or kind not in ("sound", "voice"):
+            return {}
+        try:
+            abspath = (
+                Path(samples.resolve_sound_path(rest)) if kind == "sound"
+                else Path(voices.resolve_voice_path(rest))
+            )
+            name = Path(rest).with_suffix("").name
+            rec = library_meta.get(kind, abspath, rest, name)
+        except Exception:  # noqa: BLE001 — missing/invalid handle → no metadata
+            return {}
+        analysis = rec.get("analysis") or {}
+        return {
+            "name": rec.get("name") or name,
+            "library": kind,
+            "analyzed": bool(analysis),
+            "analysis": analysis,
+            "manual": rec.get("manual") or {},
+        }
+
     return {
         "reprompt": reprompt,
         "save_sound": save_sound,
         "save_voice": save_voice,
         "set_project_data": set_project_data,
         "get_project_data": get_project_data,
+        "get_library_meta": get_library_meta,
     }
 
 

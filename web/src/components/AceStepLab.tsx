@@ -79,6 +79,8 @@ export function AceStepLab({
 
   // Result / editor
   const [workingUrl, setWorkingUrl] = useState<string | null>(null)
+  // Auto-play only when a fresh take lands (generate/reroll) — not on stamp-trim.
+  const [autoPlayNext, setAutoPlayNext] = useState(false)
   const [title, setTitle] = useState('track')
   const [usedSeed, setUsedSeed] = useState<number | null>(null)
   const [speed, setSpeed] = useState(1)
@@ -219,6 +221,11 @@ export function AceStepLab({
         caption: brief,
         lyrics: draft,
         instrumental,
+        // Silently anchor the song to an attached library track's analyzed
+        // profile (cover/style hint) so SongCraft honors its instrumentation,
+        // key and feel. Uploads (temp:) and unanalyzed refs simply add nothing.
+        reference_audio: refSrc?.handle ?? null,
+        ref_mode: refMode,
       })
       for (;;) {
         if (cancelled.current) return
@@ -307,6 +314,7 @@ export function AceStepLab({
           const r = (j.result || {}) as { audio_url?: string; prompt?: string; seed?: number }
           if (!r.audio_url) throw new Error('No audio came back from generation.')
           revokeObjectUrl()
+          setAutoPlayNext(true)
           setWorkingUrl(r.audio_url)
           const t = cap || String(r.prompt || 'track')
           setTitle(t)
@@ -336,6 +344,7 @@ export function AceStepLab({
     objectUrlRef.current = u
     setTrim(null)
     setSpeed(1)
+    setAutoPlayNext(false)
     setWorkingUrl(u)
   }
 
@@ -632,7 +641,7 @@ export function AceStepLab({
               key={workingUrl}
               ref={previewRef}
               url={workingUrl}
-              autoPlay={false}
+              autoPlay={autoPlayNext}
               showDownload={false}
               playbackRate={speed}
               filename={`${cleanName()}.wav`}

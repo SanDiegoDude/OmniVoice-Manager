@@ -1,0 +1,5 @@
+# Isolated venv + bootstrap-downloaded model checkpoint — never tracked.
+.venv/
+models/
+__pycache__/
+*.pyc
