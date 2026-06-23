@@ -52,13 +52,21 @@ if [ -n "$pids" ]; then
   sleep 1
 fi
 
-# --- Locate uv (PATH + the usual install locations) ---
+# --- Locate a WORKING uv (PATH + the usual install locations + pyenv) ---
 # The launcher normally runs off .venv without uv on PATH, so look around before
-# giving up. Echoes the path (empty if not found).
+# giving up. We don't trust `command -v` alone: pyenv (and similar) can put a
+# *shim* named `uv` on PATH that refuses to run unless the active version is the
+# one uv was installed into ("pyenv: uv: command not found"). So we verify each
+# candidate actually executes (`uv --version`) and fall back to pyenv's per-
+# version bins. Echoes the path (empty if none works).
+uv_ok() { [ -n "${1:-}" ] && [ -x "$1" ] && "$1" --version >/dev/null 2>&1; }
 find_uv() {
-  if command -v uv >/dev/null 2>&1; then command -v uv; return; fi
-  for c in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" "/usr/local/bin/uv" ".venv/bin/uv"; do
-    [ -x "$c" ] && { echo "$c"; return; }
+  local c path
+  path="$(command -v uv 2>/dev/null || true)"
+  uv_ok "$path" && { echo "$path"; return; }
+  for c in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" "/usr/local/bin/uv" \
+           "/opt/homebrew/bin/uv" ".venv/bin/uv" "$HOME"/.pyenv/versions/*/bin/uv; do
+    uv_ok "$c" && { echo "$c"; return; }
   done
 }
 UV_BIN="$(find_uv || true)"

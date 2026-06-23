@@ -26,8 +26,20 @@ warn() { printf '\n\033[1;33m[audio-analyzer-bootstrap]\033[0m %s\n' "$*"; }
 OS="$(uname -s)"; ARCH="$(uname -m)"
 log "Target: $OS/$ARCH — librosa + pyloudnorm + PANNs (CPU PyTorch). Universal."
 
-UV="${UV:-uv}"
-command -v "$UV" >/dev/null 2>&1 || { warn "uv not found on PATH (set UV=/path/to/uv)."; exit 1; }
+# Resolve a *working* uv: honor $UV, else PATH, else common locations / pyenv.
+# A pyenv `uv` shim can sit on PATH yet refuse to run unless the active version
+# matches ("pyenv: uv: command not found"), so verify each candidate executes.
+uv_ok() { [ -n "${1:-}" ] && [ -x "$1" ] && "$1" --version >/dev/null 2>&1; }
+resolve_uv() {
+  local c
+  for c in "${UV:-}" "$(command -v uv 2>/dev/null || true)" \
+           "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" "/usr/local/bin/uv" \
+           "/opt/homebrew/bin/uv" "$HOME"/.pyenv/versions/*/bin/uv; do
+    uv_ok "$c" && { echo "$c"; return; }
+  done
+}
+UV="$(resolve_uv || true)"
+[ -n "$UV" ] || { warn "no working uv found (set UV=/path/to/uv, or install uv)."; exit 1; }
 
 # ── venv ──────────────────────────────────────────────────────────────────────
 if [[ ! -x "$VENV/bin/python" ]]; then
