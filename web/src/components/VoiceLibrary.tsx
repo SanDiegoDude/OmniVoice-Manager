@@ -263,7 +263,7 @@ export function VoiceLibrary({
           ) : (
             <div className="empty">No voices match “{query}”.</div>
           )
-        ) : tree && count > 0 ? (
+        ) : tree && (count > 0 || Object.keys(tree.folders).length > 0) ? (
           <div className="tree">
             <FolderNode node={tree} depth={0} actions={actions} />
           </div>

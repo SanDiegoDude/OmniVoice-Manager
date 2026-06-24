@@ -258,7 +258,7 @@ export function SoundLibrary({
           ) : (
             <div className="empty">No sounds match “{query}”.</div>
           )
-        ) : tree && count > 0 ? (
+        ) : tree && (count > 0 || Object.keys(tree.folders).length > 0) ? (
           <div className="tree"><FolderNode node={tree} depth={0} actions={actions} /></div>
         ) : (
           <div className="empty">
