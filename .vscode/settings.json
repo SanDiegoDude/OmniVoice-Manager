@@ -1,0 +1,30 @@
+{
+  // Keep large, bootstrap-generated, or high-churn directories out of the file
+  // watcher so Cursor never hits its "too many changes" ceiling (which can start
+  // untracking files). These are all regenerated/downloaded, never hand-edited:
+  //   - model checkpoints + weights (ACE-Step XL is ~20 GB, PANNs ~300 MB)
+  //   - per-plugin isolated venvs and vendored upstream repos
+  //   - runtime data (outputs, tmp, plugin logs/venvs) and build caches
+  "files.watcherExclude": {
+    "**/.git/**": true,
+    "**/.venv/**": true,
+    "**/__pycache__/**": true,
+    "**/node_modules/**": true,
+    "**/vendor/**": true,
+    "**/checkpoints/**": true,
+    "**/models/**": true,
+    "**/data/**": true,
+    "**/output/**": true,
+    "**/web/dist/**": true
+  },
+  // Mirror the heaviest of these in search so indexing stays fast too.
+  "search.exclude": {
+    "**/.venv/**": true,
+    "**/vendor/**": true,
+    "**/checkpoints/**": true,
+    "**/models/**": true,
+    "**/data/**": true,
+    "**/output/**": true,
+    "**/web/dist/**": true
+  }
+}
