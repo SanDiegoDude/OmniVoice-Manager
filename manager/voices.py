@@ -141,7 +141,10 @@ def voice_tree() -> Dict[str, object]:
 
 def resolve_voice_path(voice_id: str) -> Path:
     path = _safe_relpath(voice_id)
-    if not path.exists():
+    # Require an actual file: a category folder (e.g. "voiceovers") also "exists",
+    # and passing a directory to the audio loader crashes ffmpeg with
+    # "Is a directory" -> HTTP 500. Treat non-files as "not found" instead.
+    if not path.is_file():
         raise FileNotFoundError(f"Voice not found: {voice_id}")
     return path
 
