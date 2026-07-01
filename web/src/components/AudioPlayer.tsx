@@ -1,5 +1,6 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { claimPlayback, releasePlayback } from '../audioBus'
+import { resolveUrl } from '../basePath'
 
 export interface AudioPlayerHandle {
   seek: (t: number) => void
@@ -745,7 +746,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, {
         trim · shift+scroll to zoom · middle-drag to pan
       </div>
 
-      <audio ref={audioElRef} src={url} preload="auto" crossOrigin="anonymous" onEnded={handleEnded} style={{ display: 'none' }} />
+      <audio ref={audioElRef} src={resolveUrl(url)} preload="auto" crossOrigin="anonymous" onEnded={handleEnded} style={{ display: 'none' }} />
 
       <div className="row wrap" style={{ gap: 16, marginTop: 10 }}>
         <div style={{ flex: 1, minWidth: 180 }}>

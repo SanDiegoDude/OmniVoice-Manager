@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
+import { resolveUrl } from '../basePath'
 import type { MultitrackSegment, MultitrackSession, MultitrackTrack, SpeakerConfig, Voice, VocalTransform } from '../api'
 import { AudioPlayer, type AudioPlayerHandle } from './AudioPlayer'
 import { blurTag, focusTag } from '../tagInject'
@@ -687,7 +688,7 @@ export function MultitrackEditor({
       }
       claimPlayback(segBusRef.current, stopSegPreview)
       a.onended = () => stopSegPreview()
-      a.src = seg.clip_url
+      a.src = resolveUrl(seg.clip_url)
       a.currentTime = 0
       a.play().then(() => setPlayingSeg(seg.index)).catch(() => stopSegPreview())
     },

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
+import { resolveUrl } from './basePath'
 import type { GenParams, GenerateBody, HistoryEntry, HistoryState, ImportableVoice, Job, MultitrackSegment, MultitrackSession, OutputFile, Project, Provider, SegmentEdit, Sound, SoundNode, SpeakerConfig, SystemInfo, Voice, VocalTransform, VoiceNode } from './api'
 import { SidePanel } from './components/SidePanel'
 import ProjectImportModal from './components/ProjectImportModal'
@@ -554,7 +555,7 @@ export default function App() {
     const a = audioRef.current
     claimPlayback(previewBusRef.current, stopPlayback)
     a.onended = () => stopPlayback()
-    a.src = url
+    a.src = resolveUrl(url)
     a.play().then(() => setPlayingUrl(url)).catch(() => stopPlayback())
   }
 

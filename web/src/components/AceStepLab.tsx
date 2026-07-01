@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, type Job, type Plugin, type Sound } from '../api'
+import { resolveUrl } from '../basePath'
 import ToolModal from './ToolModal'
 import { AudioPlayer, type AudioPlayerHandle } from './AudioPlayer'
 import { usePersistentString } from '../uiState'
@@ -586,7 +587,7 @@ export function AceStepLab({
           <>
             <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 4 }}>
               <span>🎵 <b>{refSrc.name}</b></span>
-              <audio src={refSrc.url} controls style={{ height: 30, marginLeft: 'auto' }} />
+              <audio src={resolveUrl(refSrc.url)} controls style={{ height: 30, marginLeft: 'auto' }} />
               <button className="btn ghost sm" disabled={busy} onClick={() => setRefSrc(null)}>Clear</button>
             </div>
             <div className="row" style={{ gap: 12, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>

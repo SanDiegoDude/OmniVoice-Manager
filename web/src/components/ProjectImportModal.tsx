@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import ToolModal from './ToolModal'
+import { resolveUrl } from '../basePath'
 import type { ImportableVoice } from '../api'
 
 type VoicePick = { track: string; file: string; name: string; folder: string }
@@ -54,7 +55,7 @@ export default function ProjectImportModal({
       {rows.map((r, i) => (
         <div key={r.track} className="import-voice-row">
           <input type="checkbox" checked={r.selected} onChange={(e) => update(i, { selected: e.target.checked })} title="Import this voice" />
-          <audio controls src={r.preview_url} preload="none" style={{ height: 34, flex: 1, minWidth: 0 }} />
+          <audio controls src={resolveUrl(r.preview_url)} preload="none" style={{ height: 34, flex: 1, minWidth: 0 }} />
           <input
             className="input"
             placeholder="folder (optional)"

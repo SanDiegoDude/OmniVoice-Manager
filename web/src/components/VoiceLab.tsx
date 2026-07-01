@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import { api } from '../api'
+import { resolveUrl } from '../basePath'
 import type { Voice } from '../api'
 import { AudioPlayer } from './AudioPlayer'
 import { Modal, Slider, Toggle } from './ui'
@@ -210,7 +211,7 @@ export function VoiceLab({
       {previewUrl && (
         <audio
           controls
-          src={previewUrl}
+          src={resolveUrl(previewUrl)}
           style={{ width: '100%', marginBottom: 10 }}
           onPlay={(e) => {
             const el = e.currentTarget
