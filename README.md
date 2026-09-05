@@ -20,7 +20,7 @@ OmniVoice generates a single utterance per call. The Manager wraps it with every
 A fast single-page app served directly by the backend — no Gradio, no page reloads, no awkward component churn. Live job progress, persistent history, and a voice library are all first-class.
 
 ### Performance Transfer — direct the voice with your own (V2V)
-Text gives you a *reading*; a performance gives you a *performance*. Record (or upload) yourself acting a line and the Manager re-renders it in the target voice by seeding OmniVoice's masked-diffusion token grid with your take — no fine-tuning, no separate conversion model.
+Text gives you a *reading*; a performance gives you a *performance*. Record (or upload) yourself acting a line — or hand it a clip already on the timeline with **📥 Use current** — and the Manager re-renders it in the target voice by seeding OmniVoice's masked-diffusion token grid with your take — no fine-tuning, no separate conversion model.
 
 - **🎭 Character swap** — the target voice reads your line with *its own* mannerisms and delivery (your timing survives). **🎤 Voice swap** — your exact delivery and cadence in their timbre. Each with a 1–5 strength dial.
 - **Record Dialog** — double-click any track and speak a brand-new line straight into the timeline; Auto-Whisper transcribes it, one button renders it.

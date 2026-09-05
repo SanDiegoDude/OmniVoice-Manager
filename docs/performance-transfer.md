@@ -29,7 +29,8 @@ Open it from a clip's menu (**🎙 Record vocal performance…**) or by double-c
 
 Workflow niceties:
 
-- **Record / re-record / upload**, with **Isolate vocals** and **Dereverb** cleanup (default on for fresh takes; their state is preserved when you re-open a saved performance) and client-side level normalization — quiet mics are handled.
+- **Record / re-record / upload / 📥 Use current**, with **Isolate vocals** and **Dereverb** cleanup (default on for fresh takes; their state is preserved when you re-open a saved performance) and client-side level normalization — quiet mics are handled.
+- **📥 Use current** takes the clip already on the timeline as the performance source — no mic, no file. You get the slice exactly as it sits in the mix (its trim, speed and level baked in), so what you hear on the track is what gets performed. Handy for re-voicing a line you already have, layering another pass over an earlier render, or putting an imported clip through a cast voice. From there it's an ordinary take: Whisper, transforms, mode/strength and **⚡ Render** all behave the same.
 - **3-2-1 count-in** (optional beep countdown) and **Auto-Whisper** are both sticky preferences, synced between this modal and the Voice Clone tab — so a fluffed take no longer auto-transcribes against your wishes.
 - **Cancel** (or **Esc**) drops a take mid-record; **Space** stops recording just like clicking stop (without also triggering the player). The dialogue box holds its position while recording so the line you're reading doesn't jump.
 - **⚡ Render in-modal** — hear the result immediately, with the output's trim/gain applying back to the clip on Save. Renders auto-play.

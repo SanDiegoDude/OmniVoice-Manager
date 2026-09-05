@@ -25,7 +25,7 @@ OmniVoice generates one utterance per call. The Manager turns that primitive int
 | --- | --- |
 | **Segment / clip** | One generated utterance on the timeline; independently regenerable |
 | **Channel / track** | A speaker lane (generative voice) or an uploaded-audio lane |
-| **Take** | Your recorded/uploaded performance audio inside the dialogue modal |
+| **Take** | The performance audio inside the dialogue modal — recorded, uploaded, or pulled from the clip itself with **📥 Use current** |
 | **Capture performance** | Modal toggle: ON = your take drives a V2V transfer; OFF = the recording is just dictation for plain TTS |
 | **Character swap** | V2V mode: the target voice's own mannerisms take over your read (timing preserved) |
 | **Voice swap** | V2V mode: pure timbre swap — your exact delivery and cadence in the target voice |

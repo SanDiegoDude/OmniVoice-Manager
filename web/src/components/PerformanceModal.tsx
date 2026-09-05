@@ -125,7 +125,7 @@ export default function PerformanceModal({
   const countInRef = useRef<CountIn | null>(null)
   const cancelledRef = useRef(false)
   const [processing, setProcessing] = useState(false)
-  const [busy, setBusy] = useState<'whisper' | 'save' | 'render' | null>(null)
+  const [busy, setBusy] = useState<'whisper' | 'save' | 'render' | 'current' | null>(null)
   const [error, setError] = useState<string | null>(null)
   // Rendered output preview (trim/gain here apply to the segment on save).
   // Initial trim is copied from the take's trim lines at render time.
@@ -537,6 +537,25 @@ export default function PerformanceModal({
 
   const pickFile = (f: File | null) => {
     if (f) void adoptBlob(f)
+  }
+
+  // Adopt the clip that's already on the timeline as the take. clip_url is the
+  // slice as it sits in the mix (trim/speed/level baked), so what you hear on
+  // the track is what gets performed. From there it's the upload path exactly —
+  // decode, normalize, cleanup — so nothing downstream can tell the difference.
+  const adoptCurrentClip = async () => {
+    if (!seg) return
+    setBusy('current')
+    setError(null)
+    try {
+      const res = await fetch(seg.clip_url)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      await adoptBlob(await res.blob())
+    } catch (e) {
+      setError(`Could not load the clip audio: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setBusy(null)
+    }
   }
 
   const takeBlob = async (): Promise<Blob | null> => {
@@ -960,6 +979,16 @@ export default function PerformanceModal({
               }}
             />
           </label>
+        )}
+        {seg && !recording && countdown === null && (
+          <button
+            className="btn sm"
+            disabled={working}
+            title="Use this clip's own audio as the take — the slice exactly as it sits in the mix (trim, speed and level baked in). No mic or file needed."
+            onClick={() => void adoptCurrentClip()}
+          >
+            {busy === 'current' ? <span className="spinner sm" /> : '📥'} Use current
+          </button>
         )}
         {recording && <span className="rec-dot" aria-label="recording" />}
         {withMic && !recording && countdown === null && (
